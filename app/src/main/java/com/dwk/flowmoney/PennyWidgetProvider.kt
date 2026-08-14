@@ -6,7 +6,6 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.util.SizeF
@@ -20,7 +19,7 @@ import java.time.YearMonth
 import java.time.ZoneId
 import kotlin.coroutines.EmptyCoroutineContext
 
-class PennyWidgetProvider : AppWidgetProvider() {
+open class PennyWidgetProvider : AppWidgetProvider() {
     override fun onReceive(
         context: Context,
         intent: Intent,
@@ -49,8 +48,10 @@ class PennyWidgetProvider : AppWidgetProvider() {
         appWidgetId: Int,
         newOptions: Bundle,
     ) {
-        launchBroadcastUpdate {
-            updateWidget(context.applicationContext, appWidgetManager, appWidgetId, newOptions)
+        if (shouldUpdateForOptionsChange(Build.VERSION.SDK_INT)) {
+            launchBroadcastUpdate {
+                updateWidget(context.applicationContext, appWidgetManager, appWidgetId, newOptions)
+            }
         }
     }
 
@@ -58,7 +59,7 @@ class PennyWidgetProvider : AppWidgetProvider() {
      * Runs a suspending update without an application-global or otherwise unowned CoroutineScope.
      * The dispatched work is structured by runBlocking, and the broadcast remains pending until it returns.
      */
-    private fun launchBroadcastUpdate(update: suspend () -> Unit) {
+    internal open fun launchBroadcastUpdate(update: suspend () -> Unit) {
         val pendingResult = goAsync()
         Dispatchers.IO.dispatch(EmptyCoroutineContext) {
             try {
@@ -91,6 +92,8 @@ class PennyWidgetProvider : AppWidgetProvider() {
             )
 
         internal fun isRefreshBroadcast(action: String?): Boolean = action in refreshBroadcasts
+
+        internal fun shouldUpdateForOptionsChange(sdkInt: Int): Boolean = sdkInt < Build.VERSION_CODES.S
 
         suspend fun refreshAll(context: Context) =
             withContext(Dispatchers.IO) {
@@ -204,25 +207,38 @@ class PennyWidgetProvider : AppWidgetProvider() {
                     ),
                 )
             } else {
-                viewsForLayout(context, summary, layoutForOptions(options, context.resources.configuration.orientation))
+                orientationViewsFor(context, summary, options)
             }
 
-        internal fun layoutForOptions(
+        internal fun orientationViewsFor(
+            context: Context,
+            summary: WidgetSummary,
             options: Bundle,
-            orientation: Int,
+        ): RemoteViews =
+            RemoteViews(
+                viewsForLayout(context, summary, landscapeLayoutForOptions(options)),
+                viewsForLayout(context, summary, portraitLayoutForOptions(options)),
+            )
+
+        internal fun landscapeLayoutForOptions(options: Bundle): Int =
+            layoutForOptionBounds(
+                options,
+                AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH,
+                AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT,
+            )
+
+        internal fun portraitLayoutForOptions(options: Bundle): Int =
+            layoutForOptionBounds(
+                options,
+                AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH,
+                AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT,
+            )
+
+        private fun layoutForOptionBounds(
+            options: Bundle,
+            widthKey: String,
+            heightKey: String,
         ): Int {
-            val widthKey =
-                if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
-                    AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH
-                } else {
-                    AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH
-                }
-            val heightKey =
-                if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
-                    AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT
-                } else {
-                    AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT
-                }
             val width = options.getInt(widthKey).takeIf { it > 0 } ?: COMPACT_WIDTH_DP
             val height = options.getInt(heightKey).takeIf { it > 0 } ?: STANDARD_HEIGHT_DP
             return layoutForSize(width, height)

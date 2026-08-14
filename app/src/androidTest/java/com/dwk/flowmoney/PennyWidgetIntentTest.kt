@@ -5,6 +5,7 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Rect
@@ -87,28 +88,93 @@ class PennyWidgetIntentTest {
     }
 
     @Test
-    fun widgetSizeSelectionUsesBothAxesAndPre31OptionBounds() {
+    fun pre31SizeSelectionUsesLandscapeAndPortraitOptionBounds() {
         assertEquals(R.layout.widget_penny_compact, PennyWidgetProvider.layoutForSize(110, 48))
         assertEquals(R.layout.widget_penny_compact, PennyWidgetProvider.layoutForSize(220, 48))
         assertEquals(R.layout.widget_penny_summary, PennyWidgetProvider.layoutForSize(110, 110))
         assertEquals(R.layout.widget_penny_summary, PennyWidgetProvider.layoutForSize(219, 110))
         assertEquals(R.layout.widget_penny_wide, PennyWidgetProvider.layoutForSize(220, 110))
 
-        val options =
+        val heightSensitiveOptions =
             Bundle().apply {
-                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 220)
-                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 220)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 110)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 110)
                 putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 48)
                 putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 110)
             }
         assertEquals(
-            R.layout.widget_penny_wide,
-            PennyWidgetProvider.layoutForOptions(options, Configuration.ORIENTATION_PORTRAIT),
+            R.layout.widget_penny_compact,
+            PennyWidgetProvider.landscapeLayoutForOptions(heightSensitiveOptions),
         )
         assertEquals(
-            R.layout.widget_penny_compact,
-            PennyWidgetProvider.layoutForOptions(options, Configuration.ORIENTATION_LANDSCAPE),
+            R.layout.widget_penny_summary,
+            PennyWidgetProvider.portraitLayoutForOptions(heightSensitiveOptions),
         )
+
+        val widthSensitiveOptions =
+            Bundle().apply {
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 110)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 220)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 110)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 110)
+            }
+        assertEquals(
+            R.layout.widget_penny_wide,
+            PennyWidgetProvider.landscapeLayoutForOptions(widthSensitiveOptions),
+        )
+        assertEquals(
+            R.layout.widget_penny_summary,
+            PennyWidgetProvider.portraitLayoutForOptions(widthSensitiveOptions),
+        )
+    }
+
+    @Test
+    fun pre31OrientationContainerSelectsLandscapeThenPortraitChildren() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val summary = WidgetSummary("This month", "\$123.45", "4 txns", "Food \$80.00")
+        val options =
+            Bundle().apply {
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 110)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 110)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 48)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 110)
+            }
+        val orientationViews = PennyWidgetProvider.orientationViewsFor(context, summary, options)
+        val landscapeContext =
+            context.createConfigurationContext(
+                Configuration(context.resources.configuration).apply {
+                    orientation = Configuration.ORIENTATION_LANDSCAPE
+                },
+            )
+        val portraitContext =
+            context.createConfigurationContext(
+                Configuration(context.resources.configuration).apply {
+                    orientation = Configuration.ORIENTATION_PORTRAIT
+                },
+            )
+
+        val landscapeRoot = orientationViews.apply(landscapeContext, null) as ViewGroup
+        val portraitRoot = orientationViews.apply(portraitContext, null) as ViewGroup
+
+        assertTrue(landscapeRoot.findViewById<View>(R.id.widget_count) == null)
+        assertEquals(
+            "4 txns · Food \$80.00",
+            portraitRoot.findViewById<TextView>(R.id.widget_count).text.toString(),
+        )
+        listOf(landscapeRoot, portraitRoot).forEach { root ->
+            assertEquals(summary.label, root.findViewById<TextView>(R.id.widget_spent_label).text.toString())
+            assertEquals(summary.amount, root.findViewById<TextView>(R.id.widget_amount).text.toString())
+            assertTrue(root.hasOnClickListeners())
+            assertTrue(root.findViewById<View>(R.id.widget_add_button).hasOnClickListeners())
+        }
+    }
+
+    @Test
+    fun optionsChangedUpdatesOnlyBeforeApi31() {
+        assertTrue(PennyWidgetProvider.shouldUpdateForOptionsChange(26))
+        assertTrue(PennyWidgetProvider.shouldUpdateForOptionsChange(30))
+        assertFalse(PennyWidgetProvider.shouldUpdateForOptionsChange(31))
+        assertFalse(PennyWidgetProvider.shouldUpdateForOptionsChange(36))
     }
 
     @Test
@@ -156,6 +222,41 @@ class PennyWidgetIntentTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun manifestRefreshActionsResolveAndRouteExplicitlyToWidgetProvider() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val component = ComponentName(context, PennyWidgetProvider::class.java)
+        val provider = RecordingPennyWidgetProvider()
+        val refreshActions =
+            listOf(
+                Intent.ACTION_DATE_CHANGED,
+                Intent.ACTION_TIME_CHANGED,
+                Intent.ACTION_TIMEZONE_CHANGED,
+                Intent.ACTION_LOCALE_CHANGED,
+            )
+
+        // Apps cannot forge these protected system broadcasts, so resolve the real manifest filter
+        // and invoke the explicitly targeted receiver to cover the app-owned delivery path.
+        refreshActions.forEachIndexed { index, action ->
+            assertReceiverDeclaresAction(context, component, action)
+            val explicitIntent = Intent(action).setComponent(component)
+            assertEquals(component, explicitIntent.component)
+            provider.onReceive(context, explicitIntent)
+            assertEquals(index + 1, provider.refreshDispatchCount)
+            assertEquals(0, provider.frameworkUpdateCount)
+        }
+
+        assertReceiverDeclaresAction(context, component, AppWidgetManager.ACTION_APPWIDGET_UPDATE)
+        provider.onReceive(
+            context,
+            Intent(AppWidgetManager.ACTION_APPWIDGET_UPDATE)
+                .setComponent(component)
+                .putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, intArrayOf(42)),
+        )
+        assertEquals(refreshActions.size, provider.refreshDispatchCount)
+        assertEquals(1, provider.frameworkUpdateCount)
     }
 
     @Test
@@ -412,6 +513,43 @@ class PennyWidgetIntentTest {
         composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("amount_display"))
         composeRule.onNodeWithTag("amount_display").assertTextContains("-$0.00")
         scenario.onActivity { it.finishAndRemoveTask() }
+    }
+
+    private class RecordingPennyWidgetProvider : PennyWidgetProvider() {
+        var refreshDispatchCount = 0
+            private set
+        var frameworkUpdateCount = 0
+            private set
+
+        override fun launchBroadcastUpdate(update: suspend () -> Unit) {
+            refreshDispatchCount += 1
+        }
+
+        override fun onUpdate(
+            context: Context,
+            appWidgetManager: AppWidgetManager,
+            appWidgetIds: IntArray,
+        ) {
+            frameworkUpdateCount += 1
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun assertReceiverDeclaresAction(
+        context: Context,
+        component: ComponentName,
+        action: String,
+    ) {
+        val match =
+            context.packageManager
+                .queryBroadcastReceivers(
+                    Intent(action).setPackage(context.packageName),
+                    PackageManager.GET_RESOLVED_FILTER,
+                ).firstOrNull {
+                    ComponentName(it.activityInfo.packageName, it.activityInfo.name) == component
+                }
+        assertTrue("$action is not declared for $component", match != null)
+        assertTrue("$action did not resolve through its manifest filter", match?.filter?.hasAction(action) == true)
     }
 
     private fun descendantBounds(
