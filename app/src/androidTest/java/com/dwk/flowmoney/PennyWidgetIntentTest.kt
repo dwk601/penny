@@ -16,6 +16,7 @@ import android.text.TextUtils
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
+import android.widget.RemoteViews
 import android.widget.TextView
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -43,6 +44,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.IOException
 
 @RunWith(AndroidJUnit4::class)
 class PennyWidgetIntentTest {
@@ -175,12 +177,30 @@ class PennyWidgetIntentTest {
                             textView = textView,
                             ellipsisPermitted = textView.id in case.permittedEllipsisIds,
                         )
-                        if (
-                            textView.id == R.id.widget_amount ||
-                            textView.id == R.id.widget_count ||
-                            textView.id == R.id.widget_categories
-                        ) {
-                            assertUniformTextMinimum(textDescription, textView, configuredContext, minimumSp = 7f)
+                        val minimumSp =
+                            when (textView.id) {
+                                R.id.widget_spent_label -> {
+                                    if (case.layoutId == R.layout.widget_penny_wide) 9f else 8f
+                                }
+
+                                R.id.widget_amount -> {
+                                    7f
+                                }
+
+                                R.id.widget_count -> {
+                                    if (case.layoutId == R.layout.widget_penny_wide) 8f else 7f
+                                }
+
+                                R.id.widget_categories -> {
+                                    7f
+                                }
+
+                                else -> {
+                                    null
+                                }
+                            }
+                        if (minimumSp != null) {
+                            assertUniformTextMinimum(textDescription, textView, configuredContext, minimumSp)
                         }
                         if (textView.id == R.id.widget_categories) {
                             assertEquals("$textDescription rows", 3, textView.layout.lineCount)
@@ -211,6 +231,149 @@ class PennyWidgetIntentTest {
                     }
                 }
             }
+        }
+    }
+
+    @Test
+    fun worstCaseSupportingTextUsesBoundedReadableTruncation() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val categoryRows =
+            listOf(
+                "Entertainment \$123,456.78",
+                "Subscriptions \$12,345.67",
+                "Transportation \$1,234.56",
+            )
+        val summary =
+            WidgetSummary(
+                label = "This month",
+                amount = "\$123,456.78",
+                compactAmount = "\$123K",
+                count = "12 txns",
+                topCategory = categoryRows.first(),
+                topCategories = categoryRows,
+            )
+        val cases =
+            listOf(
+                WidgetLayoutCase(
+                    name = "summary 110x110 worst-case support",
+                    layoutId = R.layout.widget_penny_summary,
+                    widthDp = 110,
+                    heightDp = 110,
+                    requiredText =
+                        mapOf(
+                            R.id.widget_spent_label to "This month",
+                            R.id.widget_amount to summary.amount,
+                            R.id.widget_count to "12 txns · Entertainment \$123,456.78",
+                            R.id.widget_add_button to "+",
+                        ),
+                    permittedEllipsisIds = setOf(R.id.widget_count),
+                ),
+                WidgetLayoutCase(
+                    name = "wide 220x110 worst-case support",
+                    layoutId = R.layout.widget_penny_wide,
+                    widthDp = 220,
+                    heightDp = 110,
+                    requiredText =
+                        mapOf(
+                            R.id.widget_spent_label to "This month",
+                            R.id.widget_amount to summary.amount,
+                            R.id.widget_count to "12 txns",
+                            R.id.widget_categories to categoryRows.joinToString("\n"),
+                            R.id.widget_add_button to "+",
+                        ),
+                    permittedEllipsisIds = setOf(R.id.widget_count, R.id.widget_categories),
+                ),
+            )
+
+        listOf(1f, 1.5f, 2f).forEach { fontScale ->
+            val configuration = Configuration(context.resources.configuration).apply { this.fontScale = fontScale }
+            val configuredContext = context.createConfigurationContext(configuration)
+            val density = configuredContext.resources.displayMetrics.density
+            cases.forEach { case ->
+                val description = "${case.name} at fontScale $fontScale"
+                val root =
+                    PennyWidgetProvider
+                        .viewsForLayout(configuredContext, summary, case.layoutId)
+                        .apply(configuredContext, null) as ViewGroup
+                root.measure(
+                    View.MeasureSpec.makeMeasureSpec((case.widthDp * density + 0.5f).toInt(), View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec((case.heightDp * density + 0.5f).toInt(), View.MeasureSpec.EXACTLY),
+                )
+                root.layout(0, 0, root.measuredWidth, root.measuredHeight)
+
+                val visibleChildren = visibleDescendants(root)
+                visibleChildren.forEach { child ->
+                    val bounds = descendantBounds(root, child)
+                    val childDescription = "$description ${viewDescription(configuredContext, child)}"
+                    assertTrue("$childDescription has empty bounds $bounds", bounds.width() > 0 && bounds.height() > 0)
+                    assertTrue("$childDescription starts outside the root: $bounds", bounds.left >= 0 && bounds.top >= 0)
+                    assertTrue("$childDescription exceeds the right edge: $bounds", bounds.right <= root.width)
+                    assertTrue("$childDescription exceeds the bottom edge: $bounds", bounds.bottom <= root.height)
+                }
+
+                val visibleText = visibleChildren.filterIsInstance<TextView>()
+                assertEquals("$description visible text IDs", case.requiredText.keys, visibleText.map { it.id }.toSet())
+                visibleText.forEach { textView ->
+                    val textDescription = "$description ${viewDescription(configuredContext, textView)}"
+                    assertEquals(
+                        "$textDescription keeps its complete bound value",
+                        case.requiredText.getValue(textView.id),
+                        textView.text.toString(),
+                    )
+                    assertTextFits(textDescription, textView, textView.id in case.permittedEllipsisIds)
+                }
+                visibleText.indices.forEach { firstIndex ->
+                    for (secondIndex in firstIndex + 1 until visibleText.size) {
+                        val first = visibleText[firstIndex]
+                        val second = visibleText[secondIndex]
+                        assertFalse(
+                            "$description ${viewDescription(configuredContext, first)} overlaps " +
+                                "${viewDescription(configuredContext, second)}",
+                            Rect.intersects(descendantBounds(root, first), descendantBounds(root, second)),
+                        )
+                    }
+                }
+
+                val amount = root.findViewById<TextView>(R.id.widget_amount)
+                assertEquals("$description exact amount", summary.amount, amount.text.toString())
+                assertNoEllipsis("$description amount", amount)
+                assertUniformTextMinimum("$description amount", amount, configuredContext, minimumSp = 7f)
+
+                val label = root.findViewById<TextView>(R.id.widget_spent_label)
+                val labelFloor = if (case.layoutId == R.layout.widget_penny_wide) 9f else 8f
+                assertUniformTextMinimum("$description label", label, configuredContext, labelFloor)
+
+                val count = root.findViewById<TextView>(R.id.widget_count)
+                val countFloor = if (case.layoutId == R.layout.widget_penny_wide) 8f else 7f
+                assertUniformTextMinimum("$description support", count, configuredContext, countFloor)
+                if (fontScale == 1f) {
+                    assertNoEllipsis("$description support at the default font scale", count)
+                } else if (case.layoutId == R.layout.widget_penny_summary) {
+                    assertHasEllipsis("$description support uses safe end truncation", count)
+                }
+
+                if (case.layoutId == R.layout.widget_penny_wide) {
+                    val categories = root.findViewById<TextView>(R.id.widget_categories)
+                    assertEquals("$description keeps all bound category rows", categoryRows, categories.text.lines())
+                    assertUniformTextMinimum("$description categories", categories, configuredContext, minimumSp = 7f)
+                    if (fontScale == 1f) {
+                        assertNoEllipsis("$description categories at the default font scale", categories)
+                    } else {
+                        assertHasEllipsis("$description categories use safe end truncation", categories)
+                    }
+                }
+            }
+
+            val compactRoot =
+                PennyWidgetProvider
+                    .viewsForLayout(configuredContext, summary, R.layout.widget_penny_compact)
+                    .apply(configuredContext, null) as ViewGroup
+            val compactText = visibleDescendants(compactRoot).filterIsInstance<TextView>().joinToString("\n") { it.text }
+            categoryRows.forEach { row ->
+                assertFalse("compact widget exposed private category row $row", compactText.contains(row))
+            }
+            assertTrue(compactRoot.findViewById<View>(R.id.widget_count) == null)
+            assertTrue(compactRoot.findViewById<View>(R.id.widget_categories) == null)
         }
     }
 
@@ -363,6 +526,77 @@ class PennyWidgetIntentTest {
             }
         }
     }
+
+    @Test
+    fun failedSummaryLoadBindsLocalizedUnavailableIncludingCompactTalkBack() =
+        runBlocking {
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val unavailable = context.getString(R.string.widget_unavailable)
+            val fallback =
+                PennyWidgetProvider.summaryOrFallback(context) { _ ->
+                    throw IOException("Room read failed")
+                }
+
+            assertEquals(unavailable, fallback.amount)
+            assertEquals(unavailable, fallback.compactAmount)
+            assertEquals(unavailable, fallback.topCategory)
+            assertFalse(fallback.toString().contains("\$0.00"))
+
+            listOf(
+                R.layout.widget_penny_compact,
+                R.layout.widget_penny_summary,
+                R.layout.widget_penny_wide,
+            ).forEach { layoutId ->
+                val defaultRoot = RemoteViews(context.packageName, layoutId).apply(context, null) as ViewGroup
+                assertEquals(
+                    "layout ${context.resources.getResourceEntryName(layoutId)} default amount",
+                    unavailable,
+                    defaultRoot.findViewById<TextView>(R.id.widget_amount).text.toString(),
+                )
+
+                val root =
+                    PennyWidgetProvider
+                        .viewsForLayout(context, fallback, layoutId)
+                        .apply(context, null) as ViewGroup
+                val amount = root.findViewById<TextView>(R.id.widget_amount)
+                assertEquals(unavailable, amount.text.toString())
+                assertEquals("fallback TalkBack amount", unavailable, amount.contentDescription.toString())
+                if (layoutId == R.layout.widget_penny_compact) {
+                    assertTrue(root.findViewById<View>(R.id.widget_count) == null)
+                    assertTrue(root.findViewById<View>(R.id.widget_categories) == null)
+                }
+            }
+        }
+
+    @Test
+    fun successfulZeroSummaryStillBindsExactZero() =
+        runBlocking {
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val zero =
+                WidgetSummary(
+                    label = context.getString(R.string.widget_spent_this_month),
+                    amount = MoneyFormatter.formatUsd(0),
+                    compactAmount = formatCompactWidgetUsd(0),
+                    count = context.resources.getQuantityString(R.plurals.widget_transaction_count, 0, 0),
+                    topCategory = context.getString(R.string.widget_no_spend),
+                )
+            val loaded = PennyWidgetProvider.summaryOrFallback(context) { zero }
+
+            assertEquals(zero, loaded)
+            listOf(
+                R.layout.widget_penny_compact,
+                R.layout.widget_penny_summary,
+                R.layout.widget_penny_wide,
+            ).forEach { layoutId ->
+                val root =
+                    PennyWidgetProvider
+                        .viewsForLayout(context, loaded, layoutId)
+                        .apply(context, null) as ViewGroup
+                val amount = root.findViewById<TextView>(R.id.widget_amount)
+                assertEquals("\$0.00", amount.text.toString())
+                assertEquals("\$0.00", amount.contentDescription.toString())
+            }
+        }
 
     @Test
     fun manifestRefreshActionsResolveAndRouteExplicitlyToWidgetProvider() {
@@ -734,6 +968,33 @@ class PennyWidgetIntentTest {
                 layout.getLineEnd(layout.lineCount - 1),
             )
         }
+    }
+
+    private fun assertNoEllipsis(
+        description: String,
+        textView: TextView,
+    ) {
+        val layout = requireNotNull(textView.layout) { "$description has no text layout" }
+        repeat(layout.lineCount) { line ->
+            assertEquals("$description ellipsized line $line", 0, layout.getEllipsisCount(line))
+        }
+        assertEquals(
+            "$description did not lay out all bound text",
+            textView.text.length,
+            layout.getLineEnd(layout.lineCount - 1),
+        )
+    }
+
+    private fun assertHasEllipsis(
+        description: String,
+        textView: TextView,
+    ) {
+        val layout = requireNotNull(textView.layout) { "$description has no text layout" }
+        assertEquals("$description truncation policy", TextUtils.TruncateAt.END, textView.ellipsize)
+        assertTrue(
+            "$description unexpectedly fit; the worst-case fixture must exercise truncation",
+            (0 until layout.lineCount).any { layout.getEllipsisCount(it) > 0 },
+        )
     }
 
     private fun assertUniformTextMinimum(

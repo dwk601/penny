@@ -121,18 +121,22 @@ open class PennyWidgetProvider : AppWidgetProvider() {
             manager.updateAppWidget(id, viewsFor(context, summary, options))
         }
 
-        private suspend fun summaryOrFallback(context: Context): WidgetSummary =
+        internal suspend fun summaryOrFallback(
+            context: Context,
+            summaryLoader: suspend (Context) -> WidgetSummary = { loadSummary(it) },
+        ): WidgetSummary =
             try {
-                loadSummary(context)
+                summaryLoader(context)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
+                val unavailable = context.getString(R.string.widget_unavailable)
                 WidgetSummary(
                     label = context.getString(R.string.widget_spent_this_month),
-                    amount = MoneyFormatter.formatUsd(0),
+                    amount = unavailable,
                     count = context.getString(R.string.widget_open_app),
-                    topCategory = context.getString(R.string.widget_unavailable),
-                    compactAmount = formatCompactWidgetUsd(0),
+                    topCategory = unavailable,
+                    compactAmount = unavailable,
                 )
             }
 
