@@ -62,4 +62,16 @@ class PennyWidgetProviderTest {
         assertThat(thrown).isSameInstanceAs(cancellation)
         assertThat(finishes).isEqualTo(1)
     }
+
+    @Test
+    fun runnableBoundarySwallowsCancellationAfterFinishingExactlyOnce() {
+        var finishes = 0
+
+        runWidgetBroadcastUpdateAtRunnableBoundary(
+            update = { throw CancellationException("broadcast cancelled") },
+            finish = { finishes++ },
+        )
+
+        assertThat(finishes).isEqualTo(1)
+    }
 }

@@ -62,7 +62,7 @@ open class PennyWidgetProvider : AppWidgetProvider() {
     internal open fun launchBroadcastUpdate(update: suspend () -> Unit) {
         val pendingResult = goAsync()
         Dispatchers.IO.dispatch(EmptyCoroutineContext) {
-            runWidgetBroadcastUpdate(update) { pendingResult.finish() }
+            runWidgetBroadcastUpdateAtRunnableBoundary(update) { pendingResult.finish() }
         }
     }
 
@@ -312,6 +312,17 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                         Intent.FLAG_ACTIVITY_CLEAR_TOP or
                         Intent.FLAG_ACTIVITY_SINGLE_TOP,
                 )
+    }
+}
+
+internal fun runWidgetBroadcastUpdateAtRunnableBoundary(
+    update: suspend () -> Unit,
+    finish: () -> Unit,
+) {
+    try {
+        runWidgetBroadcastUpdate(update, finish)
+    } catch (_: CancellationException) {
+        // This is a bare dispatcher Runnable, so cancellation has no owning Job to notify.
     }
 }
 
