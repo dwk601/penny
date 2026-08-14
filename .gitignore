@@ -1,0 +1,40 @@
+# Android and Gradle build output
+.gradle/
+**/build/
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Machine-local Android configuration
+local.properties
+
+# IDE and Kotlin caches
+.idea/
+*.iml
+.kotlin/
+
+# Release archives and generated artifacts
+dist/
+*.apk
+*.aab
+
+# Local agent/tool state
+.agents/
+.claude/
+.codex/
+.herdr/
+.hermes/
+.opencode/
+.pi/
+.slim/
+.ignore
+skills-lock.json
+
+# OS/editor noise
+.DS_Store
+*.swp
+*~
+
+# Room schemas are release contracts and must remain tracked
+!app/schemas/
+!app/schemas/**

@@ -1,0 +1,8 @@
+<resources>
+    <color name="ic_launcher_background">#F6F7F4</color>
+    <color name="widget_surface_inverse">#2C332E</color>
+    <color name="widget_on_surface_inverse">#EEF3ED</color>
+    <color name="widget_on_surface_inverse_muted">#C2CBC3</color>
+    <color name="widget_quick_add">#9CD8BC</color>
+    <color name="widget_on_quick_add">#003827</color>
+</resources>
