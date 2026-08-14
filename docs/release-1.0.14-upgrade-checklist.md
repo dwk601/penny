@@ -285,21 +285,21 @@ Restore automatic time/timezone and the original locale when finished.
   note, account, individual-transaction, or SimpleFIN credential details.
 - [ ] Capture named API 31+ screenshots for `2x1`, `2x2`, `4x2`, and both-axis
   boundary resizes in day/light and night/dark dynamic-color schemes. Repeat all
-  three canonical sizes at font scale `2.0`. At every size, the complete
-  size-appropriate visual amount must remain visible and readable without
-  clipping or ellipsis, and the distinct 48dp Add target must remain fully
-  visible, unobscured, and tappable. The full `This month` label must remain
-  readable without clipping or ellipsis at `2x2` and `4x2`; at compact `2x1`
-  only, it may truncate or end-ellipsize as needed. The `2x2` summary and `4x2`
-  transaction/category supporting text may do the same at this elevated font
-  scale. Permitted truncation must leave readable text bounded within its own
-  region. It must not clip glyphs, overlap another element, or displace the
-  amount or Add target, and must expose only the aggregate information allowed
-  above. The preceding amount requirements still apply: exact dollars and cents
-  at `2x2`/`4x2`, the specified exact/abbreviated compact visual display, and the
-  compact TalkBack exact total. No visual amount may truncate or ellipsize.
-  Include normal-font fallback-color evidence when dynamic color is disabled or
-  unavailable.
+  three canonical sizes at each required elevated font scale, `1.5` and `2.0`.
+  At both elevated scales and every size, the complete size-appropriate visual
+  amount must remain visible and readable without clipping or ellipsis, and the
+  distinct 48dp Add target must remain fully visible, unobscured, and tappable.
+  The full `This month` label must remain readable without clipping or ellipsis
+  at `2x2` and `4x2`; at compact `2x1` only, it may end-ellipsize as needed. At
+  either elevated scale, the `2x2` summary and `4x2` transaction/category
+  supporting text may end-ellipsize within their own bounded regions. Permitted
+  truncation must leave readable text bounded within its own region. It must not
+  clip glyphs, overlap another element, or displace the amount or Add target,
+  and must expose only the aggregate information allowed above. The preceding
+  amount requirements still apply: exact dollars and cents at `2x2`/`4x2`, the
+  specified exact/abbreviated compact visual display, and the compact TalkBack
+  exact total. No visual amount may truncate or ellipsize. Include normal-font
+  fallback-color evidence when dynamic color is disabled or unavailable.
 - [ ] On API 26, place one bound widget, record its launcher-reported min/max
   app-widget options, and resize it horizontally, vertically, and on both axes
   through compact, standard, and wide bounds. Confirm each options change
@@ -309,15 +309,29 @@ Restore automatic time/timezone and the original locale when finished.
   dual `RemoteViews` switch, content, and routes rather than accepting one
   stretched or stale layout in both orientations.
 - [ ] Repeat the API 26 resize/options and portrait/landscape checks in day/light
-  and night/dark and at font scale `2.0` (dynamic color is not applicable).
-  Repeat both the below-`$1,000` and at-or-above-`$1,000` known-month cases and
-  apply the same size-specific gates above for normal font and font scale
-  `2.0`: compact exact/abbreviated visual amounts, expected rounding, compact
-  TalkBack exact totals, standard/wide exact visual amounts, size-appropriate
-  transaction total/top-category content, label and supporting-text truncation
-  boundaries, the intact 48dp Add target, no overlap, privacy, contrast, and
-  add/delete refresh.
-  Retain named screenshots for every canonical size and orientation.
+  and night/dark at font scales `1.5` and `2.0` (dynamic color is not
+  applicable). Repeat both the below-`$1,000` and at-or-above-`$1,000`
+  known-month cases and apply the same size-specific gates above for normal font
+  and both elevated scales: compact exact/abbreviated visual amounts, expected
+  rounding, compact TalkBack exact totals, standard/wide exact visual amounts,
+  size-appropriate transaction total/top-category content, compact-label and
+  supporting/category end-ellipsis boundaries, the intact 48dp Add target, no
+  overlap, privacy, contrast, and add/delete refresh. Retain named screenshots
+  for every canonical size and orientation.
+- [ ] On a disposable AVD only, use synthetic data and a documented, controlled
+  fault to make widget summary loading fail. Before injecting it, take a clean
+  AVD snapshot and record a tested recovery method; never run this gate on a
+  real phone or on an install/snapshot containing real or copied user data or
+  credentials. At font scales `1.0`, `1.5`, and `2.0`, capture compact `2x1`,
+  standard `2x2`, and wide `4x2`. Every size must represent the amount as
+  unavailable rather than `$0.00`: standard and wide must visibly say
+  `Unavailable`, while the compact short unavailable token `—` must remain
+  fully visible and readable without clipping or ellipsis and its amount must
+  be announced by TalkBack as the full `Unavailable`. The label, unavailable
+  amount, and distinct 48dp Add target must remain bounded, separate, and
+  usable. After capture, restore the known-good pre-fault snapshot or wipe and
+  recreate the AVD, then verify known zero and nonzero summaries render
+  correctly before using that AVD for another release gate.
 - [ ] Keep the same launcher grid position and the same app-widget ID/host/provider
   binding for corresponding baseline/final comparisons on both API families.
   Responsive evidence must change size, so baseline and final screenshots are
