@@ -48,7 +48,7 @@ class Phase2AsyncEdgeTest {
     }
 
     @Test
-    fun recreationDuringSaveRecoversControlsAndRetriesStableId() {
+    fun recreationDuringSaveRecoversControlsAndRetriesWithoutPersistingInterruptedAttempt() {
         val firstStarted = CompletableDeferred<Unit>()
         val gateway = FakeGateway()
         gateway.onUpsert = { transaction ->
@@ -75,13 +75,77 @@ class Phase2AsyncEdgeTest {
         composeRule.waitUntil(5_000) { gateway.rows.value.size == 1 }
         assertEquals(2, gateway.upserts.size)
         assertEquals(
-            1,
+            2,
             gateway.upserts
                 .map { it.id }
                 .distinct()
                 .size,
         )
         assertEquals(gateway.upserts.last(), gateway.rows.value.single())
+    }
+
+    @Test
+    fun failedNewSaveKeepsEditorStateAndRetryPersistsOneTransaction() {
+        val gateway = FakeGateway()
+        gateway.onUpsert = { transaction ->
+            gateway.upserts += transaction
+            if (gateway.upserts.size == 1) {
+                throw IllegalStateException("database unavailable")
+            }
+            gateway.rows.value = listOf(transaction)
+        }
+        setApp(gateway)
+
+        composeRule.onNodeWithTag("add_transaction_fab").performClick()
+        composeRule.onNodeWithTag("amount_key_5").performClick()
+        composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextInput("Retry Cafe")
+        composeRule.onNodeWithTag("save_transaction_button").performClick()
+
+        composeRule.onNodeWithText("Could not save transaction.").assertIsDisplayed()
+        composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+        composeRule.onNodeWithTag("merchant_field").assertTextContains("Retry Cafe")
+        composeRule.onNodeWithTag("save_transaction_button").assertIsEnabled()
+        assertTrue(composeRule.onAllNodesWithTag("delete_transaction_button").fetchSemanticsNodes().isEmpty())
+        assertTrue(gateway.rows.value.isEmpty())
+        assertEquals(1, gateway.upserts.size)
+
+        composeRule.onNodeWithTag("save_transaction_button").performClick()
+        composeRule.waitUntil(5_000) { gateway.rows.value.size == 1 }
+
+        assertEquals(2, gateway.upserts.size)
+        assertEquals(
+            2,
+            gateway.upserts
+                .map { it.id }
+                .distinct()
+                .size,
+        )
+        assertEquals(gateway.upserts.last(), gateway.rows.value.single())
+    }
+
+    @Test
+    fun failedEditPreservesOriginalIdAndDraft() {
+        val original = transaction("edit-failure", "Original Cafe")
+        val gateway =
+            FakeGateway(listOf(original)).apply {
+                onUpsert = { transaction ->
+                    upserts += transaction
+                    throw IllegalStateException("database unavailable")
+                }
+            }
+        setApp(gateway)
+
+        composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
+        composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextInput(" Updated")
+        composeRule.onNodeWithTag("save_transaction_button").performClick()
+
+        composeRule.onNodeWithText("Could not save transaction.").assertIsDisplayed()
+        composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+        composeRule.onNodeWithTag("merchant_field").assertTextContains("Original Cafe Updated")
+        composeRule.onNodeWithTag("save_transaction_button").assertIsEnabled()
+        composeRule.onNodeWithTag("delete_transaction_button").assertIsEnabled()
+        assertEquals(listOf(original), gateway.rows.value)
+        assertEquals(original.id, gateway.upserts.single().id)
     }
 
     @Test

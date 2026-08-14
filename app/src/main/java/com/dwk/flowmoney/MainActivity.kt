@@ -640,25 +640,30 @@ fun FlowMoneyApp(
                 onDraftChange = { editorDraft = it },
                 onSave = { transaction ->
                     if (!persistenceBusy) {
-                        val persistedDraft =
-                            if (editorDraft.id == null) {
-                                editorDraft.copy(id = transaction.id)
-                            } else {
-                                editorDraft
-                            }
-                        editorDraft = persistedDraft
-                        editorId = persistedDraft.id
+                        val candidateId = editorDraft.id ?: transaction.id
+                        val candidateDraft = editorDraft.copy(id = candidateId)
                         persistenceBusy = true
                         scope.launch {
+                            var saveFailureMessage: String? = null
                             try {
-                                viewModel.upsert(persistedDraft.toTransaction())
-                                refreshPennyWidgets(context)
-                                showSheet = false
-                            } catch (failure: CancellationException) {
-                                throw failure
+                                try {
+                                    viewModel.upsert(candidateDraft.toTransaction())
+                                } catch (failure: CancellationException) {
+                                    throw failure
+                                } catch (_: Throwable) {
+                                    saveFailureMessage = "Could not save transaction."
+                                }
+                                if (saveFailureMessage == null) {
+                                    editorId = candidateId
+                                    editorDraft = candidateDraft
+                                    originalEditorDraft = candidateDraft
+                                    showSheet = false
+                                    refreshPennyWidgets(context)
+                                }
                             } finally {
                                 persistenceBusy = false
                             }
+                            saveFailureMessage?.let { snackbarHostState.showSnackbar(it) }
                         }
                     }
                 },
