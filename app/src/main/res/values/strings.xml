@@ -2,6 +2,13 @@
     <string name="app_name">Penny</string>
     <string name="widget_penny_summary_name">Spending</string>
     <string name="widget_penny_summary_description">Open Penny spending overview</string>
+    <string name="widget_preview_label">Sample</string>
+    <string name="widget_preview_amount">$123.45</string>
+    <string name="widget_preview_amount_description">Sample monthly total: $123.45</string>
+    <string name="widget_preview_detail">4 sample transactions</string>
+    <string name="widget_initial_label">Penny</string>
+    <string name="widget_initial_status">Loading…</string>
+    <string name="widget_initial_detail">Preparing…</string>
     <string name="widget_quick_add">+</string>
     <string name="widget_quick_add_description">Add a transaction</string>
     <string name="widget_spent_this_month">This month</string>
