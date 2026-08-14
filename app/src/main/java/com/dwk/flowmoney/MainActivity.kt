@@ -263,6 +263,16 @@ private suspend fun refreshPennyWidgets(context: Context) {
     PennyWidgetProvider.refreshAll(context)
 }
 
+internal suspend fun bestEffortWidgetRefresh(refresh: suspend () -> Unit) {
+    try {
+        refresh()
+    } catch (failure: CancellationException) {
+        throw failure
+    } catch (_: Throwable) {
+        // Widget updates are best-effort after transaction persistence has committed.
+    }
+}
+
 internal enum class DataOperation(
     val label: String,
 ) {
@@ -394,6 +404,7 @@ fun FlowMoneyApp(
     viewModel: MainViewModel,
     openAddSheetRequest: Int = 0,
     openOverviewRequest: Int = 0,
+    transactionWidgetRefresh: suspend (Context) -> Unit = ::refreshPennyWidgets,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -470,10 +481,19 @@ fun FlowMoneyApp(
         val description = transaction.deleteDescription()
         scope.launch {
             try {
-                viewModel.delete(transaction.id)
-                refreshPennyWidgets(context)
+                try {
+                    viewModel.delete(transaction.id)
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: Throwable) {
+                    persistenceBusy = false
+                    snackbarHostState.showSnackbar("Could not delete $description")
+                    return@launch
+                }
+
                 onDeleted()
                 persistenceBusy = false
+                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
                 val result =
                     snackbarHostState.showSnackbar(
                         message = "Deleted $description",
@@ -481,14 +501,16 @@ fun FlowMoneyApp(
                         withDismissAction = true,
                     )
                 if (result == SnackbarResult.ActionPerformed) {
-                    viewModel.upsert(transaction)
-                    refreshPennyWidgets(context)
+                    try {
+                        viewModel.upsert(transaction)
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (_: Throwable) {
+                        snackbarHostState.showSnackbar("Could not restore $description.")
+                        return@launch
+                    }
+                    bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
                 }
-            } catch (failure: CancellationException) {
-                throw failure
-            } catch (_: Throwable) {
-                persistenceBusy = false
-                snackbarHostState.showSnackbar("Could not delete $description")
             } finally {
                 persistenceBusy = false
             }
@@ -658,7 +680,7 @@ fun FlowMoneyApp(
                                     editorDraft = candidateDraft
                                     originalEditorDraft = candidateDraft
                                     showSheet = false
-                                    refreshPennyWidgets(context)
+                                    bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
                                 }
                             } finally {
                                 persistenceBusy = false

@@ -29,6 +29,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 
 class Phase2AsyncEdgeTest {
     @get:Rule val composeRule = createComposeRule()
@@ -125,6 +126,34 @@ class Phase2AsyncEdgeTest {
     }
 
     @Test
+    fun successfulSaveClosesAndPersistsWhenWidgetRefreshFails() {
+        val gateway = FakeGateway()
+        val widgetRefreshCalls = AtomicInteger()
+        setApp(
+            gateway = gateway,
+            transactionWidgetRefresh = {
+                widgetRefreshCalls.incrementAndGet()
+                throw IllegalStateException("widget service unavailable")
+            },
+        )
+
+        composeRule.onNodeWithTag("add_transaction_fab").performClick()
+        composeRule.onNodeWithTag("amount_key_5").performClick()
+        composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextInput("Saved Cafe")
+        composeRule.onNodeWithTag("save_transaction_button").performClick()
+
+        composeRule.waitUntil(5_000) {
+            gateway.rows.value
+                .singleOrNull()
+                ?.merchant == "Saved Cafe" &&
+                widgetRefreshCalls.get() == 1 &&
+                composeRule.onAllNodesWithTag("transaction_editor").fetchSemanticsNodes().isEmpty()
+        }
+        assertEquals(1, gateway.upserts.size)
+        assertTrue(composeRule.onAllNodesWithText("Could not save transaction.").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
     fun failedEditPreservesOriginalIdAndDraft() {
         val original = transaction("edit-failure", "Original Cafe")
         val gateway =
@@ -170,6 +199,59 @@ class Phase2AsyncEdgeTest {
         composeRule.onNodeWithTag("merchant_field").assertTextContains(original.merchant)
         composeRule.onNodeWithTag("delete_transaction_button").assertIsEnabled()
         assertEquals(listOf(original), gateway.rows.value)
+    }
+
+    @Test
+    fun undoFailureReportsRestoreFailureAndLeavesRowDeleted() {
+        val original = transaction("undo-failure", "Restore Cafe")
+        val gateway =
+            FakeGateway(listOf(original)).apply {
+                onUpsert = { transaction ->
+                    upserts += transaction
+                    throw IllegalStateException("database unavailable")
+                }
+            }
+        setApp(gateway)
+
+        composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
+        composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_button").performClick()
+        composeRule.waitUntil(5_000) { gateway.rows.value.isEmpty() }
+        composeRule.onNodeWithText("Undo").performClick()
+
+        composeRule.onNodeWithText("Could not restore", substring = true).assertIsDisplayed()
+        assertTrue(gateway.rows.value.isEmpty())
+        assertEquals(1, gateway.deleteCalls)
+        assertEquals(listOf(original), gateway.upserts)
+        assertTrue(composeRule.onAllNodesWithText("Could not delete", substring = true).fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
+    fun deleteAndUndoPersistWhenWidgetRefreshFails() {
+        val original = transaction("widget-refresh-failure", "Widget Cafe")
+        val gateway = FakeGateway(listOf(original))
+        val widgetRefreshCalls = AtomicInteger()
+        setApp(
+            gateway = gateway,
+            transactionWidgetRefresh = {
+                widgetRefreshCalls.incrementAndGet()
+                throw IllegalStateException("widget service unavailable")
+            },
+        )
+
+        composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
+        composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_button").performClick()
+        composeRule.waitUntil(5_000) { gateway.rows.value.isEmpty() }
+        composeRule.onNodeWithText("Undo").performClick()
+
+        composeRule.waitUntil(5_000) {
+            gateway.rows.value.singleOrNull() == original && widgetRefreshCalls.get() == 2
+        }
+        assertEquals(1, gateway.deleteCalls)
+        assertEquals(listOf(original), gateway.upserts)
+        assertTrue(composeRule.onAllNodesWithText("Could not delete", substring = true).fetchSemanticsNodes().isEmpty())
+        assertTrue(composeRule.onAllNodesWithText("Could not restore", substring = true).fetchSemanticsNodes().isEmpty())
     }
 
     @Test
@@ -238,12 +320,14 @@ class Phase2AsyncEdgeTest {
         composeRule.onNodeWithText("Undo").performClick()
         composeRule.waitUntil(5_000) { gateway.rows.value.singleOrNull() == original }
         assertEquals(1, gateway.deleteCalls)
+        assertEquals(1, gateway.upserts.size)
         assertEquals(original, gateway.rows.value.single())
     }
 
     private fun setApp(
         gateway: FakeGateway,
         restoration: StateRestorationTester? = null,
+        transactionWidgetRefresh: suspend (Context) -> Unit = {},
     ) {
         val expectedTransactionIds = gateway.rows.value.map { it.id }
         val simpleFinRepository = SimpleFinSyncRepository(context)
@@ -254,9 +338,13 @@ class Phase2AsyncEdgeTest {
             )[MainViewModel::class.java]
         viewModel.reportInitializationComplete()
         if (restoration == null) {
-            composeRule.setContent { FlowMoneyApp(viewModel) }
+            composeRule.setContent {
+                FlowMoneyApp(viewModel, transactionWidgetRefresh = transactionWidgetRefresh)
+            }
         } else {
-            restoration.setContent { FlowMoneyApp(viewModel) }
+            restoration.setContent {
+                FlowMoneyApp(viewModel, transactionWidgetRefresh = transactionWidgetRefresh)
+            }
         }
         composeRule.waitUntil(5_000) {
             composeRule.onAllNodesWithText("Penny").fetchSemanticsNodes().isNotEmpty() &&
