@@ -258,6 +258,16 @@ Restore automatic time/timezone and the original locale when finished.
 
 ### Widget visual and route evidence
 
+- [ ] On API 31+, capture the widget picker preview and a screen recording or
+  frame sequence of a new placement before its first provider update, using
+  synthetic data only. The picker preview must show clearly sample or neutral
+  aggregate content, never `$0.00` or `Unavailable`, and must not expose a
+  merchant, note, account, individual transaction, or credential detail. The
+  initial launcher frame must be neutral/loading rather than a fabricated zero,
+  stale value, or picker sample, then be promptly replaced by the real aggregate
+  runtime summary or the runtime `Unavailable` state. Retain named evidence of
+  the picker, initial frame, and replacement frame within the same aggregate-only
+  privacy boundary.
 - [ ] On API 31+, place one bound Penny widget with known current-month seeded
   spending, then use the launcher resize handles/options to exercise all three
   advertised responsive sizes: compact/short `2x1`, standard `2x2`, and wide
@@ -325,9 +335,11 @@ Restore automatic time/timezone and the original locale when finished.
   credentials. At font scales `1.0`, `1.5`, and `2.0`, capture compact `2x1`,
   standard `2x2`, and wide `4x2`. Every size must represent the amount as
   unavailable rather than `$0.00`: standard and wide must visibly say
-  `Unavailable`, while the compact short unavailable token `—` must remain
-  fully visible and readable without clipping or ellipsis and its amount must
-  be announced by TalkBack as the full `Unavailable`. The label, unavailable
+  `Unavailable`, and the compact size must show the short unavailable token
+  `—`. At every tested font scale, each size's visible unavailable value—full
+  `Unavailable` at standard/wide and `—` at compact—must remain fully visible
+  and readable without clipping or ellipsis. The compact amount must be
+  announced by TalkBack as the full `Unavailable`. The label, unavailable
   amount, and distinct 48dp Add target must remain bounded, separate, and
   usable. After capture, restore the known-good pre-fault snapshot or wipe and
   recreate the AVD, then verify known zero and nonzero summaries render
