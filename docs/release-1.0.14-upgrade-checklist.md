@@ -61,10 +61,12 @@ Additional assumptions and limitations:
   placement and the two taps are operator actions because launchers differ;
   the script fails unless exactly one binding is detected, the binding survives
   replacement, Penny is foregrounded, and the operator explicitly attests each
-  route. Route UI gates are page-specific: Overview must be the sole selected
-  nav node (Transactions and Insights unselected), while Add must expose the
-  fresh expense editor's `Amount paid` and `Save expense` nodes and no edit or
-  income-editor state. Always-present nav/FAB labels are not accepted as proof.
+  route. Route UI gates are page-specific: Overview must have exactly one
+  selected `Overview` nav node and no selected `Transactions` or `Insights`
+  node. Duplicate unselected labels in seeded page content are allowed. Add must
+  expose the fresh expense editor's `Amount paid` and `Save expense` nodes and
+  no edit or income-editor state. Always-present nav/FAB labels are not accepted
+  as proof.
 - A SimpleFIN credential is optional for the synthetic rehearsal because
   profile/account/ignored rows are seeded independently. To exercise a real
   credential, pass `--with-simplefin-credential` and connect inside Penny.
@@ -129,8 +131,20 @@ color; API 26 covers the minimum SDK.
 
 ### Display and window matrix
 
-- [ ] Font scales: `1.0`, `1.3`, and `2.0` (also spot-check `0.85` if available).
-  Verify no clipped values/actions, unusable fields, or hidden widget content.
+- [ ] Font scales: exactly `1.0`, `1.5`, and `2.0` (also spot-check `0.85` if
+  available). Record the original scale, set each value through Display settings
+  or the commands below on a disposable test device, and wait for configuration
+  recreation before each pass. Restore `ORIGINAL` when finished. Verify no
+  clipped values/actions, unusable fields, or hidden widget content.
+
+  ```bash
+  ORIGINAL="$(adb -s SERIAL shell settings get system font_scale | tr -d '\r')"
+  adb -s SERIAL shell settings put system font_scale 1.0
+  adb -s SERIAL shell settings put system font_scale 1.5
+  adb -s SERIAL shell settings put system font_scale 2.0
+  adb -s SERIAL shell settings put system font_scale "$ORIGINAL"
+  ```
+
 - [ ] Light theme and dark theme on each API level.
 - [ ] API 31+: dynamic color enabled in light and dark wallpaper schemes.
   Also disable dynamic color/change to a non-dynamic image when practical to
@@ -201,7 +215,7 @@ Restore automatic time/timezone and the original locale when finished.
 
 - [ ] Place the Penny 2x2 widget with current-month seeded spending visible.
 - [ ] Capture named baseline and final screenshots at minimum for normal font,
-  large font (`1.3`), light, dark, and API 31+ dynamic color. Keep the widget at
+  large font (`1.5`), light, dark, and API 31+ dynamic color. Keep the widget at
   the same launcher grid position and size for comparisons.
 - [ ] Verify amount, transaction count, top category/support text, no clipping,
   48dp plus target, contrast, and update after adding/deleting a transaction.
@@ -262,15 +276,19 @@ scripts/verify-upgrade.sh \
 The script must pass all of these; do not hand-waive a failed gate:
 
 - [ ] Explicit emulator/QEMU/user-0 checks and absent installed package.
-- [ ] APK package, exact version transition, one certificate, matching
-  certificate SHA-256, and candidate code greater than baseline.
+- [ ] APK package, exact version transition, exactly one certificate, matching
+  64-hex-character certificate SHA-256 digests, and candidate code greater than
+  baseline. Unsigned, multisigner, malformed-output, and verifier-error cases
+  fail before digest comparison.
 - [ ] Fresh archived install and successful `run-as` startup snapshot.
-- [ ] Three representative transaction rows (local expense, local income,
-  SimpleFIN expense), both preference files/all existing keys, one SimpleFIN
-  profile, account marker, and ignored-transaction marker. Seed DB/preferences
-  are streamed from the host directly through `run-as` into an app-private
-  temporary and atomically renamed; no seed bytes are staged in
-  `/data/local/tmp`.
+- [ ] Three representative transaction rows (local expense with exact persisted
+  recurrence `Monthly`, local income, SimpleFIN expense), both preference
+  files/all existing keys, one SimpleFIN profile, account marker, and
+  ignored-transaction marker. Seed DB/preferences are streamed from host stdin
+  with `adb exec-in` through `run-as` into a mode-`0600` app-private temporary,
+  atomically renamed, then read back with `adb exec-out` and SHA-256-checked
+  against the host source. No seed bytes are staged in `/data/local/tmp`; a
+  write, move, read-back, or hash mismatch fails closed and cleans up.
 - [ ] Profile intentionally paused during rehearsal to avoid an external sync
   mutating deterministic seed data.
 - [ ] Exactly one launcher-bound widget with a captured baseline screenshot.
@@ -284,8 +302,10 @@ The script must pass all of these; do not hand-waive a failed gate:
   immediately after replacement and after launch/routes.
 - [ ] Widget body → Overview and plus → Add transaction, with foreground/UI
   verification, explicit operator attestation, UI dumps, and screenshots. The
-  Overview dump must prove selected/unselected nav state; the Add dump must
-  prove fresh expense-editor controls, not merely match the persistent FAB.
+  Overview dump must prove exactly one selected Overview nav node and reject a
+  selected Transactions/Insights node without requiring unselected labels to be
+  unique; the Add dump must prove fresh expense-editor controls, not merely
+  match the persistent FAB.
 - [ ] Before/after host SQLite `PRAGMA quick_check` returns exactly `ok`.
 - [ ] Canonical logical rows, both preference files, deterministic sorted
   `files/` type/content manifest, encrypted credential presence/hash, and widget

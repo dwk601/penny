@@ -298,6 +298,14 @@ sha256_file() {
 	fi
 }
 
+sha256_stream() {
+	if [[ "$SHA256_STYLE" == "sha256sum" ]]; then
+		"$SHA256_BIN" | awk '{print toupper($1)}'
+	else
+		"$SHA256_BIN" -a 256 | awk '{print toupper($1)}'
+	fi
+}
+
 strip_quotes_and_cr() {
 	tr -d '\r' | sed -e 's/^"//' -e 's/"$//' | tail -n 1
 }
@@ -310,25 +318,30 @@ apk_manifest_value() {
 
 apk_cert_digest() {
 	local apk="$1"
-	local digests
-	digests="$("$APKSIGNER_BIN" verify --print-certs "$apk" |
-		awk -F': ' '/certificate SHA-256 digest:/ {print toupper($2)}' |
-		tr -d '\r' |
-		sort -u)"
-	[[ -n "$digests" ]] || die "No signing certificate SHA-256 digest found for $apk"
-	[[ "$(printf '%s\n' "$digests" | awk 'NF {count++} END {print count+0}')" == "1" ]] ||
-		die "Exactly one APK signer is required: $apk"
-	[[ "$digests" =~ ^[0-9A-F]{64}$ ]] || die "Malformed signing certificate digest for $apk"
-	printf '%s\n' "$digests"
+	local cert_output digest_lines digest_count digest
+	if ! cert_output="$("$APKSIGNER_BIN" verify --print-certs "$apk")"; then
+		die "APK signature verification failed: $apk"
+	fi
+	digest_lines="$(printf '%s\n' "$cert_output" |
+		awk -F': ' '/^Signer #[0-9]+ certificate SHA-256 digest:/ {print toupper($2)}' |
+		tr -d '\r')"
+	digest_count="$(printf '%s\n' "$digest_lines" | awk 'NF {count++} END {print count+0}')"
+	[[ "$digest_count" == "1" ]] || die "Exactly one APK signer is required: $apk"
+	digest="$(printf '%s\n' "$digest_lines" | awk 'NF {print; exit}')"
+	[[ "$digest" =~ ^[0-9A-F]{64}$ ]] || die "Malformed signing certificate digest for $apk"
+	printf '%s\n' "$digest"
 }
 
 apk_metadata() {
 	local apk="$1"
-	printf '%s\t%s\t%s\t%s\n' \
-		"$(apk_manifest_value "$apk" application-id)" \
-		"$(apk_manifest_value "$apk" version-name)" \
-		"$(apk_manifest_value "$apk" version-code)" \
-		"$(apk_cert_digest "$apk")"
+	local application_id version_name version_code cert_digest
+	application_id="$(apk_manifest_value "$apk" application-id)" || return 1
+	version_name="$(apk_manifest_value "$apk" version-name)" || return 1
+	version_code="$(apk_manifest_value "$apk" version-code)" || return 1
+	cert_digest="$(apk_cert_digest "$apk")" || return 1
+	[[ -n "$application_id" && -n "$version_name" && "$version_code" =~ ^[0-9]+$ ]] || return 1
+	[[ "$cert_digest" =~ ^[0-9A-F]{64}$ ]] || return 1
+	printf '%s\t%s\t%s\t%s\n' "$application_id" "$version_name" "$version_code" "$cert_digest"
 }
 
 OLD_METADATA=""
@@ -340,13 +353,15 @@ preflight_apks() {
 	[[ -f "$OLD_APK" && -r "$OLD_APK" ]] || die "Archived APK is not a readable file: $OLD_APK"
 	[[ -f "$NEW_APK" && -r "$NEW_APK" ]] || die "Candidate APK is not a readable file: $NEW_APK"
 
-	OLD_METADATA="$(apk_metadata "$OLD_APK")"
-	NEW_METADATA="$(apk_metadata "$NEW_APK")"
+	OLD_METADATA="$(apk_metadata "$OLD_APK")" || die "Could not read complete archived APK metadata"
+	NEW_METADATA="$(apk_metadata "$NEW_APK")" || die "Could not read complete candidate APK metadata"
 
 	local old_package old_name old_code new_package new_name new_code
 	IFS=$'\t' read -r old_package old_name old_code OLD_CERT <<<"$OLD_METADATA"
 	IFS=$'\t' read -r new_package new_name new_code NEW_CERT <<<"$NEW_METADATA"
 
+	[[ "$OLD_CERT" =~ ^[0-9A-F]{64}$ ]] || die "Archived APK certificate SHA-256 is missing or malformed"
+	[[ "$NEW_CERT" =~ ^[0-9A-F]{64}$ ]] || die "Candidate APK certificate SHA-256 is missing or malformed"
 	[[ "$old_package" == "$PACKAGE" ]] || die "Archived APK package is $old_package, expected $PACKAGE"
 	[[ "$new_package" == "$PACKAGE" ]] || die "Candidate APK package is $new_package, expected $PACKAGE"
 	[[ "$old_name" == "$OLD_VERSION_NAME" ]] || die "Archived versionName is $old_name, expected $OLD_VERSION_NAME"
@@ -559,7 +574,7 @@ verify_installed_apk() {
 	[[ "$(sha256_file "$pulled")" == "$(sha256_file "$expected_apk")" ]] ||
 		die "Installed base.apk bytes differ from the selected APK"
 
-	metadata="$(apk_metadata "$pulled")"
+	metadata="$(apk_metadata "$pulled")" || die "Could not read complete installed APK metadata"
 	IFS=$'\t' read -r actual_package actual_name actual_code actual_cert <<<"$metadata"
 	[[ "$actual_package" == "$PACKAGE" ]] || die "Installed package mismatch: $actual_package"
 	[[ "$actual_name" == "$expected_name" ]] || die "Installed versionName mismatch: $actual_name"
@@ -650,17 +665,38 @@ capture_snapshot() {
 install_private_file() {
 	local source="$1"
 	local relative="$2"
-	local temporary command
+	local parent temporary command source_digest device_digest
 	[[ -f "$source" && -r "$source" ]] || die "Private seed source is not readable: $source"
+	[[ "$relative" =~ ^[A-Za-z0-9._/-]+$ && "$relative" != /* && "$relative" != *//* ]] ||
+		die "Unsafe app-private destination path"
+	[[ "/$relative/" != */../* && "/$relative/" != */./* ]] ||
+		die "Unsafe app-private destination path"
+
+	source_digest="$(sha256_file "$source")" || die "Could not hash private seed source"
+	[[ "$source_digest" =~ ^[0-9A-F]{64}$ ]] || die "Private seed source hash is malformed"
 
 	# Stream bytes directly into app-private storage. Never stage seed data in
 	# /data/local/tmp, where another shell process could read it between push,
-	# chmod, and cleanup. Use an app-private temporary for atomic replacement.
+	# chmod, and cleanup. exec-in attaches host stdin; the app-private temporary
+	# is mode 0600 and atomically replaces the destination only after a full read.
+	parent="${relative%/*}"
+	[[ "$parent" != "$relative" ]] || parent="."
 	temporary="${relative}.penny-upgrade-${$}.part"
-	command="umask 077; rm -f '$temporary'; cat > '$temporary' && chmod 600 '$temporary' && mv -f '$temporary' '$relative'"
-	if ! adb_cmd exec-out "run-as '$PACKAGE' sh -c \"$command\"" <"$source" >/dev/null; then
+	command="umask 077; mkdir -p '$parent' && rm -f '$temporary' && cat > '$temporary' && chmod 600 '$temporary' && mv -f '$temporary' '$relative'"
+	if ! adb_cmd exec-in "run-as '$PACKAGE' sh -c \"$command\"" <"$source" >/dev/null; then
 		run_as_sh "rm -f '$temporary'" >/dev/null 2>&1 || true
 		die "Could not stream run-as file into app-private storage: $relative"
+	fi
+
+	# Do not trust the transport status alone. Read the installed bytes back via
+	# exec-out and compare hashes without staging them in shared device storage.
+	if ! device_digest="$(adb_cmd exec-out "run-as '$PACKAGE' cat '$relative'" | sha256_stream)"; then
+		run_as_sh "rm -f '$temporary' '$relative'" >/dev/null 2>&1 || true
+		die "Could not verify app-private file after streaming: $relative"
+	fi
+	if [[ "$device_digest" != "$source_digest" ]]; then
+		run_as_sh "rm -f '$temporary' '$relative'" >/dev/null 2>&1 || true
+		die "App-private file read-back did not match the source: $relative"
 	fi
 }
 
@@ -723,7 +759,7 @@ BEGIN IMMEDIATE;
 INSERT INTO transactions
     (id, occurredAtEpochMillis, merchant, category, note, cents, recurringInterval, source, accountKey, accountName)
 VALUES
-    ('upgrade-local-expense', $expense_ms, 'Rehearsal Market', 'Groceries', 'v1.0.13 replacement marker', -1234, 'monthly', 'local', NULL, NULL),
+    ('upgrade-local-expense', $expense_ms, 'Rehearsal Market', 'Groceries', 'v1.0.13 replacement marker', -1234, 'Monthly', 'local', NULL, NULL),
     ('upgrade-local-income', $income_ms, 'Rehearsal Payroll', 'Salary', 'v1.0.13 replacement marker', 250000, NULL, 'local', NULL, NULL),
     ('upgrade-simplefin-transaction', $expense_ms, 'Rehearsal SimpleFIN Merchant', 'Shopping', 'v1.0.13 replacement marker', -5678, NULL, 'simplefin', 'upgrade-account-001', 'Upgrade Checking');
 INSERT OR IGNORE INTO simplefin_profile
@@ -749,9 +785,9 @@ SQL
 
 	local marker_counts
 	marker_counts="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$seed_db" \
-		"SELECT (SELECT count(*) FROM transactions WHERE id LIKE 'upgrade-%'), (SELECT count(*) FROM simplefin_profile WHERE id='default'), (SELECT count(*) FROM simplefin_accounts WHERE accountId='upgrade-account-001'), (SELECT count(*) FROM simplefin_ignored_transactions WHERE transactionId='upgrade-ignored-transaction');" |
+		"SELECT (SELECT count(*) FROM transactions WHERE id LIKE 'upgrade-%'), (SELECT count(*) FROM transactions WHERE id='upgrade-local-expense' AND recurringInterval='Monthly'), (SELECT count(*) FROM simplefin_profile WHERE id='default'), (SELECT count(*) FROM simplefin_accounts WHERE accountId='upgrade-account-001'), (SELECT count(*) FROM simplefin_ignored_transactions WHERE transactionId='upgrade-ignored-transaction');" |
 		tr -d '\r')"
-	[[ "$marker_counts" == "3|1|1|1" ]] || die "Seed marker verification failed (expected 3|1|1|1, got $marker_counts)"
+	[[ "$marker_counts" == "3|1|1|1|1" ]] || die "Seed marker verification failed (expected 3|1|1|1|1, got $marker_counts)"
 	[[ "$("$SQLITE3_BIN" -batch "$seed_db" 'PRAGMA quick_check;' | tr -d '\r')" == "ok" ]] ||
 		die "Seed database quick_check failed"
 
@@ -944,9 +980,9 @@ SQL
 
 	local marker_counts
 	marker_counts="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$db" \
-		"SELECT (SELECT count(*) FROM transactions WHERE id LIKE 'upgrade-%'), (SELECT count(*) FROM simplefin_profile WHERE id='default'), (SELECT count(*) FROM simplefin_accounts WHERE accountId='upgrade-account-001'), (SELECT count(*) FROM simplefin_ignored_transactions WHERE transactionId='upgrade-ignored-transaction');" |
+		"SELECT (SELECT count(*) FROM transactions WHERE id LIKE 'upgrade-%'), (SELECT count(*) FROM transactions WHERE id='upgrade-local-expense' AND recurringInterval='Monthly'), (SELECT count(*) FROM simplefin_profile WHERE id='default'), (SELECT count(*) FROM simplefin_accounts WHERE accountId='upgrade-account-001'), (SELECT count(*) FROM simplefin_ignored_transactions WHERE transactionId='upgrade-ignored-transaction');" |
 		tr -d '\r')"
-	[[ "$marker_counts" == "3|1|1|1" ]] || die "$snapshot_name seed rows are missing or duplicated: $marker_counts"
+	[[ "$marker_counts" == "3|1|1|1|1" ]] || die "$snapshot_name seed rows or Monthly recurrence are missing/duplicated: $marker_counts"
 
 	verify_pref_contracts "$raw"
 	if [[ -f "$raw/no_backup/simplefin_access_url.bin" ]]; then
@@ -1011,26 +1047,41 @@ ui_node_has_label() {
     ' "$dump"
 }
 
-ui_node_has_label_and_selected() {
+ui_dump_has_exactly_one_selected_label() {
 	local dump="$1"
 	local label="$2"
-	local selected="$3"
-	awk -v label="$label" -v selected="$selected" '
+	awk -v label="$label" '
         BEGIN { RS=">" }
         /<node[[:space:]]/ {
             labeled = index($0, "text=\"" label "\"") ||
                       index($0, "content-desc=\"" label "\"")
-            if (labeled && index($0, "selected=\"" selected "\"")) matches++
+            if (labeled && index($0, "selected=\"true\"")) matches++
         }
         END { exit(matches == 1 ? 0 : 1) }
     ' "$dump"
 }
 
+ui_dump_has_selected_label() {
+	local dump="$1"
+	local label="$2"
+	awk -v label="$label" '
+        BEGIN { RS=">" }
+        /<node[[:space:]]/ {
+            labeled = index($0, "text=\"" label "\"") ||
+                      index($0, "content-desc=\"" label "\"")
+            if (labeled && index($0, "selected=\"true\"")) found=1
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$dump"
+}
+
 overview_route_dump_is_specific() {
 	local dump="$1"
-	ui_node_has_label_and_selected "$dump" "Overview" true &&
-		ui_node_has_label_and_selected "$dump" "Transactions" false &&
-		ui_node_has_label_and_selected "$dump" "Insights" false
+	# Overview can also appear as an unselected top title, and seeded content can
+	# contain duplicate Transactions labels. Anchor only to selected nav semantics.
+	ui_dump_has_exactly_one_selected_label "$dump" "Overview" &&
+		! ui_dump_has_selected_label "$dump" "Transactions" &&
+		! ui_dump_has_selected_label "$dump" "Insights"
 }
 
 add_route_dump_is_specific() {
@@ -1056,7 +1107,7 @@ verify_widget_routes() {
 	assert_foreground_activity
 	capture_ui_dump "$route_dir/overview-window.xml"
 	overview_route_dump_is_specific "$route_dir/overview-window.xml" ||
-		die "Overview route lacked one selected Overview nav node and unselected Transactions/Insights nodes"
+		die "Overview route lacked exactly one selected Overview nav node or another nav destination was selected"
 	capture_screen "$route_dir/overview-route.png"
 
 	shell_cmd input keyevent HOME >/dev/null
