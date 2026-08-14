@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
@@ -136,7 +137,10 @@ class Phase2AsyncEdgeTest {
         setApp(gateway)
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
-        composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextInput(" Updated")
+        val merchantField = composeRule.onNodeWithTag("merchant_field")
+        merchantField.performScrollTo()
+        merchantField.performTextClearance()
+        merchantField.performTextInput("Original Cafe Updated")
         composeRule.onNodeWithTag("save_transaction_button").performClick()
 
         composeRule.onNodeWithText("Could not save transaction.").assertIsDisplayed()
