@@ -1,18 +1,22 @@
 package com.dwk.flowmoney
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -198,6 +202,8 @@ class Phase4UiTest {
             }
         }
 
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("more_details_toggle"))
+        composeRule.onNodeWithTag("more_details_toggle").performClick()
         composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("date_picker_button"))
         val date = composeRule.onNodeWithTag("date_picker_button").fetchSemanticsNode().boundsInRoot
         val time = composeRule.onNodeWithTag("time_picker_button").fetchSemanticsNode().boundsInRoot
@@ -206,7 +212,164 @@ class Phase4UiTest {
         composeRule.onNodeWithTag("time_picker_button").assertIsDisplayed()
     }
 
-    private fun setEmptyScreen(tab: DashboardTab, onAdd: () -> Unit, onData: () -> Unit) {
+    @Test
+    fun amountSuggestionsAreTaggedBelowThePadAndApplyImmediately() {
+        val history =
+            TransactionSuggestions.history(
+                listOf(
+                    Transaction(
+                        id = "suggested",
+                        occurredAtEpochMillis = 1_765_000_000_000,
+                        merchant = "Cafe",
+                        category = "Food",
+                        note = "",
+                        cents = -1_234,
+                    ),
+                ),
+            )
+        composeRule.setContent {
+            var draft by remember { mutableStateOf(newEditorDraft().copy(category = "Food")) }
+            MaterialTheme {
+                TransactionEditor(
+                    transaction = null,
+                    draft = draft,
+                    suggestionHistory = history,
+                    onDraftChange = { draft = it },
+                    onSave = {},
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("amount_suggestion_0")
+            .performScrollTo()
+            .assertTextContains("\$12.34", substring = true)
+            .performClick()
+            .assertIsSelected()
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("amount_display"))
+        composeRule.onNodeWithTag("amount_display").assertTextContains("-\$12.34")
+    }
+
+    @Test
+    fun moreDetailsRestoresAndAdvancedRecordsAutoExpand() {
+        val restoration = StateRestorationTester(composeRule)
+        restoration.setContent {
+            MaterialTheme {
+                TransactionEditor(
+                    transaction = null,
+                    draft = newEditorDraft(),
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = {},
+                    onSave = {},
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("more_details_toggle"))
+        composeRule.onNodeWithText("Does not repeat", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithTag("more_details_toggle").performClick()
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("date_picker_button"))
+        composeRule.onNodeWithTag("date_picker_button").assertIsDisplayed()
+        restoration.emulateSavedInstanceStateRestore()
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("date_picker_button"))
+        composeRule.onNodeWithTag("date_picker_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("amount_key_back"))
+        composeRule.onNodeWithTag("amount_key_back").assertContentDescriptionEquals("Delete last digit")
+    }
+
+    @Test
+    fun advancedRecordsAutoExpandMoreDetails() {
+        val advancedDraft =
+            newEditorDraft().copy(
+                id = "advanced",
+                note = "Remember this",
+                recurringIntervalName = RecurrenceInterval.Monthly.name,
+            )
+        composeRule.setContent {
+            MaterialTheme {
+                TransactionEditor(
+                    transaction =
+                        Transaction(
+                            id = "advanced",
+                            occurredAtEpochMillis = advancedDraft.occurredAtEpochMillis,
+                            merchant = "Rent",
+                            category = "Rent",
+                            note = advancedDraft.note,
+                            cents = -100_000,
+                            recurringInterval = RecurrenceInterval.Monthly,
+                        ),
+                    draft = advancedDraft,
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = {},
+                    onSave = {},
+                    onDelete = {},
+                    onCancel = {},
+                    persistenceBusy = false,
+                )
+            }
+        }
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("note_field"))
+        composeRule.onNodeWithTag("note_field").assertIsDisplayed()
+        composeRule.onNodeWithTag("recurring_chip_monthly").assertIsSelected()
+    }
+
+    @Test
+    fun transactionDaysShowSeparateTotalsAndResponsiveOverflowActions() {
+        val date = java.time.LocalDate.of(2026, 7, 10)
+        val occurredAt = date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val expense = Transaction("expense", occurredAt, "Cafe", "Food", "", -1_250)
+        val income = Transaction("income", occurredAt + 1, "Client", "Salary", "", 5_000)
+        var edits = 0
+        var deletes = 0
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(360.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(1.5f)) {
+                    MaterialTheme {
+                        FlowMoneyScreen(
+                            uiState = MainUiState(isLoading = false, sortedTransactions = listOf(income, expense)),
+                            selectedTab = DashboardTab.Transactions,
+                            onChartRangeModeSelected = {},
+                            onSelectedMonthChange = {},
+                            onEdit = { edits++ },
+                            onViewAllTransactions = {},
+                            onDelete = { deletes++ },
+                            onAddTransaction = {},
+                            onData = {},
+                        )
+                    }
+                }
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("transactions_list")
+            .performScrollToNode(hasTestTag("transaction_day_header_$date"))
+        composeRule.onNodeWithTag("transaction_day_spent_$date").assertTextContains("Spent \$12.50")
+        composeRule.onNodeWithTag("transaction_day_received_$date").assertTextContains("Received \$50.00")
+        composeRule
+            .onNodeWithTag("transactions_list")
+            .performScrollToNode(hasTestTag("transaction_actions_expense"))
+        val overflow = composeRule.onNodeWithTag("transaction_actions_expense").assertIsDisplayed().fetchSemanticsNode()
+        assertTrue(overflow.boundsInRoot.height / composeRule.density.density >= 48f)
+        composeRule.onNodeWithTag("transaction_actions_expense").performClick()
+        val delete = composeRule.onNodeWithTag("transaction_action_delete_expense").assertIsDisplayed().fetchSemanticsNode()
+        assertTrue(delete.boundsInRoot.height / composeRule.density.density >= 48f)
+        composeRule.onNodeWithTag("transaction_action_delete_expense").performClick()
+        assertEquals(0, edits)
+        assertEquals(1, deletes)
+    }
+
+    private fun setEmptyScreen(
+        tab: DashboardTab,
+        onAdd: () -> Unit,
+        onData: () -> Unit,
+    ) {
         composeRule.setContent {
             MaterialTheme {
                 FlowMoneyScreen(
@@ -225,14 +388,15 @@ class Phase4UiTest {
     }
 
     private fun nonEmptyState(): MainUiState {
-        val transaction = Transaction(
-            id = "phase4",
-            occurredAtEpochMillis = 1L,
-            merchant = "Cafe",
-            category = "Food",
-            note = "",
-            cents = -450,
-        )
+        val transaction =
+            Transaction(
+                id = "phase4",
+                occurredAtEpochMillis = 1L,
+                merchant = "Cafe",
+                category = "Food",
+                note = "",
+                cents = -450,
+            )
         return MainUiState(
             isLoading = false,
             sortedTransactions = listOf(transaction),

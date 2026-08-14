@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color as AndroidColor
 import android.location.Address
 import android.location.Geocoder
 import android.location.Location
@@ -19,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.FlowRowScope
@@ -37,6 +36,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -70,8 +70,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -91,9 +91,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -114,20 +114,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.CustomAccessibilityAction
-import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -139,6 +140,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -151,11 +157,7 @@ import java.util.Locale
 import java.util.UUID
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import android.graphics.Color as AndroidColor
 
 class MainActivity : ComponentActivity() {
     private val openAddSheetRequests = MutableStateFlow(0)
@@ -172,10 +174,11 @@ class MainActivity : ComponentActivity() {
         val db = FlowMoneyDatabase.get(applicationContext)
         val repository = TransactionRepository(db.transactionDao())
         val simpleFinRepository = SimpleFinSyncRepository(applicationContext)
-        val viewModel = ViewModelProvider(
-            this,
-            MainViewModel.Factory(repository, simpleFinRepository, db.simpleFinDao().observeAccounts()),
-        ).get(MainViewModel::class.java)
+        val viewModel =
+            ViewModelProvider(
+                this,
+                MainViewModel.Factory(repository, simpleFinRepository, db.simpleFinDao().observeAccounts()),
+            ).get(MainViewModel::class.java)
         migrateLegacyPreferencesIfNeeded(viewModel)
         setContent {
             val openAddSheetRequest by openAddSheetRequests.collectAsStateWithLifecycle()
@@ -210,10 +213,11 @@ class MainActivity : ComponentActivity() {
                 val legacyCsv = preferences.getString(KEY_TRANSACTIONS, "").orEmpty()
                 if (legacyCsv.isNotBlank()) {
                     viewModel.importTrustedLegacyCsv(legacyCsv)
-                    PennyWidgetProvider.refreshAll(applicationContext)
+                    refreshPennyWidgets(applicationContext)
                 }
                 check(
-                    preferences.edit()
+                    preferences
+                        .edit()
                         .putBoolean(KEY_ROOM_MIGRATED, true)
                         .commit(),
                 ) { "Could not record legacy migration" }
@@ -253,7 +257,13 @@ internal const val EXTRA_OPEN_OVERVIEW = "com.dwk.flowmoney.OPEN_OVERVIEW"
 
 internal fun csvAdvertisedLength(probe: () -> Long): Long = runCatching(probe).getOrDefault(-1L)
 
-internal enum class DataOperation(val label: String) {
+private suspend fun refreshPennyWidgets(context: Context) {
+    PennyWidgetProvider.refreshAll(context)
+}
+
+internal enum class DataOperation(
+    val label: String,
+) {
     Import("Importing CSV"),
     Export("Exporting CSV"),
     Connect("Connecting bank"),
@@ -262,13 +272,15 @@ internal enum class DataOperation(val label: String) {
     Disconnect("Disconnecting bank"),
 }
 
-internal fun canDismissDataSheet(isHiding: Boolean, operation: DataOperation?): Boolean {
-    return !isHiding || operation == null
-}
+internal fun canDismissDataSheet(
+    isHiding: Boolean,
+    operation: DataOperation?,
+): Boolean = !isHiding || operation == null
 
-internal fun pickerResultOperation(uri: Uri?, operation: DataOperation): DataOperation? {
-    return uri?.let { operation }
-}
+internal fun pickerResultOperation(
+    uri: Uri?,
+    operation: DataOperation,
+): DataOperation? = uri?.let { operation }
 
 internal data class EditorDraft(
     val id: String?,
@@ -284,58 +296,79 @@ internal data class EditorDraft(
     val accountName: String?,
 )
 
-private val EditorDraftSaver = androidx.compose.runtime.saveable.listSaver<EditorDraft, Any>(
-    save = { draft ->
-        listOf(
-            draft.id.orEmpty(), draft.occurredAtEpochMillis, draft.merchant, draft.amount,
-            draft.isExpense, draft.category, draft.note, draft.recurringIntervalName,
-            draft.source, draft.accountKey.orEmpty(), draft.accountName.orEmpty(),
-        )
-    },
-    restore = { values ->
-        EditorDraft(
-            id = values[0] as String? ?: "",
-            occurredAtEpochMillis = values[1] as Long,
-            merchant = values[2] as String,
-            amount = values[3] as String,
-            isExpense = values[4] as Boolean,
-            category = values[5] as String,
-            note = values[6] as String,
-            recurringIntervalName = values[7] as String,
-            source = values[8] as String,
-            accountKey = (values[9] as String).ifBlank { null },
-            accountName = (values[10] as String).ifBlank { null },
-        ).let { draft -> draft.copy(id = draft.id?.ifBlank { null }) }
-    },
-)
+private val EditorDraftSaver =
+    androidx.compose.runtime.saveable.listSaver<EditorDraft, Any>(
+        save = { draft ->
+            listOf(
+                draft.id.orEmpty(),
+                draft.occurredAtEpochMillis,
+                draft.merchant,
+                draft.amount,
+                draft.isExpense,
+                draft.category,
+                draft.note,
+                draft.recurringIntervalName,
+                draft.source,
+                draft.accountKey.orEmpty(),
+                draft.accountName.orEmpty(),
+            )
+        },
+        restore = { values ->
+            EditorDraft(
+                id = values[0] as String? ?: "",
+                occurredAtEpochMillis = values[1] as Long,
+                merchant = values[2] as String,
+                amount = values[3] as String,
+                isExpense = values[4] as Boolean,
+                category = values[5] as String,
+                note = values[6] as String,
+                recurringIntervalName = values[7] as String,
+                source = values[8] as String,
+                accountKey = (values[9] as String).ifBlank { null },
+                accountName = (values[10] as String).ifBlank { null },
+            ).let { draft -> draft.copy(id = draft.id?.ifBlank { null }) }
+        },
+    )
 
-internal fun newEditorDraft(): EditorDraft = EditorDraft(
-    id = null,
-    occurredAtEpochMillis = LocalDateTime.now().toEpochMillis(),
-    merchant = "",
-    amount = "",
-    isExpense = true,
-    category = CategoryCatalog.categoriesFor(true).first(),
-    note = "",
-    recurringIntervalName = "",
-    source = "local",
-    accountKey = null,
-    accountName = null,
-)
+internal fun newEditorDraft(): EditorDraft =
+    EditorDraft(
+        id = null,
+        occurredAtEpochMillis = LocalDateTime.now().toEpochMillis(),
+        merchant = "",
+        amount = "",
+        isExpense = true,
+        category = CategoryCatalog.categoriesFor(true).first(),
+        note = "",
+        recurringIntervalName = "",
+        source = "local",
+        accountKey = null,
+        accountName = null,
+    )
 
-private fun Transaction.toEditorDraft() = EditorDraft(
-    id = id,
-    occurredAtEpochMillis = occurredAtEpochMillis,
-    merchant = merchant,
-    amount = MoneyFormatter.formatAmountText(cents),
-    isExpense = cents < 0,
-    category = category,
-    note = note,
-    recurringIntervalName = recurringInterval?.name.orEmpty(),
-    source = source,
-    accountKey = accountKey,
-    accountName = accountName,
-)
+internal fun widgetQuickAddDraft(suggestionHistory: TransactionSuggestionHistory): EditorDraft {
+    val learnedExpenseCategory = suggestionHistory.expenseCategories.firstOrNull { it.isUsed }?.label
+    return newEditorDraft().copy(
+        merchant = "",
+        amount = "",
+        isExpense = true,
+        category = learnedExpenseCategory ?: CategoryCatalog.categoriesFor(isExpense = true).first(),
+    )
+}
+
+private fun Transaction.toEditorDraft() =
+    EditorDraft(
+        id = id,
+        occurredAtEpochMillis = occurredAtEpochMillis,
+        merchant = merchant,
+        amount = MoneyFormatter.formatAmountText(cents),
+        isExpense = cents < 0,
+        category = category,
+        note = note,
+        recurringIntervalName = recurringInterval?.name.orEmpty(),
+        source = source,
+        accountKey = accountKey,
+        accountName = accountName,
+    )
 
 private fun EditorDraft.toTransaction(): Transaction {
     val parsedAmount = MoneyFormatter.parseAmountToCents(amount).absoluteValue
@@ -374,7 +407,8 @@ fun FlowMoneyApp(
     var showDiscardDialog by rememberSaveable { mutableStateOf(false) }
     var pendingDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
     var closeEditorAfterDelete by rememberSaveable { mutableStateOf(false) }
-    var pendingOpenNewAfterDiscard by rememberSaveable { mutableStateOf(false) }
+    var pendingWidgetQuickAddAfterDiscard by rememberSaveable { mutableStateOf(false) }
+    var lastHandledOpenAddSheetRequest by remember { mutableStateOf(0) }
     var dataOperation by remember { mutableStateOf<DataOperation?>(null) }
     var showDisconnectConfirmation by rememberSaveable { mutableStateOf(false) }
     val selectedTab = remember(selectedTabName) { DashboardTab.valueOf(selectedTabName) }
@@ -382,17 +416,18 @@ fun FlowMoneyApp(
     val editorDirty = editorDraft != originalEditorDraft
     val latestEditorDirty by rememberUpdatedState(editorDirty)
     val latestPersistenceBusy by rememberUpdatedState(persistenceBusy)
-    val editorSheetState = rememberModalBottomSheetState(
-        skipPartiallyExpanded = true,
-        confirmValueChange = { target ->
-            if (target == androidx.compose.material3.SheetValue.Hidden && latestEditorDirty && !latestPersistenceBusy) {
-                showDiscardDialog = true
-                false
-            } else {
-                !latestPersistenceBusy
-            }
-        },
-    )
+    val editorSheetState =
+        rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            confirmValueChange = { target ->
+                if (target == androidx.compose.material3.SheetValue.Hidden && latestEditorDirty && !latestPersistenceBusy) {
+                    showDiscardDialog = true
+                    false
+                } else {
+                    !latestPersistenceBusy
+                }
+            },
+        )
 
     LaunchedEffect(openOverviewRequest) {
         if (openOverviewRequest > 0) selectedTabName = DashboardTab.Overview.name
@@ -402,16 +437,19 @@ fun FlowMoneyApp(
         viewModel.initializationErrorEvents.collect { snackbarHostState.showSnackbar(it) }
     }
 
-    LaunchedEffect(openAddSheetRequest) {
-        if (openAddSheetRequest > 0) {
-            if (showSheet && editorDirty) {
-                pendingOpenNewAfterDiscard = true
-                showDiscardDialog = true
-            } else {
-                editorId = null
-                editorDraft = newEditorDraft()
-                originalEditorDraft = editorDraft
-                showSheet = true
+    LaunchedEffect(openAddSheetRequest, uiState.isLoading) {
+        if (!uiState.isLoading && openAddSheetRequest > lastHandledOpenAddSheetRequest) {
+            while (lastHandledOpenAddSheetRequest < openAddSheetRequest) {
+                lastHandledOpenAddSheetRequest += 1
+                if (showSheet && editorDirty) {
+                    pendingWidgetQuickAddAfterDiscard = true
+                    showDiscardDialog = true
+                } else {
+                    editorId = null
+                    editorDraft = widgetQuickAddDraft(uiState.suggestionHistory)
+                    originalEditorDraft = editorDraft
+                    showSheet = true
+                }
             }
         }
     }
@@ -419,26 +457,30 @@ fun FlowMoneyApp(
     LaunchedEffect(Unit) {
         val result = viewModel.syncSimpleFinIfStale()
         if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
-            PennyWidgetProvider.refreshAll(context)
+            refreshPennyWidgets(context)
         }
     }
 
-    fun deleteWithUndo(transaction: Transaction, onDeleted: () -> Unit = {}) {
+    fun deleteWithUndo(
+        transaction: Transaction,
+        onDeleted: () -> Unit = {},
+    ) {
         val description = transaction.deleteDescription()
         scope.launch {
             try {
                 viewModel.delete(transaction.id)
-                PennyWidgetProvider.refreshAll(context)
+                refreshPennyWidgets(context)
                 onDeleted()
                 persistenceBusy = false
-                val result = snackbarHostState.showSnackbar(
-                    message = "Deleted $description",
-                    actionLabel = "Undo",
-                    withDismissAction = true,
-                )
+                val result =
+                    snackbarHostState.showSnackbar(
+                        message = "Deleted $description",
+                        actionLabel = "Undo",
+                        withDismissAction = true,
+                    )
                 if (result == SnackbarResult.ActionPerformed) {
                     viewModel.upsert(transaction)
-                    PennyWidgetProvider.refreshAll(context)
+                    refreshPennyWidgets(context)
                 }
             } catch (failure: CancellationException) {
                 throw failure
@@ -470,77 +512,87 @@ fun FlowMoneyApp(
         if (editorDirty) showDiscardDialog = true else showSheet = false
     }
 
-    fun requestDelete(transaction: Transaction, closeEditor: Boolean = false) {
+    fun requestDelete(
+        transaction: Transaction,
+        closeEditor: Boolean = false,
+    ) {
         if (persistenceBusy) return
         pendingDeleteId = transaction.id
         closeEditorAfterDelete = closeEditor
     }
 
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        val callbackOperation = pickerResultOperation(uri, DataOperation.Import)
-        if (callbackOperation == null) {
-            dataOperation = null
-            return@rememberLauncherForActivityResult
-        }
-        val resultUri = uri ?: return@rememberLauncherForActivityResult
-        dataOperation = callbackOperation
-        scope.launch {
-            var message = "Import failed"
-            try {
-                val csv = withContext(Dispatchers.IO) {
-                    val resolver = context.contentResolver
-                    val advertisedLength = csvAdvertisedLength {
-                        resolver.openAssetFileDescriptor(resultUri, "r")?.use { it.length } ?: -1L
-                    }
-                    StrictUtf8Reader.read(
-                        resolver.openInputStream(resultUri) ?: error("Could not open CSV"),
-                        5 * 1024 * 1024,
-                        advertisedLength,
-                    )
-                }
-                val importedCount = viewModel.importCsv(csv)
-                if (importedCount > 0) PennyWidgetProvider.refreshAll(context)
-                message = "Imported $importedCount transactions"
-            } catch (failure: CancellationException) {
-                throw failure
-            } catch (_: Throwable) {
-                message = "Import failed"
-            } finally {
+    val importLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val callbackOperation = pickerResultOperation(uri, DataOperation.Import)
+            if (callbackOperation == null) {
                 dataOperation = null
+                return@rememberLauncherForActivityResult
             }
-            snackbarHostState.showSnackbar(message)
+            val resultUri = uri ?: return@rememberLauncherForActivityResult
+            dataOperation = callbackOperation
+            scope.launch {
+                var message = "Import failed"
+                try {
+                    val csv =
+                        withContext(Dispatchers.IO) {
+                            val resolver = context.contentResolver
+                            val advertisedLength =
+                                csvAdvertisedLength {
+                                    resolver.openAssetFileDescriptor(resultUri, "r")?.use { it.length } ?: -1L
+                                }
+                            StrictUtf8Reader.read(
+                                resolver.openInputStream(resultUri) ?: error("Could not open CSV"),
+                                5 * 1024 * 1024,
+                                advertisedLength,
+                            )
+                        }
+                    val importedCount = viewModel.importCsv(csv)
+                    if (importedCount > 0) refreshPennyWidgets(context)
+                    message = "Imported $importedCount transactions"
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: Throwable) {
+                    message = "Import failed"
+                } finally {
+                    dataOperation = null
+                }
+                snackbarHostState.showSnackbar(message)
+            }
         }
-    }
 
-    val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("text/csv"),
-    ) { uri ->
-        val callbackOperation = pickerResultOperation(uri, DataOperation.Export)
-        if (callbackOperation == null) {
-            dataOperation = null
-            return@rememberLauncherForActivityResult
-        }
-        val resultUri = uri ?: return@rememberLauncherForActivityResult
-        dataOperation = callbackOperation
-        scope.launch {
-            var message = "Export failed"
-            try {
-                val csv = viewModel.exportCsv()
-                withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(resultUri)?.bufferedWriter()?.use { writer -> writer.write(csv) }
-                        ?: error("Could not create CSV")
-                }
-                message = "CSV exported"
-            } catch (failure: CancellationException) {
-                throw failure
-            } catch (_: Throwable) {
-                message = "Export failed"
-            } finally {
+    val exportLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("text/csv"),
+        ) { uri ->
+            val callbackOperation = pickerResultOperation(uri, DataOperation.Export)
+            if (callbackOperation == null) {
                 dataOperation = null
+                return@rememberLauncherForActivityResult
             }
-            snackbarHostState.showSnackbar(message)
+            val resultUri = uri ?: return@rememberLauncherForActivityResult
+            dataOperation = callbackOperation
+            scope.launch {
+                var message = "Export failed"
+                try {
+                    val csv = viewModel.exportCsv()
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver
+                            .openOutputStream(resultUri)
+                            ?.bufferedWriter()
+                            ?.use { writer -> writer.write(csv) }
+                            ?: error("Could not create CSV")
+                    }
+                    message = "CSV exported"
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: Throwable) {
+                    message = "Export failed"
+                } finally {
+                    dataOperation = null
+                }
+                snackbarHostState.showSnackbar(message)
+            }
         }
-    }
 
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
@@ -548,9 +600,10 @@ fun FlowMoneyApp(
         onTabSelected = { selectedTabName = it.name },
         onAddTransaction = ::openNewTransactionEditor,
         onData = { showDataSheet = true },
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)),
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)),
     ) { padding ->
         FlowMoneyScreen(
             uiState = uiState,
@@ -562,11 +615,12 @@ fun FlowMoneyApp(
             onDelete = { requestDelete(it) },
             onAddTransaction = ::openNewTransactionEditor,
             onData = { showDataSheet = true },
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .padding(padding)
-                .consumeWindowInsets(padding),
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(padding)
+                    .consumeWindowInsets(padding),
         )
     }
 
@@ -584,18 +638,19 @@ fun FlowMoneyApp(
                 onDraftChange = { editorDraft = it },
                 onSave = { transaction ->
                     if (!persistenceBusy) {
-                        val persistedDraft = if (editorDraft.id == null) {
-                            editorDraft.copy(id = transaction.id)
-                        } else {
-                            editorDraft
-                        }
+                        val persistedDraft =
+                            if (editorDraft.id == null) {
+                                editorDraft.copy(id = transaction.id)
+                            } else {
+                                editorDraft
+                            }
                         editorDraft = persistedDraft
                         editorId = persistedDraft.id
                         persistenceBusy = true
                         scope.launch {
                             try {
                                 viewModel.upsert(persistedDraft.toTransaction())
-                                PennyWidgetProvider.refreshAll(context)
+                                refreshPennyWidgets(context)
                                 showSheet = false
                             } catch (failure: CancellationException) {
                                 throw failure
@@ -605,14 +660,15 @@ fun FlowMoneyApp(
                         }
                     }
                 },
-                onDelete = editorId?.let { id ->
-                    uiState.sortedTransactions.firstOrNull { it.id == id }?.let { transaction ->
-                        { requestDelete(transaction, closeEditor = true) }
-                    }
-                },
+                onDelete =
+                    editorId?.let { id ->
+                        uiState.sortedTransactions.firstOrNull { it.id == id }?.let { transaction ->
+                            { requestDelete(transaction, closeEditor = true) }
+                        }
+                    },
                 onCancel = ::requestEditorDismissal,
                 persistenceBusy = persistenceBusy,
-                modifier = Modifier.imePadding(),
+                modifier = Modifier,
             )
         }
     }
@@ -621,7 +677,7 @@ fun FlowMoneyApp(
         AlertDialog(
             onDismissRequest = {
                 showDiscardDialog = false
-                pendingOpenNewAfterDiscard = false
+                pendingWidgetQuickAddAfterDiscard = false
             },
             title = { Text("Discard changes?") },
             text = { Text("Your transaction edits have not been saved.") },
@@ -629,9 +685,12 @@ fun FlowMoneyApp(
                 TextButton(
                     onClick = {
                         showDiscardDialog = false
-                        if (pendingOpenNewAfterDiscard) {
-                            pendingOpenNewAfterDiscard = false
-                            openNewTransactionEditor()
+                        if (pendingWidgetQuickAddAfterDiscard) {
+                            pendingWidgetQuickAddAfterDiscard = false
+                            editorId = null
+                            editorDraft = widgetQuickAddDraft(uiState.suggestionHistory)
+                            originalEditorDraft = editorDraft
+                            showSheet = true
                         } else {
                             showSheet = false
                         }
@@ -641,7 +700,7 @@ fun FlowMoneyApp(
             dismissButton = {
                 TextButton(onClick = {
                     showDiscardDialog = false
-                    pendingOpenNewAfterDiscard = false
+                    pendingWidgetQuickAddAfterDiscard = false
                 }) { Text("Keep editing") }
             },
         )
@@ -703,7 +762,7 @@ fun FlowMoneyApp(
                         try {
                             val result = viewModel.connectSimpleFin(token)
                             if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
-                                PennyWidgetProvider.refreshAll(context)
+                                refreshPennyWidgets(context)
                             }
                             message = result.snackbarMessage()
                         } catch (failure: CancellationException) {
@@ -724,7 +783,7 @@ fun FlowMoneyApp(
                         try {
                             val result = viewModel.syncSimpleFinNow()
                             if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
-                                PennyWidgetProvider.refreshAll(context)
+                                refreshPennyWidgets(context)
                             }
                             message = result.snackbarMessage()
                         } catch (failure: CancellationException) {
@@ -837,15 +896,16 @@ internal fun DataSheetModal(
     onDismissRequest: () -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(
-        skipPartiallyExpanded = true,
-        confirmValueChange = { target ->
-            canDismissDataSheet(
-                isHiding = target == androidx.compose.material3.SheetValue.Hidden,
-                operation = operation,
-            )
-        },
-    )
+    val sheetState =
+        rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            confirmValueChange = { target ->
+                canDismissDataSheet(
+                    isHiding = target == androidx.compose.material3.SheetValue.Hidden,
+                    operation = operation,
+                )
+            },
+        )
     ModalBottomSheet(
         onDismissRequest = {
             if (operation == null) onDismissRequest()
@@ -857,7 +917,10 @@ internal fun DataSheetModal(
     )
 }
 
-internal enum class DashboardTab(val label: String, val iconRes: Int) {
+internal enum class DashboardTab(
+    val label: String,
+    val iconRes: Int,
+) {
     Overview("Overview", R.drawable.ic_nav_overview),
     Transactions("Transactions", R.drawable.ic_nav_transactions),
     Insights("Insights", R.drawable.ic_nav_insights),
@@ -926,29 +989,32 @@ private fun FlowMoneyScaffold(
         },
         floatingActionButton = {
             Box(
-                modifier = if (isWide) {
-                    Modifier.windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
-                } else {
-                    Modifier
-                },
+                modifier =
+                    if (isWide) {
+                        Modifier.windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
+                    } else {
+                        Modifier
+                    },
             ) {
                 FloatingActionButton(
                     onClick = onAddTransaction,
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier
-                        .testTag("add_transaction_fab")
-                        .semantics { contentDescription = "Add transaction" },
+                    modifier =
+                        Modifier
+                            .testTag("add_transaction_fab")
+                            .semantics { contentDescription = "Add transaction" },
                 ) {
                     Text("+", fontSize = 30.sp, fontWeight = FontWeight.Light)
                 }
             }
         },
-        contentWindowInsets = if (isWide) {
-            WindowInsets.navigationBars.only(WindowInsetsSides.Bottom)
-        } else {
-            WindowInsets(0.dp)
-        },
+        contentWindowInsets =
+            if (isWide) {
+                WindowInsets.navigationBars.only(WindowInsetsSides.Bottom)
+            } else {
+                WindowInsets(0.dp)
+            },
         content = content,
     )
 }
@@ -989,11 +1055,12 @@ internal fun FlowMoneyTopAppBar(
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
             ) { Text("Data") }
         },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-            titleContentColor = MaterialTheme.colorScheme.onSurface,
-            actionIconContentColor = MaterialTheme.colorScheme.onSurface,
-        ),
+        colors =
+            TopAppBarDefaults.topAppBarColors(
+                containerColor = MaterialTheme.colorScheme.surface,
+                titleContentColor = MaterialTheme.colorScheme.onSurface,
+                actionIconContentColor = MaterialTheme.colorScheme.onSurface,
+            ),
         windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top),
     )
 }
@@ -1028,9 +1095,10 @@ private fun FlowMoneyNavigationRail(
     onTabSelected: (DashboardTab) -> Unit,
 ) {
     NavigationRail(
-        modifier = Modifier
-            .fillMaxHeight()
-            .testTag("wide_navigation"),
+        modifier =
+            Modifier
+                .fillMaxHeight()
+                .testTag("wide_navigation"),
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical),
     ) {
@@ -1067,47 +1135,55 @@ internal fun FlowMoneyScreen(
     }
 
     when (selectedTab) {
-        DashboardTab.Overview -> OverviewPage(
-            sortedTransactions = uiState.sortedTransactions,
-            recentTransactions = uiState.recentTransactions,
-            rangeTransactions = uiState.rangeTransactions,
-            metrics = uiState.metrics,
-            dateRange = uiState.dateRange,
-            chartRangeMode = uiState.chartRangeMode,
-            selectedMonth = uiState.selectedMonth,
-            availableMonths = uiState.availableMonths,
-            onChartRangeModeSelected = onChartRangeModeSelected,
-            onSelectedMonthChange = onSelectedMonthChange,
-            onEdit = onEdit,
-            onViewAllTransactions = onViewAllTransactions,
-            onDelete = onDelete,
-            onAddTransaction = onAddTransaction,
-            onData = onData,
-            modifier = modifier,
-        )
-        DashboardTab.Transactions -> TransactionsPage(
-            sortedTransactions = uiState.sortedTransactions,
-            onEdit = onEdit,
-            onDelete = onDelete,
-            onAddTransaction = onAddTransaction,
-            onData = onData,
-            modifier = modifier,
-        )
-        DashboardTab.Insights -> InsightsPage(
-            dailySpending = uiState.dailySpending,
-            categoryTotals = uiState.categoryTotals,
-            rangeTransactions = uiState.rangeTransactions,
-            dateRange = uiState.dateRange,
-            chartRangeMode = uiState.chartRangeMode,
-            selectedMonth = uiState.selectedMonth,
-            availableMonths = uiState.availableMonths,
-            onChartRangeModeSelected = onChartRangeModeSelected,
-            onSelectedMonthChange = onSelectedMonthChange,
-            onEdit = onEdit,
-            onAddTransaction = onAddTransaction,
-            onData = onData,
-            modifier = modifier,
-        )
+        DashboardTab.Overview -> {
+            OverviewPage(
+                sortedTransactions = uiState.sortedTransactions,
+                recentTransactions = uiState.recentTransactions,
+                rangeTransactions = uiState.rangeTransactions,
+                metrics = uiState.metrics,
+                dateRange = uiState.dateRange,
+                chartRangeMode = uiState.chartRangeMode,
+                selectedMonth = uiState.selectedMonth,
+                availableMonths = uiState.availableMonths,
+                onChartRangeModeSelected = onChartRangeModeSelected,
+                onSelectedMonthChange = onSelectedMonthChange,
+                onEdit = onEdit,
+                onViewAllTransactions = onViewAllTransactions,
+                onDelete = onDelete,
+                onAddTransaction = onAddTransaction,
+                onData = onData,
+                modifier = modifier,
+            )
+        }
+
+        DashboardTab.Transactions -> {
+            TransactionsPage(
+                sortedTransactions = uiState.sortedTransactions,
+                onEdit = onEdit,
+                onDelete = onDelete,
+                onAddTransaction = onAddTransaction,
+                onData = onData,
+                modifier = modifier,
+            )
+        }
+
+        DashboardTab.Insights -> {
+            InsightsPage(
+                dailySpending = uiState.dailySpending,
+                categoryTotals = uiState.categoryTotals,
+                rangeTransactions = uiState.rangeTransactions,
+                dateRange = uiState.dateRange,
+                chartRangeMode = uiState.chartRangeMode,
+                selectedMonth = uiState.selectedMonth,
+                availableMonths = uiState.availableMonths,
+                onChartRangeModeSelected = onChartRangeModeSelected,
+                onSelectedMonthChange = onSelectedMonthChange,
+                onEdit = onEdit,
+                onAddTransaction = onAddTransaction,
+                onData = onData,
+                modifier = modifier,
+            )
+        }
     }
 }
 
@@ -1121,7 +1197,11 @@ private fun LoadingState(modifier: Modifier = Modifier) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(14.dp))
             Text("Loading your spending", fontWeight = FontWeight.SemiBold)
-            Text("Getting transactions ready", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text(
+                "Getting transactions ready",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -1147,17 +1227,38 @@ private fun OverviewPage(
 ) {
     Box(modifier = modifier) {
         LazyColumn(
-            modifier = Modifier
-                .widthIn(max = 720.dp)
-                .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .testTag("overview_list"),
+            modifier =
+                Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .testTag("overview_list"),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PagePadding,
         ) {
-        if (sortedTransactions.isEmpty()) {
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (sortedTransactions.isEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DateRangeControls(
+                            mode = chartRangeMode,
+                            selectedMonth = selectedMonth,
+                            dateRange = dateRange,
+                            availableMonths = availableMonths,
+                            onModeSelected = onChartRangeModeSelected,
+                            onSelectedMonthChange = onSelectedMonthChange,
+                        )
+                        EmptyState(
+                            onAddTransaction = onAddTransaction,
+                            onData = onData,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 260.dp),
+                        )
+                    }
+                }
+            } else {
+                item {
                     DateRangeControls(
                         mode = chartRangeMode,
                         selectedMonth = selectedMonth,
@@ -1166,55 +1267,55 @@ private fun OverviewPage(
                         onModeSelected = onChartRangeModeSelected,
                         onSelectedMonthChange = onSelectedMonthChange,
                     )
-                    EmptyState(
-                        onAddTransaction = onAddTransaction,
-                        onData = onData,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 260.dp),
+                }
+                item {
+                    SummaryBand(
+                        rangeLabel = dateRange.label,
+                        metrics = metrics,
+                    )
+                }
+                item {
+                    RecentTransactionsHeader(
+                        title = "Recent",
+                        count = sortedTransactions.size,
+                        detail = "${rangeTransactions.size} in range",
+                        actionText = "View all",
+                        onAction = onViewAllTransactions,
+                    )
+                }
+                items(recentTransactions, key = { it.id }) { transaction ->
+                    SwipeTransactionRow(
+                        transaction = transaction,
+                        onEdit = { onEdit(transaction) },
+                        onDelete = { onDelete(transaction) },
                     )
                 }
             }
-        } else {
-            item {
-                DateRangeControls(
-                    mode = chartRangeMode,
-                    selectedMonth = selectedMonth,
-                    dateRange = dateRange,
-                    availableMonths = availableMonths,
-                    onModeSelected = onChartRangeModeSelected,
-                    onSelectedMonthChange = onSelectedMonthChange,
-                )
-            }
-            item {
-                SummaryBand(
-                    rangeLabel = dateRange.label,
-                    metrics = metrics,
-                )
-            }
-            item {
-                RecentTransactionsHeader(
-                    title = "Recent",
-                    count = sortedTransactions.size,
-                    detail = "${rangeTransactions.size} in range",
-                    actionText = "View all",
-                    onAction = onViewAllTransactions,
-                )
-            }
-            items(recentTransactions, key = { it.id }) { transaction ->
-                SwipeTransactionRow(
-                    transaction = transaction,
-                    onEdit = { onEdit(transaction) },
-                    onDelete = { onDelete(transaction) },
-                )
-            }
-        }
         }
     }
 }
 
+internal data class TransactionDayGroup(
+    val date: LocalDate,
+    val transactions: List<Transaction>,
+    val spentCents: Long,
+    val receivedCents: Long,
+)
+
+internal fun transactionDayGroups(transactions: List<Transaction>): List<TransactionDayGroup> =
+    transactions
+        .groupBy { it.occurredAtDateTime().toLocalDate() }
+        .map { (date, dayTransactions) ->
+            TransactionDayGroup(
+                date = date,
+                transactions = dayTransactions,
+                spentCents = dayTransactions.filter { it.cents < 0 }.sumOf { it.cents.toLong().absoluteValue },
+                receivedCents = dayTransactions.filter { it.cents > 0 }.sumOf { it.cents.toLong() },
+            )
+        }
+
 @Composable
-@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 private fun TransactionsPage(
     sortedTransactions: List<Transaction>,
     onEdit: (Transaction) -> Unit,
@@ -1229,87 +1330,145 @@ private fun TransactionsPage(
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val timeFilter = remember(timeFilterName) { TransactionTimeFilter.valueOf(timeFilterName) }
     val categories = remember(sortedTransactions) { TransactionFilters.categories(sortedTransactions) }
-    val filter = remember(timeFilter, selectedCategory, whereFilter) {
-        TransactionFilter(time = timeFilter, category = selectedCategory, where = whereFilter)
-    }
-    val filteredTransactions = remember(sortedTransactions, filter) {
-        TransactionFilters.apply(sortedTransactions, filter)
-    }
+    val filter =
+        remember(timeFilter, selectedCategory, whereFilter) {
+            TransactionFilter(time = timeFilter, category = selectedCategory, where = whereFilter)
+        }
+    val filteredTransactions =
+        remember(sortedTransactions, filter) {
+            TransactionFilters.apply(sortedTransactions, filter)
+        }
 
     LaunchedEffect(categories) {
         if (selectedCategory != null && categories.none { it == selectedCategory }) selectedCategory = null
     }
+    val dayGroups = remember(filteredTransactions) { transactionDayGroups(filteredTransactions) }
 
     Box(modifier = modifier) {
         LazyColumn(
-            modifier = Modifier
-                .widthIn(max = 720.dp)
-                .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .testTag("transactions_list"),
+            modifier =
+                Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .testTag("transactions_list"),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PagePadding,
         ) {
-        if (sortedTransactions.isEmpty()) {
-            item {
-                EmptyState(
-                    onAddTransaction = onAddTransaction,
-                    onData = onData,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 320.dp),
-                )
+            if (sortedTransactions.isEmpty()) {
+                item {
+                    EmptyState(
+                        onAddTransaction = onAddTransaction,
+                        onData = onData,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 320.dp),
+                    )
+                }
+            } else {
+                item {
+                    RecentTransactionsHeader(
+                        title = "Transactions",
+                        count = filteredTransactions.size,
+                        detail =
+                            if (filteredTransactions.size ==
+                                sortedTransactions.size
+                            ) {
+                                "All time"
+                            } else {
+                                "${sortedTransactions.size} total"
+                            },
+                    )
+                }
+                item {
+                    TransactionFilterBar(
+                        timeFilter = timeFilter,
+                        selectedCategory = selectedCategory,
+                        categories = categories,
+                        whereFilter = whereFilter,
+                        isExpanded = filtersExpanded,
+                        onExpandedChange = { filtersExpanded = it },
+                        onTimeFilterChange = { timeFilterName = it.name },
+                        onCategoryChange = { selectedCategory = it },
+                        onWhereFilterChange = { whereFilter = it },
+                        onClear = {
+                            timeFilterName = TransactionTimeFilter.All.name
+                            selectedCategory = null
+                            whereFilter = ""
+                            filtersExpanded = false
+                        },
+                    )
+                }
             }
-        } else {
-            item {
-                RecentTransactionsHeader(
-                    title = "Transactions",
-                    count = filteredTransactions.size,
-                    detail = if (filteredTransactions.size == sortedTransactions.size) "All time" else "${sortedTransactions.size} total",
-                )
-            }
-            item {
-                TransactionFilterBar(
-                    timeFilter = timeFilter,
-                    selectedCategory = selectedCategory,
-                    categories = categories,
-                    whereFilter = whereFilter,
-                    isExpanded = filtersExpanded,
-                    onExpandedChange = { filtersExpanded = it },
-                    onTimeFilterChange = { timeFilterName = it.name },
-                    onCategoryChange = { selectedCategory = it },
-                    onWhereFilterChange = { whereFilter = it },
-                    onClear = {
-                        timeFilterName = TransactionTimeFilter.All.name
-                        selectedCategory = null
-                        whereFilter = ""
-                        filtersExpanded = false
-                    },
-                )
+            if (sortedTransactions.isNotEmpty() && filteredTransactions.isEmpty()) {
+                item {
+                    Text(
+                        text = "No matching transactions",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 28.dp)
+                                .testTag("transactions_empty_filter"),
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else if (sortedTransactions.isNotEmpty()) {
+                dayGroups.forEach { group ->
+                    stickyHeader(key = "transaction_day_${group.date}") {
+                        TransactionDayHeader(group)
+                    }
+                    items(group.transactions, key = { it.id }) { transaction ->
+                        SwipeTransactionRow(
+                            transaction = transaction,
+                            onEdit = { onEdit(transaction) },
+                            onDelete = { onDelete(transaction) },
+                        )
+                    }
+                }
             }
         }
-        if (sortedTransactions.isNotEmpty() && filteredTransactions.isEmpty()) {
-            item {
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun TransactionDayHeader(group: TransactionDayGroup) {
+    Surface(
+        color = MaterialTheme.colorScheme.background,
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("transaction_day_header_${group.date}"),
+    ) {
+        Column(
+            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = group.date.format(DayHeaderFormatter),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Text(
-                    text = "No matching transactions",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 28.dp)
-                        .testTag("transactions_empty_filter"),
-                    textAlign = TextAlign.Center,
+                    text = "Spent ${MoneyFormatter.formatUsd(group.spentCents)}",
+                    color = LocalFinanceColors.current.expense,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("transaction_day_spent_${group.date}"),
+                )
+                Text(
+                    text = "Received ${MoneyFormatter.formatUsd(group.receivedCents)}",
+                    color = LocalFinanceColors.current.income,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("transaction_day_received_${group.date}"),
                 )
             }
-        } else if (sortedTransactions.isNotEmpty()) {
-            items(filteredTransactions, key = { it.id }) { transaction ->
-                SwipeTransactionRow(
-                    transaction = transaction,
-                    onEdit = { onEdit(transaction) },
-                    onDelete = { onDelete(transaction) },
-                )
-            }
-        }
         }
     }
 }
@@ -1329,28 +1488,36 @@ private fun TransactionFilterBar(
     onClear: () -> Unit,
 ) {
     val hasActiveFilter = timeFilter != TransactionTimeFilter.All || selectedCategory != null || whereFilter.isNotBlank()
-    val summary = buildList {
-        if (timeFilter != TransactionTimeFilter.All) add(timeFilter.label)
-        selectedCategory?.let { add(it) }
-        if (whereFilter.isNotBlank()) add("“${whereFilter.trim()}”")
-    }.joinToString(" · ").ifBlank { "All transactions" }
+    val summary =
+        buildList {
+            if (timeFilter != TransactionTimeFilter.All) add(timeFilter.label)
+            selectedCategory?.let { add(it) }
+            if (whereFilter.isNotBlank()) add("“${whereFilter.trim()}”")
+        }.joinToString(" · ").ifBlank { "All transactions" }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp)
-                .clip(MaterialTheme.shapes.large)
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-                .clickable(role = Role.Button) { onExpandedChange(!isExpanded) }
-                .semantics { stateDescription = if (isExpanded) "Expanded" else "Collapsed" }
-                .padding(horizontal = 14.dp, vertical = 10.dp)
-                .testTag("transaction_filter_toggle"),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clip(MaterialTheme.shapes.large)
+                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                    .clickable(role = Role.Button) { onExpandedChange(!isExpanded) }
+                    .semantics { stateDescription = if (isExpanded) "Expanded" else "Collapsed" }
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                    .testTag("transaction_filter_toggle"),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Filters", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                Text(summary, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    summary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             if (hasActiveFilter) {
                 TextButton(
@@ -1372,14 +1539,16 @@ private fun TransactionFilterBar(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 colors = flowTextFieldColors(),
                 shape = MaterialTheme.shapes.large,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("transaction_where_filter"),
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag("transaction_where_filter"),
             )
             FlowRow(
-                modifier = Modifier
-                    .selectableGroup()
-                    .testTag("transaction_time_filter_group"),
+                modifier =
+                    Modifier
+                        .selectableGroup()
+                        .testTag("transaction_time_filter_group"),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -1393,9 +1562,10 @@ private fun TransactionFilterBar(
                 }
             }
             FlowRow(
-                modifier = Modifier
-                    .selectableGroup()
-                    .testTag("transaction_category_filter_group"),
+                modifier =
+                    Modifier
+                        .selectableGroup()
+                        .testTag("transaction_category_filter_group"),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -1450,95 +1620,107 @@ private fun InsightsPage(
         if (selectedCategory != null && categoryTotals.none { it.category == selectedCategory }) selectedCategory = null
     }
 
-    val selectedDailySpend = remember(dailySpending, selectedDay) {
-        selectedDay?.let { day -> dailySpending.firstOrNull { it.date == day } }
-    }
-    val selectedCategoryTotal = remember(categoryTotals, selectedCategory) {
-        selectedCategory?.let { category -> categoryTotals.firstOrNull { it.category == category } }
-    }
-    val selectedTransactions = remember(rangeTransactions, selectedDailySpend, selectedCategoryTotal) {
-        when {
-            selectedDailySpend != null -> rangeTransactions.filter { it.cents < 0 && it.localDate() == selectedDailySpend.date }
-            selectedCategoryTotal != null -> rangeTransactions.filter {
-                it.cents < 0 && it.insightCategory() == selectedCategoryTotal.category
-            }
-            else -> emptyList()
+    val selectedDailySpend =
+        remember(dailySpending, selectedDay) {
+            selectedDay?.let { day -> dailySpending.firstOrNull { it.date == day } }
         }
-    }
-    val insightTitle = selectedDailySpend?.let { it.date.format(ShortDateFormatter) }
-        ?: selectedCategoryTotal?.let { "${it.category} spending" }
-    val insightAmount = selectedDailySpend?.let { MoneyFormatter.formatUsd(it.cents) }
-        ?: selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
+    val selectedCategoryTotal =
+        remember(categoryTotals, selectedCategory) {
+            selectedCategory?.let { category -> categoryTotals.firstOrNull { it.category == category } }
+        }
+    val selectedTransactions =
+        remember(rangeTransactions, selectedDailySpend, selectedCategoryTotal) {
+            when {
+                selectedDailySpend != null -> {
+                    rangeTransactions.filter { it.cents < 0 && it.localDate() == selectedDailySpend.date }
+                }
+
+                selectedCategoryTotal != null -> {
+                    rangeTransactions.filter {
+                        it.cents < 0 && it.insightCategory() == selectedCategoryTotal.category
+                    }
+                }
+
+                else -> {
+                    emptyList()
+                }
+            }
+        }
+    val insightTitle =
+        selectedDailySpend?.let { it.date.format(ShortDateFormatter) }
+            ?: selectedCategoryTotal?.let { "${it.category} spending" }
+    val insightAmount =
+        selectedDailySpend?.let { MoneyFormatter.formatUsd(it.cents) }
+            ?: selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
 
     Box(modifier = modifier) {
         LazyColumn(
-            modifier = Modifier
-                .widthIn(max = 720.dp)
-                .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .testTag("insights_list"),
+            modifier =
+                Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .testTag("insights_list"),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PagePadding,
         ) {
-        item {
-            DateRangeControls(
-                mode = chartRangeMode,
-                selectedMonth = selectedMonth,
-                dateRange = dateRange,
-                availableMonths = availableMonths,
-                onModeSelected = onChartRangeModeSelected,
-                onSelectedMonthChange = onSelectedMonthChange,
-            )
-        }
-        if (categoryTotals.isEmpty()) {
-            item { InsightsEmptyState(onAddTransaction = onAddTransaction) }
-        } else {
             item {
-                SpendingTimelineCard(
-                    dailySpending = dailySpending,
-                    range = dateRange,
-                    selectedDay = selectedDay,
-                    onDaySelected = { day ->
-                        selectedDay = day
-                        selectedCategory = null
-                    },
+                DateRangeControls(
+                    mode = chartRangeMode,
+                    selectedMonth = selectedMonth,
+                    dateRange = dateRange,
+                    availableMonths = availableMonths,
+                    onModeSelected = onChartRangeModeSelected,
+                    onSelectedMonthChange = onSelectedMonthChange,
                 )
             }
-            item {
-                CategoryBreakdownCard(
-                    totals = categoryTotals,
-                    selectedCategory = selectedCategory,
-                    onCategorySelected = { category ->
-                        selectedCategory = category
-                        selectedDay = null
-                    },
-                )
-            }
-            if (insightTitle != null && insightAmount != null) {
+            if (categoryTotals.isEmpty()) {
+                item { InsightsEmptyState(onAddTransaction = onAddTransaction) }
+            } else {
                 item {
-                    InsightSelectionHeader(
-                        title = insightTitle,
-                        amount = insightAmount,
-                        isEmpty = selectedTransactions.isEmpty(),
+                    SpendingTimelineCard(
+                        dailySpending = dailySpending,
+                        range = dateRange,
+                        selectedDay = selectedDay,
+                        onDaySelected = { day ->
+                            selectedDay = day
+                            selectedCategory = null
+                        },
                     )
                 }
-                items(selectedTransactions, key = { "insight_${it.id}" }) { transaction ->
-                    TransactionRow(
-                        transaction = transaction,
-                        onClick = { onEdit(transaction) },
-                        modifier = Modifier.testTag("insight_transaction_${transaction.id}"),
+                item {
+                    CategoryBreakdownCard(
+                        totals = categoryTotals,
+                        selectedCategory = selectedCategory,
+                        onCategorySelected = { category ->
+                            selectedCategory = category
+                            selectedDay = null
+                        },
                     )
+                }
+                if (insightTitle != null && insightAmount != null) {
+                    item {
+                        InsightSelectionHeader(
+                            title = insightTitle,
+                            amount = insightAmount,
+                            isEmpty = selectedTransactions.isEmpty(),
+                        )
+                    }
+                    items(selectedTransactions, key = { "insight_${it.id}" }) { transaction ->
+                        TransactionRow(
+                            transaction = transaction,
+                            onClick = { onEdit(transaction) },
+                            modifier = Modifier.testTag("insight_transaction_${transaction.id}"),
+                        )
+                    }
                 }
             }
-        }
         }
     }
 }
 
 @Composable
-private fun InsightsEmptyState(
-    onAddTransaction: () -> Unit,
-) {
+private fun InsightsEmptyState(onAddTransaction: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         shape = MaterialTheme.shapes.medium,
@@ -1604,280 +1786,305 @@ internal fun DataSheet(
                     enabled = !isBusy,
                     colors = ButtonDefaults.buttonColors(),
                     shape = MaterialTheme.shapes.large,
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .testTag("csv_import_button"),
+                    modifier =
+                        Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("csv_import_button"),
                 ) { Text("Import CSV") }
                 Button(
                     onClick = onExport,
                     enabled = !isBusy,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    ),
+                    colors =
+                        ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        ),
                     shape = MaterialTheme.shapes.large,
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .testTag("csv_export_button"),
+                    modifier =
+                        Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("csv_export_button"),
                 ) { Text("Export CSV") }
             }
         }
     }
 
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .fillMaxHeight(0.88f)
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.88f),
     ) {
-    Column(
-        modifier = Modifier
-            .widthIn(max = 720.dp)
-            .fillMaxWidth()
-            .align(Alignment.TopCenter)
-            .padding(horizontal = 20.dp, vertical = 8.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth(),
+        Column(
+            modifier =
+                Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
         ) {
-            Text("Data", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            TextButton(onClick = onClose, enabled = !isBusy) { Text("Close") }
-        }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Data", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                TextButton(onClick = onClose, enabled = !isBusy) { Text("Close") }
+            }
 
-        operation?.let {
-            Text(
-                text = "${it.label}…",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier
-                    .padding(top = 4.dp)
-                    .semantics {
-                        liveRegion = LiveRegionMode.Polite
-                        stateDescription = it.label
-                    }
-                    .testTag("data_operation_status"),
-            )
-        }
+            operation?.let {
+                Text(
+                    text = "${it.label}…",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier =
+                        Modifier
+                            .padding(top = 4.dp)
+                            .semantics {
+                                liveRegion = LiveRegionMode.Polite
+                                stateDescription = it.label
+                            }.testTag("data_operation_status"),
+                )
+            }
 
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            contentPadding = PaddingValues(top = 10.dp, bottom = 20.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            when {
-                profile == null -> {
-                    item { localDataCard() }
-                    item {
-                        DataCard(modifier = Modifier.testTag("simplefin_setup_card")) {
-                            SectionLabel("Bank sync")
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "1. Open SimpleFIN and copy a setup token.",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            TextButton(onClick = onOpenSetup, enabled = !isBusy) { Text("Open setup") }
-                            Text(
-                                "2. Paste the token below, then connect.",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            OutlinedTextField(
-                                value = setupToken,
-                                onValueChange = { setupToken = it },
-                                label = { Text("Setup token") },
-                                singleLine = true,
-                                enabled = !isBusy,
-                                colors = flowTextFieldColors(),
-                                shape = MaterialTheme.shapes.medium,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("simplefin_setup_token"),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            Button(
-                                onClick = {
-                                    val token = setupToken.trim()
-                                    if (token.isNotBlank()) {
-                                        setupToken = ""
-                                        onConnect(token)
-                                    }
-                                },
-                                enabled = !isBusy && setupToken.isNotBlank(),
-                                colors = ButtonDefaults.buttonColors(),
-                                shape = MaterialTheme.shapes.large,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text("Connect") }
-                        }
-                    }
-                }
-                profile.isPaused -> {
-                    item {
-                        DataCard(
-                            modifier = Modifier.testTag("simplefin_setup_card"),
-                            backgroundColor = MaterialTheme.colorScheme.errorContainer,
-                        ) {
-                            SectionLabel("Bank sync needs attention")
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "Reconnect SimpleFIN to resume bank syncing. Your local data and CSV are still available.",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.testTag("simplefin_reconnect_message"),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            Text("1. Open SimpleFIN and copy a new setup token.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                            TextButton(onClick = onOpenSetup, enabled = !isBusy) { Text("Open setup") }
-                            Text("2. Paste the token below, then reconnect.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                            OutlinedTextField(
-                                value = setupToken,
-                                onValueChange = { setupToken = it },
-                                label = { Text("New setup token") },
-                                singleLine = true,
-                                enabled = !isBusy,
-                                colors = flowTextFieldColors(),
-                                shape = MaterialTheme.shapes.medium,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("simplefin_setup_token"),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            Button(
-                                onClick = {
-                                    val token = setupToken.trim()
-                                    if (token.isNotBlank()) {
-                                        setupToken = ""
-                                        onConnect(token)
-                                    }
-                                },
-                                enabled = !isBusy && setupToken.isNotBlank(),
-                                colors = ButtonDefaults.buttonColors(),
-                                shape = MaterialTheme.shapes.large,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text("Reconnect") }
-                            TextButton(
-                                onClick = onDisconnect,
-                                enabled = !isBusy,
-                                modifier = Modifier.testTag("simplefin_disconnect_button"),
-                            ) {
-                                Text("Disconnect", color = LocalFinanceColors.current.expense)
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = PaddingValues(top = 10.dp, bottom = 20.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                when {
+                    profile == null -> {
+                        item { localDataCard() }
+                        item {
+                            DataCard(modifier = Modifier.testTag("simplefin_setup_card")) {
+                                SectionLabel("Bank sync")
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "1. Open SimpleFIN and copy a setup token.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                TextButton(onClick = onOpenSetup, enabled = !isBusy) { Text("Open setup") }
+                                Text(
+                                    "2. Paste the token below, then connect.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                OutlinedTextField(
+                                    value = setupToken,
+                                    onValueChange = { setupToken = it },
+                                    label = { Text("Setup token") },
+                                    singleLine = true,
+                                    enabled = !isBusy,
+                                    colors = flowTextFieldColors(),
+                                    shape = MaterialTheme.shapes.medium,
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .testTag("simplefin_setup_token"),
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                Button(
+                                    onClick = {
+                                        val token = setupToken.trim()
+                                        if (token.isNotBlank()) {
+                                            setupToken = ""
+                                            onConnect(token)
+                                        }
+                                    },
+                                    enabled = !isBusy && setupToken.isNotBlank(),
+                                    colors = ButtonDefaults.buttonColors(),
+                                    shape = MaterialTheme.shapes.large,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Connect") }
                             }
                         }
                     }
-                    item { localDataCard() }
-                }
-                else -> {
-                    item {
-                        DataCard(modifier = Modifier.testTag("bank_sync_card")) {
-                            SectionLabel("Bank sync")
-                            Spacer(Modifier.height(8.dp))
-                            StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
-                            StatusLine("Last error", profile.lastError?.takeIf { it.isNotBlank() } ?: "None")
-                            Spacer(Modifier.height(10.dp))
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            Spacer(Modifier.height(10.dp))
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .semantics {
-                                        contentDescription = "Automatic sync frequency"
-                                        stateDescription = automaticSyncFrequencyLabel(profile.automaticSyncsPerDay)
-                                    }
-                                    .testTag("simplefin_auto_sync_frequency_control"),
-                                verticalAlignment = Alignment.CenterVertically,
+
+                    profile.isPaused -> {
+                        item {
+                            DataCard(
+                                modifier = Modifier.testTag("simplefin_setup_card"),
+                                backgroundColor = MaterialTheme.colorScheme.errorContainer,
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("Automatic syncs", fontWeight = FontWeight.SemiBold)
-                                    Text(
-                                        automaticSyncFrequencyLabel(profile.automaticSyncsPerDay),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        modifier = Modifier.testTag("simplefin_auto_sync_frequency_value"),
-                                    )
+                                SectionLabel("Bank sync needs attention")
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Reconnect SimpleFIN to resume bank syncing. Your local data and CSV are still available.",
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.testTag("simplefin_reconnect_message"),
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    "1. Open SimpleFIN and copy a new setup token.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 13.sp,
+                                )
+                                TextButton(onClick = onOpenSetup, enabled = !isBusy) { Text("Open setup") }
+                                Text(
+                                    "2. Paste the token below, then reconnect.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 13.sp,
+                                )
+                                OutlinedTextField(
+                                    value = setupToken,
+                                    onValueChange = { setupToken = it },
+                                    label = { Text("New setup token") },
+                                    singleLine = true,
+                                    enabled = !isBusy,
+                                    colors = flowTextFieldColors(),
+                                    shape = MaterialTheme.shapes.medium,
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .testTag("simplefin_setup_token"),
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                Button(
+                                    onClick = {
+                                        val token = setupToken.trim()
+                                        if (token.isNotBlank()) {
+                                            setupToken = ""
+                                            onConnect(token)
+                                        }
+                                    },
+                                    enabled = !isBusy && setupToken.isNotBlank(),
+                                    colors = ButtonDefaults.buttonColors(),
+                                    shape = MaterialTheme.shapes.large,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("Reconnect") }
+                                TextButton(
+                                    onClick = onDisconnect,
+                                    enabled = !isBusy,
+                                    modifier = Modifier.testTag("simplefin_disconnect_button"),
+                                ) {
+                                    Text("Disconnect", color = LocalFinanceColors.current.expense)
                                 }
-                                Box {
-                                    TextButton(
-                                        onClick = { automaticSyncsExpanded = true },
-                                        enabled = !isBusy,
-                                        modifier = Modifier
-                                            .heightIn(min = 48.dp)
-                                            .testTag("simplefin_auto_sync_frequency_action")
+                            }
+                        }
+                        item { localDataCard() }
+                    }
+
+                    else -> {
+                        item {
+                            DataCard(modifier = Modifier.testTag("bank_sync_card")) {
+                                SectionLabel("Bank sync")
+                                Spacer(Modifier.height(8.dp))
+                                StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
+                                StatusLine("Last error", profile.lastError?.takeIf { it.isNotBlank() } ?: "None")
+                                Spacer(Modifier.height(10.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                Spacer(Modifier.height(10.dp))
+                                Row(
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
                                             .semantics {
-                                                contentDescription = "Change automatic sync frequency"
+                                                contentDescription = "Automatic sync frequency"
                                                 stateDescription = automaticSyncFrequencyLabel(profile.automaticSyncsPerDay)
-                                            },
-                                    ) { Text("Change") }
-                                    DropdownMenu(
-                                        expanded = automaticSyncsExpanded,
-                                        onDismissRequest = { automaticSyncsExpanded = false },
-                                        modifier = Modifier.testTag("simplefin_auto_sync_frequency_menu"),
-                                    ) {
-                                        (1..12).forEach { count ->
-                                            DropdownMenuItem(
-                                                text = { Text(automaticSyncFrequencyLabel(count)) },
-                                                onClick = {
-                                                    automaticSyncsExpanded = false
-                                                    onAutomaticSyncsPerDayChange(count)
-                                                },
-                                                enabled = !isBusy,
-                                                modifier = Modifier
-                                                    .testTag("simplefin_auto_sync_frequency_option_$count")
+                                            }.testTag("simplefin_auto_sync_frequency_control"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Automatic syncs", fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            automaticSyncFrequencyLabel(profile.automaticSyncsPerDay),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            modifier = Modifier.testTag("simplefin_auto_sync_frequency_value"),
+                                        )
+                                    }
+                                    Box {
+                                        TextButton(
+                                            onClick = { automaticSyncsExpanded = true },
+                                            enabled = !isBusy,
+                                            modifier =
+                                                Modifier
+                                                    .heightIn(min = 48.dp)
+                                                    .testTag("simplefin_auto_sync_frequency_action")
                                                     .semantics {
-                                                        contentDescription = "Set automatic sync frequency to ${automaticSyncFrequencyLabel(count)}"
+                                                        contentDescription = "Change automatic sync frequency"
+                                                        stateDescription = automaticSyncFrequencyLabel(profile.automaticSyncsPerDay)
                                                     },
-                                            )
+                                        ) { Text("Change") }
+                                        DropdownMenu(
+                                            expanded = automaticSyncsExpanded,
+                                            onDismissRequest = { automaticSyncsExpanded = false },
+                                            modifier = Modifier.testTag("simplefin_auto_sync_frequency_menu"),
+                                        ) {
+                                            (1..12).forEach { count ->
+                                                DropdownMenuItem(
+                                                    text = { Text(automaticSyncFrequencyLabel(count)) },
+                                                    onClick = {
+                                                        automaticSyncsExpanded = false
+                                                        onAutomaticSyncsPerDayChange(count)
+                                                    },
+                                                    enabled = !isBusy,
+                                                    modifier =
+                                                        Modifier
+                                                            .testTag("simplefin_auto_sync_frequency_option_$count")
+                                                            .semantics {
+                                                                contentDescription =
+                                                                    "Set automatic sync frequency to ${automaticSyncFrequencyLabel(count)}"
+                                                            },
+                                                )
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            Text(
-                                "Choose 1–12 automatic syncs per day. Timing is approximate. SimpleFIN expects 24 or fewer requests daily; redirects, retries, and setup can use extra requests, so this setting cannot guarantee that limit.",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 4.dp),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            Button(
-                                onClick = onSync,
-                                enabled = !isBusy,
-                                colors = ButtonDefaults.buttonColors(),
-                                shape = MaterialTheme.shapes.large,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("simplefin_sync_button"),
-                            ) { Text("Sync now") }
-                            TextButton(
-                                onClick = onDisconnect,
-                                enabled = !isBusy,
-                                modifier = Modifier.testTag("simplefin_disconnect_button"),
-                            ) {
-                                Text("Disconnect", color = LocalFinanceColors.current.expense)
-                            }
-                        }
-                    }
-                    item {
-                        DataCard(modifier = Modifier.testTag("connected_accounts_card")) {
-                            SectionLabel("Connected accounts")
-                            Spacer(Modifier.height(8.dp))
-                            if (simpleFin.accounts.isEmpty()) {
-                                Text("No accounts synced yet", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                            } else {
-                                simpleFin.accounts.forEach { account ->
-                                    Text(account.name, fontWeight = FontWeight.SemiBold)
-                                    Text(account.institutionName ?: account.currency.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                                    Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Choose 1–12 automatic syncs per day. Timing is approximate. SimpleFIN expects 24 or fewer requests daily; redirects, retries, and setup can use extra requests, so this setting cannot guarantee that limit.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                Button(
+                                    onClick = onSync,
+                                    enabled = !isBusy,
+                                    colors = ButtonDefaults.buttonColors(),
+                                    shape = MaterialTheme.shapes.large,
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .testTag("simplefin_sync_button"),
+                                ) { Text("Sync now") }
+                                TextButton(
+                                    onClick = onDisconnect,
+                                    enabled = !isBusy,
+                                    modifier = Modifier.testTag("simplefin_disconnect_button"),
+                                ) {
+                                    Text("Disconnect", color = LocalFinanceColors.current.expense)
                                 }
                             }
                         }
+                        item {
+                            DataCard(modifier = Modifier.testTag("connected_accounts_card")) {
+                                SectionLabel("Connected accounts")
+                                Spacer(Modifier.height(8.dp))
+                                if (simpleFin.accounts.isEmpty()) {
+                                    Text("No accounts synced yet", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                } else {
+                                    simpleFin.accounts.forEach { account ->
+                                        Text(account.name, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            account.institutionName ?: account.currency.orEmpty(),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            fontSize = 13.sp,
+                                        )
+                                        Spacer(Modifier.height(8.dp))
+                                    }
+                                }
+                            }
+                        }
+                        item { localDataCard() }
                     }
-                    item { localDataCard() }
                 }
             }
         }
-    }
     }
 }
 
@@ -1888,19 +2095,34 @@ private fun DataCard(
     content: @Composable () -> Unit,
 ) {
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(backgroundColor ?: MaterialTheme.colorScheme.surfaceContainer)
-            .padding(14.dp),
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.medium)
+                .background(backgroundColor ?: MaterialTheme.colorScheme.surfaceContainer)
+                .padding(14.dp),
     ) { content() }
 }
 
 @Composable
-private fun StatusLine(label: String, value: String) {
+private fun StatusLine(
+    label: String,
+    value: String,
+) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(0.38f))
-        Text(value, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(0.62f), textAlign = TextAlign.End)
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(0.38f),
+        )
+        Text(
+            value,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(0.62f),
+            textAlign = TextAlign.End,
+        )
     }
 }
 
@@ -1921,12 +2143,13 @@ private fun DateRangeControls(
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainer)
-            .padding(14.dp)
-            .testTag("date_range_controls"),
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.medium)
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .padding(14.dp)
+                .testTag("date_range_controls"),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         BoxWithConstraints(
@@ -1988,31 +2211,37 @@ private fun MonthYearPicker(
     onSelectedMonthChange: (YearMonth) -> Unit,
 ) {
     val pickerMonths = remember(availableMonths) { availableMonths.toSet() }
-    val availableYears = remember(availableMonths) {
-        availableMonths.map { it.year }.distinct().sortedDescending()
-    }
+    val availableYears =
+        remember(availableMonths) {
+            availableMonths.map { it.year }.distinct().sortedDescending()
+        }
     var visibleYear by rememberSaveable { mutableStateOf(selectedMonth.year) }
     LaunchedEffect(selectedMonth, availableYears) {
-        visibleYear = when {
-            selectedMonth.year in availableYears -> selectedMonth.year
-            visibleYear in availableYears -> visibleYear
-            else -> availableYears.first()
+        visibleYear =
+            when {
+                selectedMonth.year in availableYears -> selectedMonth.year
+                visibleYear in availableYears -> visibleYear
+                else -> availableYears.first()
+            }
+    }
+    val olderYear =
+        remember(visibleYear, availableYears) {
+            availableYears.filter { it < visibleYear }.maxOrNull()
         }
-    }
-    val olderYear = remember(visibleYear, availableYears) {
-        availableYears.filter { it < visibleYear }.maxOrNull()
-    }
-    val newerYear = remember(visibleYear, availableYears) {
-        availableYears.filter { it > visibleYear }.minOrNull()
-    }
-    val visibleMonths = remember(visibleYear, pickerMonths) {
-        pickerMonths.filter { it.year == visibleYear }.sortedBy { it.monthValue }
-    }
+    val newerYear =
+        remember(visibleYear, availableYears) {
+            availableYears.filter { it > visibleYear }.minOrNull()
+        }
+    val visibleMonths =
+        remember(visibleYear, pickerMonths) {
+            pickerMonths.filter { it.year == visibleYear }.sortedBy { it.monthValue }
+        }
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("month_year_picker"),
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("month_year_picker"),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(
@@ -2063,13 +2292,14 @@ private fun MonthChip(
     onClick: () -> Unit,
 ) {
     Box(
-        modifier = Modifier
-            .heightIn(min = 48.dp)
-            .clip(MaterialTheme.shapes.large)
-            .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
-            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
-            .testTag("month_chip_${month.year}_${month.monthValue.toString().padStart(2, '0')}")
-            .padding(horizontal = 12.dp),
+        modifier =
+            Modifier
+                .heightIn(min = 48.dp)
+                .clip(MaterialTheme.shapes.large)
+                .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+                .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+                .testTag("month_chip_${month.year}_${month.monthValue.toString().padStart(2, '0')}")
+                .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -2089,18 +2319,26 @@ private fun PickerNavButton(
     modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = modifier
-            .heightIn(min = 48.dp)
-            .widthIn(min = 48.dp)
-            .clip(MaterialTheme.shapes.large)
-            .background(if (enabled) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .semantics { this.contentDescription = contentDescription },
+        modifier =
+            modifier
+                .heightIn(min = 48.dp)
+                .widthIn(min = 48.dp)
+                .clip(MaterialTheme.shapes.large)
+                .background(if (enabled) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+                .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = text,
-            color = if (enabled) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+            color =
+                if (enabled) {
+                    MaterialTheme.colorScheme.onSecondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurface.copy(
+                        alpha = 0.35f,
+                    )
+                },
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold,
         )
@@ -2149,12 +2387,17 @@ private fun SummaryBand(
 }
 
 @Composable
-private fun SummaryPill(label: String, value: String, modifier: Modifier = Modifier) {
+private fun SummaryPill(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+) {
     Column(
-        modifier = modifier
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.08f))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+        modifier =
+            modifier
+                .clip(MaterialTheme.shapes.medium)
+                .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.08f))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Text(
             label,
@@ -2187,22 +2430,27 @@ private fun SpendingTimelineCard(
     val selectionColor = LocalFinanceColors.current.expense
     val chartSurface = MaterialTheme.colorScheme.surfaceContainerLow
     val gridColor = MaterialTheme.colorScheme.outlineVariant
-    val chartSummary = buildString {
-        append("Spending timeline for ${range.label}. Total ${MoneyFormatter.formatUsd(total)}. ")
-        append("Peak ${MoneyFormatter.formatUsd(peak)}.")
-        selectedDay?.let { day ->
-            val amount = dailySpending.firstOrNull { it.date == day }?.cents ?: 0
-            append(" Selected ${day.format(ShortDateFormatter)}, ${MoneyFormatter.formatUsd(amount)}.")
+    val chartSummary =
+        buildString {
+            append("Spending timeline for ${range.label}. Total ${MoneyFormatter.formatUsd(total)}. ")
+            append("Peak ${MoneyFormatter.formatUsd(peak)}.")
+            selectedDay?.let { day ->
+                val amount = dailySpending.firstOrNull { it.date == day }?.cents ?: 0
+                append(" Selected ${day.format(ShortDateFormatter)}, ${MoneyFormatter.formatUsd(amount)}.")
+            }
         }
-    }
 
-    fun selectAtX(x: Float, width: Float) {
+    fun selectAtX(
+        x: Float,
+        width: Float,
+    ) {
         if (dailySpending.isEmpty() || width <= 0f) return
-        val index = if (dailySpending.lastIndex == 0) {
-            0
-        } else {
-            ((x.coerceIn(0f, width) / width) * dailySpending.lastIndex).roundToInt()
-        }
+        val index =
+            if (dailySpending.lastIndex == 0) {
+                0
+            } else {
+                ((x.coerceIn(0f, width) / width) * dailySpending.lastIndex).roundToInt()
+            }
         onDaySelected(dailySpending[index.coerceIn(0, dailySpending.lastIndex)].date)
     }
 
@@ -2228,14 +2476,15 @@ private fun SpendingTimelineCard(
                 )
             }
             Canvas(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(84.dp)
-                    .semantics { contentDescription = chartSummary }
-                    .testTag("spending_timeline_chart")
-                    .pointerInput(dailySpending, onDaySelected) {
-                        detectTapGestures { offset -> selectAtX(offset.x, size.width.toFloat()) }
-                    },
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .height(84.dp)
+                        .semantics { contentDescription = chartSummary }
+                        .testTag("spending_timeline_chart")
+                        .pointerInput(dailySpending, onDaySelected) {
+                            detectTapGestures { offset -> selectAtX(offset.x, size.width.toFloat()) }
+                        },
             ) {
                 val topPadding = 8.dp.toPx()
                 val bottomPadding = 12.dp.toPx()
@@ -2251,15 +2500,17 @@ private fun SpendingTimelineCard(
                     )
                 }
 
-                val points = values.mapIndexed { index, cents ->
-                    val x = step * index
-                    val y = topPadding + (1f - cents.toFloat() / scalePeak.toFloat()) * chartHeight
-                    Offset(x, y)
-                }
-                val path = Path().apply {
-                    points.firstOrNull()?.let { moveTo(it.x, it.y) }
-                    points.drop(1).forEach { point -> lineTo(point.x, point.y) }
-                }
+                val points =
+                    values.mapIndexed { index, cents ->
+                        val x = step * index
+                        val y = topPadding + (1f - cents.toFloat() / scalePeak.toFloat()) * chartHeight
+                        Offset(x, y)
+                    }
+                val path =
+                    Path().apply {
+                        points.firstOrNull()?.let { moveTo(it.x, it.y) }
+                        points.drop(1).forEach { point -> lineTo(point.x, point.y) }
+                    }
                 drawPath(
                     path = path,
                     color = lineColor,
@@ -2307,21 +2558,20 @@ private fun InsightDayOption(
 ) {
     val amount = MoneyFormatter.formatUsd(day.cents)
     Box(
-        modifier = Modifier
-            .testTag("insight_day_${day.date}")
-            .heightIn(min = 48.dp)
-            .clip(MaterialTheme.shapes.large)
-            .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
-            .selectable(
-                selected = selected,
-                role = Role.RadioButton,
-                onClick = onClick,
-            )
-            .semantics(mergeDescendants = true) {
-                contentDescription = "${day.date.format(ShortDateFormatter)}, $amount"
-                stateDescription = if (selected) "Selected" else "Not selected"
-            }
-            .padding(horizontal = 12.dp, vertical = 9.dp),
+        modifier =
+            Modifier
+                .testTag("insight_day_${day.date}")
+                .heightIn(min = 48.dp)
+                .clip(MaterialTheme.shapes.large)
+                .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+                .selectable(
+                    selected = selected,
+                    role = Role.RadioButton,
+                    onClick = onClick,
+                ).semantics(mergeDescendants = true) {
+                    contentDescription = "${day.date.format(ShortDateFormatter)}, $amount"
+                    stateDescription = if (selected) "Selected" else "Not selected"
+                }.padding(horizontal = 12.dp, vertical = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -2341,17 +2591,19 @@ private fun CategoryBreakdownCard(
     onCategorySelected: (String) -> Unit,
 ) {
     val peak = totals.maxOfOrNull { it.cents }?.coerceAtLeast(1L) ?: 1L
-    val chartColors = listOf(
-        MaterialTheme.colorScheme.primary,
-        MaterialTheme.colorScheme.tertiary,
-        MaterialTheme.colorScheme.secondary,
-        LocalFinanceColors.current.expense,
-    )
+    val chartColors =
+        listOf(
+            MaterialTheme.colorScheme.primary,
+            MaterialTheme.colorScheme.tertiary,
+            MaterialTheme.colorScheme.secondary,
+            LocalFinanceColors.current.expense,
+        )
     val chartSelectionOutline = MaterialTheme.colorScheme.onSurface
-    val chartSummary = totals.joinToString(
-        prefix = "Top categories. ",
-        separator = ". ",
-    ) { "${it.category} ${MoneyFormatter.formatUsd(it.cents)}" }
+    val chartSummary =
+        totals.joinToString(
+            prefix = "Top categories. ",
+            separator = ". ",
+        ) { "${it.category} ${MoneyFormatter.formatUsd(it.cents)}" }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
@@ -2373,11 +2625,12 @@ private fun CategoryBreakdownCard(
                 )
             } else {
                 Canvas(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                        .semantics { contentDescription = chartSummary }
-                        .testTag("category_breakdown_chart"),
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .height(56.dp)
+                            .semantics { contentDescription = chartSummary }
+                            .testTag("category_breakdown_chart"),
                 ) {
                     val gap = 10.dp.toPx()
                     val barWidth = (size.width - gap * (totals.size - 1)) / totals.size
@@ -2413,28 +2666,28 @@ private fun CategoryBreakdownCard(
                     totals.forEachIndexed { index, entry ->
                         val selected = selectedCategory == entry.category
                         Column(
-                            modifier = Modifier
-                                .testTag("insight_category_${entry.category.toCategoryChipTagSuffix()}")
-                                .weight(1f)
-                                .clip(MaterialTheme.shapes.small)
-                                .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-                                .heightIn(min = 48.dp)
-                                .selectable(
-                                    selected = selected,
-                                    role = Role.RadioButton,
-                                    onClick = { onCategorySelected(entry.category) },
-                                )
-                                .semantics(mergeDescendants = true) {
-                                    contentDescription = "${entry.category}, ${MoneyFormatter.formatUsd(entry.cents)}"
-                                    stateDescription = if (selected) "Selected" else "Not selected"
-                                }
-                                .padding(6.dp),
+                            modifier =
+                                Modifier
+                                    .testTag("insight_category_${entry.category.toCategoryChipTagSuffix()}")
+                                    .weight(1f)
+                                    .clip(MaterialTheme.shapes.small)
+                                    .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                                    .heightIn(min = 48.dp)
+                                    .selectable(
+                                        selected = selected,
+                                        role = Role.RadioButton,
+                                        onClick = { onCategorySelected(entry.category) },
+                                    ).semantics(mergeDescendants = true) {
+                                        contentDescription = "${entry.category}, ${MoneyFormatter.formatUsd(entry.cents)}"
+                                        stateDescription = if (selected) "Selected" else "Not selected"
+                                    }.padding(6.dp),
                         ) {
                             Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(chartColors[index % chartColors.size]),
+                                modifier =
+                                    Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(chartColors[index % chartColors.size]),
                             )
                             Text(
                                 text = entry.category,
@@ -2475,10 +2728,18 @@ private fun InsightSelectionHeader(
             Text("Selected insight", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelLarge)
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                Text(amount, color = LocalFinanceColors.current.expense, style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"))
+                Text(
+                    amount,
+                    color = LocalFinanceColors.current.expense,
+                    style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+                )
             }
             if (isEmpty) {
-                Text("No matching expense transactions.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "No matching expense transactions.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         }
     }
@@ -2523,10 +2784,11 @@ private fun EmptyState(
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
+                modifier =
+                    Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center,
             ) {
                 Text("$", color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold, fontSize = 20.sp)
@@ -2553,10 +2815,11 @@ private fun EmptyState(
                 val dataButton: @Composable (Modifier) -> Unit = { buttonModifier ->
                     Button(
                         onClick = onData,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        ),
+                        colors =
+                            ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            ),
                         shape = MaterialTheme.shapes.large,
                         modifier = buttonModifier.heightIn(min = 48.dp).testTag("empty_data_action"),
                     ) { Text("Import from Data") }
@@ -2585,29 +2848,35 @@ private fun SwipeTransactionRow(
     onDelete: () -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            when (value) {
-                SwipeToDismissBoxValue.StartToEnd -> {
-                    onEdit()
-                    false
+    val dismissState =
+        rememberSwipeToDismissBoxState(
+            confirmValueChange = { value ->
+                when (value) {
+                    SwipeToDismissBoxValue.StartToEnd -> {
+                        onEdit()
+                        false
+                    }
+
+                    SwipeToDismissBoxValue.EndToStart -> {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onDelete()
+                        false
+                    }
+
+                    SwipeToDismissBoxValue.Settled -> {
+                        false
+                    }
                 }
-                SwipeToDismissBoxValue.EndToStart -> {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onDelete()
-                    false
-                }
-                SwipeToDismissBoxValue.Settled -> false
-            }
-        },
-    )
+            },
+        )
 
     SwipeToDismissBox(
         state = dismissState,
         backgroundContent = { SwipeActionBackground() },
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("transaction_row"),
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("transaction_row"),
     ) {
         TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete)
     }
@@ -2616,26 +2885,29 @@ private fun SwipeTransactionRow(
 @Composable
 private fun SwipeActionBackground() {
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .clip(MaterialTheme.shapes.medium)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
     ) {
         Text(
             text = "Edit",
             color = MaterialTheme.colorScheme.primary,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .padding(start = 18.dp),
+            modifier =
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 18.dp),
         )
         Text(
             text = "Delete",
             color = LocalFinanceColors.current.expense,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 18.dp),
+            modifier =
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 18.dp),
         )
     }
 }
@@ -2647,69 +2919,196 @@ private fun TransactionRow(
     modifier: Modifier = Modifier,
     onDelete: (() -> Unit)? = null,
 ) {
-    val badgeColors = categoryBadgeColors(transaction.category)
+    val fontScale = LocalDensity.current.fontScale
+    var menuExpanded by remember { mutableStateOf(false) }
     Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("transaction_content_${transaction.id}")
-            .clickable(onClick = onClick)
-            .semantics {
-                customActions = buildList {
-                    add(CustomAccessibilityAction("Edit") { onClick(); true })
-                    onDelete?.let { delete -> add(CustomAccessibilityAction("Delete") { delete(); true }) }
-                }
-            },
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .testTag("transaction_content_${transaction.id}")
+                .clickable(onClick = onClick)
+                .semantics {
+                    customActions =
+                        buildList {
+                            add(
+                                CustomAccessibilityAction("Edit") {
+                                    onClick()
+                                    true
+                                },
+                            )
+                            onDelete?.let { delete ->
+                                add(
+                                    CustomAccessibilityAction("Delete") {
+                                        delete()
+                                        true
+                                    },
+                                )
+                            }
+                        }
+                },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         shape = MaterialTheme.shapes.medium,
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(badgeColors.container),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = transaction.category.firstOrNull()?.uppercase() ?: "$",
-                    fontWeight = FontWeight.Bold,
-                    color = badgeColors.content,
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = transaction.merchant.ifBlank { "Untitled" },
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = transaction.rowSubtitle(),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    transaction.recurringInterval?.let { recurringInterval ->
-                        Spacer(Modifier.width(6.dp))
-                        RecurringPill(recurringInterval = recurringInterval)
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val shouldStack = maxWidth < 420.dp || fontScale >= 1.3f
+            if (shouldStack) {
+                Column(modifier = Modifier.padding(start = 14.dp, top = 8.dp, end = 8.dp, bottom = 12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TransactionCategoryBadge(transaction.category)
+                        Spacer(Modifier.width(12.dp))
+                        TransactionIdentity(transaction, Modifier.weight(1f))
+                        TransactionOverflowMenu(
+                            transactionId = transaction.id,
+                            expanded = menuExpanded,
+                            onExpandedChange = { menuExpanded = it },
+                            onEdit = onClick,
+                            onDelete = onDelete,
+                        )
                     }
+                    TransactionAmount(
+                        transaction = transaction,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 54.dp, end = 6.dp),
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.padding(start = 14.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TransactionCategoryBadge(transaction.category)
+                    Spacer(Modifier.width(12.dp))
+                    TransactionIdentity(transaction, Modifier.weight(1f))
+                    Spacer(Modifier.width(10.dp))
+                    TransactionAmount(transaction, Modifier.widthIn(min = 96.dp))
+                    TransactionOverflowMenu(
+                        transactionId = transaction.id,
+                        expanded = menuExpanded,
+                        onExpandedChange = { menuExpanded = it },
+                        onEdit = onClick,
+                        onDelete = onDelete,
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun TransactionCategoryBadge(category: String) {
+    val badgeColors = categoryBadgeColors(category)
+    Box(
+        modifier =
+            Modifier
+                .size(42.dp)
+                .clip(CircleShape)
+                .background(badgeColors.container),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = category.firstOrNull()?.uppercase() ?: "$",
+            fontWeight = FontWeight.Bold,
+            color = badgeColors.content,
+        )
+    }
+}
+
+@Composable
+private fun TransactionIdentity(
+    transaction: Transaction,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier) {
+        Text(
+            text = transaction.merchant.ifBlank { "Untitled" },
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = MoneyFormatter.formatUsd(transaction.cents),
-                color = if (transaction.cents < 0) LocalFinanceColors.current.expense else LocalFinanceColors.current.income,
-                style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
-                textAlign = TextAlign.End,
-                modifier = Modifier.widthIn(min = 96.dp),
+                text = transaction.rowSubtitle(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
+            transaction.recurringInterval?.let { recurringInterval ->
+                Spacer(Modifier.width(6.dp))
+                RecurringPill(recurringInterval = recurringInterval)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransactionAmount(
+    transaction: Transaction,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = MoneyFormatter.formatUsd(transaction.cents),
+        color = if (transaction.cents < 0) LocalFinanceColors.current.expense else LocalFinanceColors.current.income,
+        style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+        textAlign = TextAlign.End,
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun TransactionOverflowMenu(
+    transactionId: String,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: (() -> Unit)?,
+) {
+    Box {
+        Box(
+            modifier =
+                Modifier
+                    .size(48.dp)
+                    .testTag("transaction_actions_$transactionId")
+                    .semantics {
+                        contentDescription = if (onDelete == null) "Edit transaction" else "Edit or delete transaction"
+                    }.clip(CircleShape)
+                    .clickable(role = Role.Button) { onExpandedChange(true) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("⋮", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { onExpandedChange(false) },
+        ) {
+            DropdownMenuItem(
+                text = { Text("Edit") },
+                onClick = {
+                    onExpandedChange(false)
+                    onEdit()
+                },
+                modifier =
+                    Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("transaction_action_edit_$transactionId"),
+            )
+            onDelete?.let { delete ->
+                DropdownMenuItem(
+                    text = { Text("Delete", color = LocalFinanceColors.current.expense) },
+                    onClick = {
+                        onExpandedChange(false)
+                        delete()
+                    },
+                    modifier =
+                        Modifier
+                            .heightIn(min = 48.dp)
+                            .testTag("transaction_action_delete_$transactionId"),
+                )
+            }
         }
     }
 }
@@ -2717,11 +3116,12 @@ private fun TransactionRow(
 @Composable
 private fun RecurringPill(recurringInterval: RecurrenceInterval) {
     Box(
-        modifier = Modifier
-            .clip(MaterialTheme.shapes.small)
-            .background(MaterialTheme.colorScheme.secondaryContainer)
-            .semantics { contentDescription = "Recurring ${recurringInterval.label}" }
-            .padding(horizontal = 7.dp, vertical = 3.dp),
+        modifier =
+            Modifier
+                .clip(MaterialTheme.shapes.small)
+                .background(MaterialTheme.colorScheme.secondaryContainer)
+                .semantics { contentDescription = "Recurring ${recurringInterval.label}" }
+                .padding(horizontal = 7.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -2757,6 +3157,9 @@ internal fun TransactionEditor(
     var locationStatus by rememberSaveable { mutableStateOf<String?>(null) }
     var locationSuggestion by rememberSaveable { mutableStateOf<String?>(null) }
     var amountInput by rememberSaveable(transaction?.id) { mutableStateOf(draft.amount) }
+    var moreDetailsExpanded by rememberSaveable(transaction?.id ?: draft.id ?: "new") {
+        mutableStateOf(draft.note.isNotBlank() || draft.recurringIntervalName.isNotBlank())
+    }
     val latestDraft by rememberUpdatedState(draft)
     val latestOnDraftChange by rememberUpdatedState(onDraftChange)
 
@@ -2764,37 +3167,56 @@ internal fun TransactionEditor(
         amountInput = draft.amount
     }
 
-    val merchantSuggestions = remember(suggestionHistory, draft.merchant, draft.category, draft.isExpense) {
-        TransactionSuggestions.merchantSuggestions(
-            history = suggestionHistory,
-            query = draft.merchant,
-            category = draft.category,
-            isExpense = draft.isExpense,
-        )
-    }
-    val rankedCategories = remember(suggestionHistory, draft.isExpense) {
-        suggestionHistory.categories(draft.isExpense)
-    }
-    val categoryPickerOptions = remember(rankedCategories, draft.category, showAllCategories) {
-        CategoryCatalog.pickerOptions(
-            ranked = rankedCategories,
-            selectedCategory = draft.category,
-            expanded = showAllCategories,
-        )
-    }
+    val merchantSuggestions =
+        remember(suggestionHistory, draft.merchant, draft.category, draft.isExpense) {
+            TransactionSuggestions.merchantSuggestions(
+                history = suggestionHistory,
+                query = draft.merchant,
+                category = draft.category,
+                isExpense = draft.isExpense,
+            )
+        }
+    val amountSuggestions =
+        remember(suggestionHistory, draft.merchant, draft.category, draft.isExpense) {
+            TransactionSuggestions.amountSuggestions(
+                history = suggestionHistory,
+                merchant = draft.merchant,
+                category = draft.category,
+                isExpense = draft.isExpense,
+            )
+        }
+    val rankedCategories =
+        remember(suggestionHistory, draft.isExpense) {
+            suggestionHistory.categories(draft.isExpense)
+        }
+    val categoryPickerOptions =
+        remember(rankedCategories, draft.category, showAllCategories) {
+            CategoryCatalog.pickerOptions(
+                ranked = rankedCategories,
+                selectedCategory = draft.category,
+                expanded = showAllCategories,
+            )
+        }
     LaunchedEffect(draft.amount, draft.merchant, draft.category, draft.isExpense, draft.occurredAtEpochMillis) {
         error = null
     }
 
     fun applyAmountKey(key: String) {
-        val amount = when (key) {
-            "back" -> amountInput.dropLast(1)
-            "." -> if (amountInput.contains(".")) amountInput else amountInput.ifBlank { "0" } + "."
-            else -> {
-                val candidate = if (amountInput == "0") key else amountInput + key
-                candidate.take(10)
+        val amount =
+            when (key) {
+                "back" -> {
+                    amountInput.dropLast(1)
+                }
+
+                "." -> {
+                    if (amountInput.contains(".")) amountInput else amountInput.ifBlank { "0" } + "."
+                }
+
+                else -> {
+                    val candidate = if (amountInput == "0") key else amountInput + key
+                    candidate.take(10)
+                }
             }
-        }
         amountInput = amount
         onDraftChange(draft.copy(amount = amount))
     }
@@ -2802,9 +3224,10 @@ internal fun TransactionEditor(
     fun loadNearbySuggestion() {
         scope.launch {
             locationStatus = "Finding nearby address..."
-            val suggestion = withContext(Dispatchers.IO) {
-                resolveLocationSuggestion(context)
-            }
+            val suggestion =
+                withContext(Dispatchers.IO) {
+                    resolveLocationSuggestion(context)
+                }
             if (suggestion == null) {
                 locationStatus = "No recent location available"
             } else {
@@ -2820,254 +3243,315 @@ internal fun TransactionEditor(
         }
     }
 
-    val locationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            loadNearbySuggestion()
-        } else {
-            locationStatus = "Location permission not granted"
-        }
-    }
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .fillMaxHeight(0.92f)
-    ) {
-    Column(
-        modifier = Modifier
-            .widthIn(max = 720.dp)
-            .fillMaxWidth()
-            .align(Alignment.TopCenter)
-            .testTag("transaction_editor")
-            .padding(horizontal = 20.dp, vertical = 8.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                text = if (transaction == null) "Add transaction" else "Edit transaction",
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onCancel, enabled = !persistenceBusy) {
-                Text("Close")
+    val locationPermissionLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission(),
+        ) { granted ->
+            if (granted) {
+                loadNearbySuggestion()
+            } else {
+                locationStatus = "Location permission not granted"
             }
         }
 
-        TransactionTypeToggle(
-            isExpense = draft.isExpense,
-            onExpenseChange = {
-                val updatedCategories = CategoryCatalog.categoriesFor(it)
-                showAllCategories = false
-                onDraftChange(draft.copy(isExpense = it, category = draft.category.takeIf { category -> category in updatedCategories } ?: updatedCategories.first()))
-            },
-        )
-
-        LazyColumn(
-            modifier = Modifier
+    BoxWithConstraints(
+        modifier =
+            modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .testTag("transaction_editor_form"),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            contentPadding = PaddingValues(top = 10.dp, bottom = 12.dp),
+                .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
+                .imePadding(),
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .heightIn(max = maxHeight)
+                    .align(Alignment.TopCenter)
+                    .testTag("transaction_editor")
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
         ) {
-            item {
-                AmountPad(
-                    amount = amountInput,
-                    isExpense = draft.isExpense,
-                    onKey = ::applyAmountKey,
-                )
-            }
-
-            item {
-                SectionLabel("Where")
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = draft.merchant,
-                    onValueChange = { onDraftChange(draft.copy(merchant = it)) },
-                    placeholder = { Text("Merchant or place") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.Words,
-                        imeAction = ImeAction.Next,
-                    ),
-                    colors = flowTextFieldColors(),
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("merchant_field"),
-                )
-                Spacer(Modifier.height(10.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SuggestionChip(
-                        label = "Near me",
-                        selected = locationStatus == "Finding nearby address...",
-                        isSelection = false,
-                        onClick = {
-                            if (hasLocationPermission(context)) {
-                                loadNearbySuggestion()
-                            } else {
-                                locationPermissionLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
-                            }
-                        },
-                    )
-                    locationSuggestion?.let { suggestion ->
-                        SuggestionChip(
-                            label = suggestion,
-                            selected = draft.merchant == suggestion,
-                            onClick = {
-                                onDraftChange(draft.copy(merchant = suggestion))
-                            },
-                        )
-                    }
-                    merchantSuggestions.forEach { suggestion ->
-                        SuggestionChip(
-                            label = suggestion,
-                            selected = draft.merchant == suggestion,
-                            onClick = {
-                                onDraftChange(draft.copy(merchant = suggestion))
-                            },
-                        )
-                    }
-                }
-                locationStatus?.let { status ->
-                    Spacer(Modifier.height(6.dp))
-                    Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                }
-            }
-
-            item {
-                SectionLabel("Category")
-                Spacer(Modifier.height(8.dp))
-                FlowRow(
-                    modifier = Modifier.selectableGroup(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    categoryPickerOptions.visible.forEach { option ->
-                        SuggestionChip(
-                            label = option.label,
-                            selected = draft.category == option.label,
-                            testTag = "category_chip_${option.label.toCategoryChipTagSuffix()}",
-                            onClick = {
-                                onDraftChange(draft.copy(category = option.label))
-                            },
-                        )
-                    }
-                }
-                if (categoryPickerOptions.hiddenCount > 0 || showAllCategories) {
-                    Spacer(Modifier.height(8.dp))
-                    SuggestionChip(
-                        label = if (showAllCategories) "Less" else "More (${categoryPickerOptions.hiddenCount})",
-                        testTag = "category_more_button",
-                        isSelection = false,
-                        onClick = { showAllCategories = !showAllCategories },
-                    )
-                }
-            }
-
-            item {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    DateTimeField("Date", dateTime.toLocalDate().format(DateFormatter), Modifier.widthIn(min = 150.dp).weight(1f).testTag("date_picker_button")) { showDatePicker = true }
-                    DateTimeField("Time", dateTime.toLocalTime().format(TimeFormatter), Modifier.widthIn(min = 150.dp).weight(1f).testTag("time_picker_button")) { showTimePicker = true }
-                }
-            }
-
-            item {
-                SuggestionSection(title = "Recurring") {
-                    SuggestionChip(
-                        label = "Off",
-                        selected = draft.recurringIntervalName.isBlank(),
-                        testTag = "recurring_chip_off",
-                        onClick = {
-                            onDraftChange(draft.copy(recurringIntervalName = ""))
-                        },
-                    )
-                    RecurrenceInterval.entries.forEach { interval ->
-                        SuggestionChip(
-                            label = interval.label,
-                            selected = draft.recurringIntervalName == interval.name,
-                            testTag = "recurring_chip_${interval.name.lowercase(Locale.US)}",
-                            onClick = {
-                                onDraftChange(draft.copy(recurringIntervalName = interval.name))
-                            },
-                        )
-                    }
-                }
-            }
-
-            item {
-                OutlinedTextField(
-                    value = draft.note,
-                    onValueChange = { onDraftChange(draft.copy(note = it)) },
-                    label = { Text("Note") },
-                    minLines = 2,
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.Sentences,
-                        imeAction = ImeAction.Done,
-                    ),
-                    colors = flowTextFieldColors(),
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-
-        if (error != null) {
-            Text(error.orEmpty(), color = LocalFinanceColors.current.expense, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(6.dp))
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (onDelete != null) {
-                TextButton(
-                    onClick = onDelete,
-                    enabled = !persistenceBusy,
-                    modifier = Modifier.testTag("delete_transaction_button"),
-                ) {
-                    Text("Delete", color = LocalFinanceColors.current.expense)
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            Button(
-                onClick = {
-                    if (MoneyFormatter.parseAmountToCents(draft.amount).absoluteValue == 0) {
-                        error = "Enter an amount"
-                    } else {
-                        onSave(draft.toTransaction())
-                    }
-                },
-                enabled = !persistenceBusy,
-                    colors = ButtonDefaults.buttonColors(),
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(56.dp)
-                        .testTag("save_transaction_button"),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    text = if (draft.isExpense) "Save expense" else "Save income",
-                    fontWeight = FontWeight.SemiBold,
+                    text = if (transaction == null) "Add transaction" else "Edit transaction",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.weight(1f),
                 )
+                TextButton(onClick = onCancel, enabled = !persistenceBusy) {
+                    Text("Close")
+                }
             }
+
+            TransactionTypeToggle(
+                isExpense = draft.isExpense,
+                onExpenseChange = {
+                    val updatedCategories = CategoryCatalog.categoriesFor(it)
+                    showAllCategories = false
+                    onDraftChange(
+                        draft.copy(
+                            isExpense = it,
+                            category =
+                                draft.category.takeIf { category -> category in updatedCategories } ?: updatedCategories.first(),
+                        ),
+                    )
+                },
+            )
+
+            LazyColumn(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .testTag("transaction_editor_form"),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = PaddingValues(top = 10.dp, bottom = 12.dp),
+            ) {
+                item {
+                    AmountPad(
+                        amount = amountInput,
+                        isExpense = draft.isExpense,
+                        onKey = ::applyAmountKey,
+                    )
+                    if (amountSuggestions.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        SectionLabel("Suggested amounts")
+                        Spacer(Modifier.height(8.dp))
+                        FlowRow(
+                            modifier = Modifier.selectableGroup(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            amountSuggestions.forEachIndexed { index, suggestion ->
+                                SuggestionChip(
+                                    label = "${MoneyFormatter.formatUsd(suggestion.cents)} · ${suggestion.source.shortLabel()}",
+                                    selected = MoneyFormatter.parseAmountToCents(amountInput).absoluteValue == suggestion.cents,
+                                    testTag = "amount_suggestion_$index",
+                                    onClick = {
+                                        val suggestedAmount = MoneyFormatter.formatAmountText(suggestion.cents)
+                                        amountInput = suggestedAmount
+                                        onDraftChange(draft.copy(amount = suggestedAmount))
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    SectionLabel("Where")
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = draft.merchant,
+                        onValueChange = { onDraftChange(draft.copy(merchant = it)) },
+                        placeholder = { Text("Merchant or place") },
+                        singleLine = true,
+                        keyboardOptions =
+                            KeyboardOptions(
+                                capitalization = KeyboardCapitalization.Words,
+                                imeAction = ImeAction.Next,
+                            ),
+                        colors = flowTextFieldColors(),
+                        shape = MaterialTheme.shapes.large,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .testTag("merchant_field"),
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SuggestionChip(
+                            label = "Near me",
+                            selected = locationStatus == "Finding nearby address...",
+                            isSelection = false,
+                            onClick = {
+                                if (hasLocationPermission(context)) {
+                                    loadNearbySuggestion()
+                                } else {
+                                    locationPermissionLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
+                                }
+                            },
+                        )
+                        locationSuggestion?.let { suggestion ->
+                            SuggestionChip(
+                                label = suggestion,
+                                selected = draft.merchant == suggestion,
+                                onClick = {
+                                    onDraftChange(draft.copy(merchant = suggestion))
+                                },
+                            )
+                        }
+                        merchantSuggestions.forEach { suggestion ->
+                            SuggestionChip(
+                                label = suggestion,
+                                selected = draft.merchant == suggestion,
+                                onClick = {
+                                    onDraftChange(draft.copy(merchant = suggestion))
+                                },
+                            )
+                        }
+                    }
+                    locationStatus?.let { status ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    }
+                }
+
+                item {
+                    SectionLabel("Category")
+                    Spacer(Modifier.height(8.dp))
+                    FlowRow(
+                        modifier = Modifier.selectableGroup(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        categoryPickerOptions.visible.forEach { option ->
+                            SuggestionChip(
+                                label = option.label,
+                                selected = draft.category == option.label,
+                                testTag = "category_chip_${option.label.toCategoryChipTagSuffix()}",
+                                onClick = {
+                                    onDraftChange(draft.copy(category = option.label))
+                                },
+                            )
+                        }
+                    }
+                    if (categoryPickerOptions.hiddenCount > 0 || showAllCategories) {
+                        Spacer(Modifier.height(8.dp))
+                        SuggestionChip(
+                            label = if (showAllCategories) "Less" else "More (${categoryPickerOptions.hiddenCount})",
+                            testTag = "category_more_button",
+                            isSelection = false,
+                            onClick = { showAllCategories = !showAllCategories },
+                        )
+                    }
+                }
+
+                item {
+                    MoreDetailsDisclosure(
+                        dateTime = dateTime,
+                        recurringInterval = draft.recurringIntervalName.toRecurrenceIntervalOrNull(),
+                        expanded = moreDetailsExpanded,
+                        onExpandedChange = { moreDetailsExpanded = it },
+                    )
+                }
+
+                if (moreDetailsExpanded) {
+                    item {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            DateTimeField(
+                                "Date",
+                                dateTime.toLocalDate().format(DateFormatter),
+                                Modifier.widthIn(min = 150.dp).weight(1f).testTag("date_picker_button"),
+                            ) { showDatePicker = true }
+                            DateTimeField(
+                                "Time",
+                                dateTime.toLocalTime().format(TimeFormatter),
+                                Modifier.widthIn(min = 150.dp).weight(1f).testTag("time_picker_button"),
+                            ) { showTimePicker = true }
+                        }
+                    }
+
+                    item {
+                        SuggestionSection(title = "Recurring") {
+                            SuggestionChip(
+                                label = "Off",
+                                selected = draft.recurringIntervalName.isBlank(),
+                                testTag = "recurring_chip_off",
+                                onClick = {
+                                    onDraftChange(draft.copy(recurringIntervalName = ""))
+                                },
+                            )
+                            RecurrenceInterval.entries.forEach { interval ->
+                                SuggestionChip(
+                                    label = interval.label,
+                                    selected = draft.recurringIntervalName == interval.name,
+                                    testTag = "recurring_chip_${interval.name.lowercase(Locale.US)}",
+                                    onClick = {
+                                        onDraftChange(draft.copy(recurringIntervalName = interval.name))
+                                    },
+                                )
+                            }
+                        }
+                    }
+
+                    item {
+                        OutlinedTextField(
+                            value = draft.note,
+                            onValueChange = { onDraftChange(draft.copy(note = it)) },
+                            label = { Text("Note") },
+                            minLines = 2,
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.Sentences,
+                                    imeAction = ImeAction.Done,
+                                ),
+                            colors = flowTextFieldColors(),
+                            shape = MaterialTheme.shapes.large,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .testTag("note_field"),
+                        )
+                    }
+                }
+            }
+
+            if (error != null) {
+                Text(error.orEmpty(), color = LocalFinanceColors.current.expense, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(6.dp))
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (onDelete != null) {
+                    TextButton(
+                        onClick = onDelete,
+                        enabled = !persistenceBusy,
+                        modifier = Modifier.testTag("delete_transaction_button"),
+                    ) {
+                        Text("Delete", color = LocalFinanceColors.current.expense)
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Button(
+                    onClick = {
+                        if (MoneyFormatter.parseAmountToCents(draft.amount).absoluteValue == 0) {
+                            error = "Enter an amount"
+                        } else {
+                            onSave(draft.toTransaction())
+                        }
+                    },
+                    enabled = !persistenceBusy,
+                    colors = ButtonDefaults.buttonColors(),
+                    shape = MaterialTheme.shapes.large,
+                    modifier =
+                        Modifier
+                            .weight(1f)
+                            .height(56.dp)
+                            .testTag("save_transaction_button"),
+                ) {
+                    Text(
+                        text = if (draft.isExpense) "Save expense" else "Save income",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
         }
-        Spacer(Modifier.height(8.dp))
-    }
     }
 
     if (showDatePicker) {
@@ -3095,10 +3579,12 @@ internal fun TransactionEditor(
             onConfirm = { hour, minute ->
                 onDraftChange(
                     draft.copy(
-                        occurredAtEpochMillis = LocalDateTime.of(
-                            dateTime.toLocalDate(),
-                            LocalTime.of(hour, minute),
-                        ).toEpochMillis(),
+                        occurredAtEpochMillis =
+                            LocalDateTime
+                                .of(
+                                    dateTime.toLocalDate(),
+                                    LocalTime.of(hour, minute),
+                                ).toEpochMillis(),
                     ),
                 )
                 showTimePicker = false
@@ -3108,23 +3594,67 @@ internal fun TransactionEditor(
 }
 
 @Composable
-private fun DateTimeField(label: String, value: String, modifier: Modifier, onClick: () -> Unit) {
+private fun MoreDetailsDisclosure(
+    dateTime: LocalDateTime,
+    recurringInterval: RecurrenceInterval?,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .clip(MaterialTheme.shapes.medium)
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .clickable(role = Role.Button) { onExpandedChange(!expanded) }
+                .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .testTag("more_details_toggle"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (expanded) "Hide details" else "More details",
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "${dateTime.format(ListDateFormatter)} · ${recurringInterval?.label ?: "Does not repeat"}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = if (expanded) "−" else "+",
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.titleLarge,
+        )
+    }
+}
+
+@Composable
+private fun DateTimeField(
+    label: String,
+    value: String,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
     Column(
-        modifier = modifier
-            .heightIn(min = 48.dp)
-            .clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+        modifier =
+            modifier
+                .heightIn(min = 48.dp)
+                .clip(MaterialTheme.shapes.medium)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .clickable(role = Role.Button, onClick = onClick)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
         Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
         Text(value, fontWeight = FontWeight.SemiBold)
     }
 }
 
-private fun String.toRecurrenceIntervalOrNull(): RecurrenceInterval? {
-    return RecurrenceInterval.entries.firstOrNull { it.name == this }
-}
+private fun String.toRecurrenceIntervalOrNull(): RecurrenceInterval? = RecurrenceInterval.entries.firstOrNull { it.name == this }
 
 @Composable
 private fun TransactionTypeToggle(
@@ -3140,9 +3670,10 @@ private fun TransactionTypeToggle(
         secondSelected = !isExpense,
         onSecondClick = { onExpenseChange(false) },
         secondModifier = Modifier,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(52.dp)
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .height(52.dp),
     )
 }
 
@@ -3173,9 +3704,10 @@ private fun AmountPad(
                 color = MaterialTheme.colorScheme.inverseOnSurface,
                 style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
                 letterSpacing = 0.sp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("amount_display"),
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag("amount_display"),
                 textAlign = TextAlign.End,
             )
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3209,29 +3741,30 @@ private fun KeypadButton(
     modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = modifier
-            .heightIn(min = 48.dp)
-            .testTag("amount_key_${key.toAmountKeyTagSuffix()}")
-            .clip(MaterialTheme.shapes.large)
-            .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.08f))
-            .clickable(role = Role.Button, onClick = onClick),
+        modifier =
+            modifier
+                .heightIn(min = 48.dp)
+                .testTag("amount_key_${key.toAmountKeyTagSuffix()}")
+                .clip(MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.08f))
+                .clickable(role = Role.Button, onClick = onClick)
+                .semantics {
+                    if (key == "back") contentDescription = "Delete last digit"
+                },
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = MaterialTheme.colorScheme.inverseOnSurface, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
-private fun String.toAmountKeyTagSuffix(): String {
-    return when (this) {
+private fun String.toAmountKeyTagSuffix(): String =
+    when (this) {
         "." -> "decimal"
         "back" -> "back"
         else -> this
     }
-}
 
-private fun String.toCategoryChipTagSuffix(): String {
-    return lowercase(Locale.US).filter { it.isLetterOrDigit() }
-}
+private fun String.toCategoryChipTagSuffix(): String = lowercase(Locale.US).filter { it.isLetterOrDigit() }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -3267,19 +3800,21 @@ private fun SuggestionChip(
     onClick: () -> Unit,
 ) {
     val tagModifier = if (testTag == null) Modifier else Modifier.testTag(testTag)
-    val interactionModifier = if (isSelection) {
-        Modifier.selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
-    } else {
-        Modifier.clickable(role = Role.Button, onClick = onClick)
-    }
+    val interactionModifier =
+        if (isSelection) {
+            Modifier.selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+        } else {
+            Modifier.clickable(role = Role.Button, onClick = onClick)
+        }
     Box(
-        modifier = tagModifier
-            .heightIn(min = 48.dp)
-            .widthIn(max = 220.dp)
-            .clip(MaterialTheme.shapes.large)
-            .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
-            .then(interactionModifier)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+        modifier =
+            tagModifier
+                .heightIn(min = 48.dp)
+                .widthIn(max = 220.dp)
+                .clip(MaterialTheme.shapes.large)
+                .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+                .then(interactionModifier)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -3293,42 +3828,42 @@ private fun SuggestionChip(
 }
 
 @Composable
-private fun flowTextFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedBorderColor = MaterialTheme.colorScheme.primary,
-    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-    cursorColor = MaterialTheme.colorScheme.primary,
-)
+private fun flowTextFieldColors() =
+    OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = MaterialTheme.colorScheme.primary,
+        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        cursorColor = MaterialTheme.colorScheme.primary,
+    )
 
-private fun AmountSuggestionSource.shortLabel(): String {
-    return when (this) {
+private fun AmountSuggestionSource.shortLabel(): String =
+    when (this) {
         AmountSuggestionSource.LastMatch -> "Last"
         AmountSuggestionSource.FrequentMatch -> "Usual"
         AmountSuggestionSource.Category -> "Category"
         AmountSuggestionSource.Recent -> "Recent"
     }
-}
 
 private data class LocationSuggestion(
     val displayName: String,
     val addressLine: String?,
 )
 
-private fun hasLocationPermission(context: Context): Boolean {
-    return ContextCompat.checkSelfPermission(
+private fun hasLocationPermission(context: Context): Boolean =
+    ContextCompat.checkSelfPermission(
         context,
         Manifest.permission.ACCESS_COARSE_LOCATION,
     ) == PackageManager.PERMISSION_GRANTED
-}
 
 private fun resolveLocationSuggestion(context: Context): LocationSuggestion? {
     if (!hasLocationPermission(context)) return null
     val location = lastKnownLocation(context) ?: return null
     val address = reverseGeocode(context, location)
     val addressLine = address?.getAddressLine(0)
-    val displayName = address?.bestDisplayName()
-        ?: "Near ${"%.4f".format(Locale.US, location.latitude)}, ${"%.4f".format(Locale.US, location.longitude)}"
+    val displayName =
+        address?.bestDisplayName()
+            ?: "Near ${"%.4f".format(Locale.US, location.latitude)}, ${"%.4f".format(Locale.US, location.longitude)}"
 
     return LocationSuggestion(
         displayName = displayName,
@@ -3338,19 +3873,22 @@ private fun resolveLocationSuggestion(context: Context): LocationSuggestion? {
 
 @SuppressLint("MissingPermission")
 private fun lastKnownLocation(context: Context): Location? {
-    val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-        ?: return null
+    val locationManager =
+        context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            ?: return null
 
     return locationManager
         .getProviders(true)
         .mapNotNull { provider ->
             runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()
-        }
-        .maxByOrNull { it.time }
+        }.maxByOrNull { it.time }
 }
 
 @Suppress("DEPRECATION")
-private fun reverseGeocode(context: Context, location: Location): Address? {
+private fun reverseGeocode(
+    context: Context,
+    location: Location,
+): Address? {
     if (!Geocoder.isPresent()) return null
     return runCatching {
         Geocoder(context, Locale.getDefault())
@@ -3360,32 +3898,35 @@ private fun reverseGeocode(context: Context, location: Location): Address? {
 }
 
 private fun Address.bestDisplayName(): String? {
-    val feature = featureName
-        ?.trim()
-        ?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) }
-    val street = listOfNotNull(
-        subThoroughfare?.trim()?.takeIf { it.isNotBlank() },
-        thoroughfare?.trim()?.takeIf { it.isNotBlank() },
-    ).joinToString(" ").takeIf { it.isNotBlank() }
-    val localityLabel = listOfNotNull(
-        locality?.trim()?.takeIf { it.isNotBlank() },
-        adminArea?.trim()?.takeIf { it.isNotBlank() },
-    ).joinToString(", ").takeIf { it.isNotBlank() }
+    val feature =
+        featureName
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) }
+    val street =
+        listOfNotNull(
+            subThoroughfare?.trim()?.takeIf { it.isNotBlank() },
+            thoroughfare?.trim()?.takeIf { it.isNotBlank() },
+        ).joinToString(" ").takeIf { it.isNotBlank() }
+    val localityLabel =
+        listOfNotNull(
+            locality?.trim()?.takeIf { it.isNotBlank() },
+            adminArea?.trim()?.takeIf { it.isNotBlank() },
+        ).joinToString(", ").takeIf { it.isNotBlank() }
 
     return feature ?: street ?: localityLabel ?: getAddressLine(0)?.trim()?.takeIf { it.isNotBlank() }
 }
 
-private fun Transaction.occurredAtDateTime(): LocalDateTime {
-    return Instant.ofEpochMilli(occurredAtEpochMillis)
+private fun Transaction.occurredAtDateTime(): LocalDateTime =
+    Instant
+        .ofEpochMilli(occurredAtEpochMillis)
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
-}
 
-private fun EditorDraft.occurredAtDateTime(): LocalDateTime {
-    return Instant.ofEpochMilli(occurredAtEpochMillis)
+private fun EditorDraft.occurredAtDateTime(): LocalDateTime =
+    Instant
+        .ofEpochMilli(occurredAtEpochMillis)
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
-}
 
 private fun Transaction.rowSubtitle(): String {
     val categoryLabel = category.ifBlank { "Other" }
@@ -3400,82 +3941,102 @@ private fun Transaction.rowSubtitle(): String {
 
 private fun Transaction.deleteDescription(): String {
     val direction = if (cents < 0) "expense" else "income"
-    val place = merchant.takeIf { it.isNotBlank() }?.let { name ->
-        category.takeIf { it.isNotBlank() }?.let { "$name, $it" } ?: name
-    } ?: category.ifBlank { "Untitled" }
+    val place =
+        merchant.takeIf { it.isNotBlank() }?.let { name ->
+            category.takeIf { it.isNotBlank() }?.let { "$name, $it" } ?: name
+        } ?: category.ifBlank { "Untitled" }
     return "$direction of ${MoneyFormatter.formatUsd(cents.absoluteValue)} at $place on ${occurredAtDateTime().format(ListDateFormatter)}"
 }
 
-private fun Long?.toSyncTime(): String {
-    return this?.let {
-        Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalDateTime().format(ListDateFormatter)
+private fun Long?.toSyncTime(): String =
+    this?.let {
+        Instant
+            .ofEpochMilli(it)
+            .atZone(ZoneId.systemDefault())
+            .toLocalDateTime()
+            .format(ListDateFormatter)
     } ?: "Never"
-}
 
-private fun automaticSyncFrequencyLabel(count: Int): String {
-    return "$count ${if (count == 1) "sync" else "syncs"} per day"
-}
+private fun automaticSyncFrequencyLabel(count: Int): String = "$count ${if (count == 1) "sync" else "syncs"} per day"
 
-internal fun automaticSyncFrequencyUpdateFailureMessage(failure: Throwable): String {
-    return if (failure is SimpleFinAutomaticSchedulingException) {
+internal fun automaticSyncFrequencyUpdateFailureMessage(failure: Throwable): String =
+    if (failure is SimpleFinAutomaticSchedulingException) {
         "Frequency saved, but automatic scheduling could not be updated. Try again."
     } else {
         "Could not update automatic sync frequency"
     }
-}
 
-private fun SimpleFinSyncResult.snackbarMessage(): String {
-    return when (this) {
-        is SimpleFinSyncResult.Success ->
+private fun SimpleFinSyncResult.snackbarMessage(): String =
+    when (this) {
+        is SimpleFinSyncResult.Success -> {
             "Synced $inserted new ${if (inserted == 1) "transaction" else "transactions"}, " +
                 "$updated updated ${if (updated == 1) "transaction" else "transactions"}"
-        is SimpleFinSyncResult.Failure -> message
-        SimpleFinSyncResult.Throttled -> "Sync recently run. Try again later."
+        }
+
+        is SimpleFinSyncResult.Failure -> {
+            message
+        }
+
+        SimpleFinSyncResult.Throttled -> {
+            "Sync recently run. Try again later."
+        }
     }
-}
 
 private fun Transaction.insightCategory(): String = category.trim().ifBlank { "Other" }
 
-private fun LocalDateTime.toEpochMillis(): Long {
-    return atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-}
+private fun LocalDateTime.toEpochMillis(): Long = atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
-internal fun localDateAtUtcStartOfDay(date: LocalDate): Long {
-    return date.atStartOfDay(ZoneId.of("UTC")).toInstant().toEpochMilli()
-}
+internal fun localDateAtUtcStartOfDay(date: LocalDate): Long = date.atStartOfDay(ZoneId.of("UTC")).toInstant().toEpochMilli()
 
-private fun EditorDraft.localDateAtUtcStartOfDay(): Long {
-    return localDateAtUtcStartOfDay(occurredAtDateTime().toLocalDate())
-}
+private fun EditorDraft.localDateAtUtcStartOfDay(): Long = localDateAtUtcStartOfDay(occurredAtDateTime().toLocalDate())
 
-private fun parseDateTime(date: String, time: String): LocalDateTime? {
-    return try {
+private fun parseDateTime(
+    date: String,
+    time: String,
+): LocalDateTime? =
+    try {
         LocalDateTime.of(LocalDate.parse(date, DateFormatter), LocalTime.parse(time, TimeFormatter))
     } catch (_: DateTimeParseException) {
         null
     }
-}
 
-private data class CategoryBadgeColors(val container: Color, val content: Color)
+private data class CategoryBadgeColors(
+    val container: Color,
+    val content: Color,
+)
 
 @Composable
 private fun categoryBadgeColors(category: String): CategoryBadgeColors {
     val colors = MaterialTheme.colorScheme
     return when (category) {
         "Food", "Groceries", "Restaurants", "Coffee",
-        "Healthcare", "Pharmacy", "Fitness", "Education", "Charity" ->
+        "Healthcare", "Pharmacy", "Fitness", "Education", "Charity",
+        -> {
             CategoryBadgeColors(colors.secondaryContainer, colors.onSecondaryContainer)
+        }
+
         "Transit", "Gas", "Ride share", "Car", "Parking", "Travel",
         "Salary", "Bonus", "Freelance", "Business", "Deposit", "Refund", "Interest",
-        "Dividends", "Investments", "Rental", "Reimbursement", "Transfer", "Gift", "Sale" ->
+        "Dividends", "Investments", "Rental", "Reimbursement", "Transfer", "Gift", "Sale",
+        -> {
             CategoryBadgeColors(colors.primaryContainer, colors.onPrimaryContainer)
-        "Home", "Rent", "Mortgage", "Utilities", "Phone", "Internet" ->
+        }
+
+        "Home", "Rent", "Mortgage", "Utilities", "Phone", "Internet" -> {
             CategoryBadgeColors(colors.tertiaryContainer, colors.onTertiaryContainer)
-        "Insurance", "Taxes", "Fees", "Debt", "Subscriptions" ->
+        }
+
+        "Insurance", "Taxes", "Fees", "Debt", "Subscriptions" -> {
             CategoryBadgeColors(colors.surfaceContainerHighest, colors.onSurface)
-        "Entertainment", "Shopping", "Clothing", "Gifts", "Kids", "Pets" ->
+        }
+
+        "Entertainment", "Shopping", "Clothing", "Gifts", "Kids", "Pets" -> {
             CategoryBadgeColors(colors.errorContainer, colors.onErrorContainer)
-        else -> CategoryBadgeColors(colors.surfaceContainerHighest, colors.onSurface)
+        }
+
+        else -> {
+            CategoryBadgeColors(colors.surfaceContainerHighest, colors.onSurface)
+        }
     }
 }
 
@@ -3483,6 +4044,7 @@ private val DateFormatter = DateTimeFormatter.ISO_LOCAL_DATE
 private val TimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val ListDateFormatter = DateTimeFormatter.ofPattern("MMM d, h:mm a")
 private val ShortDateFormatter = DateTimeFormatter.ofPattern("MMM d")
+private val DayHeaderFormatter = DateTimeFormatter.ofPattern("EEEE, MMM d")
 private val MonthLabelFormatter = DateTimeFormatter.ofPattern("MMM", Locale.US)
 private const val SimpleFinCreateUrl = "https://bridge.simplefin.org/simplefin/create"
 private val PagePadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)

@@ -9,11 +9,12 @@ import android.graphics.Rect
 import android.view.View
 import android.view.ViewGroup
 import android.widget.RemoteViews
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextContains
-import androidx.compose.ui.test.SemanticsMatcher
-import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -22,11 +23,11 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.text.AnnotatedString
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.text.AnnotatedString
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,8 +44,9 @@ class PennyWidgetIntentTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val configuration = Configuration(context.resources.configuration).apply { fontScale = 1.3f }
         val configuredContext = context.createConfigurationContext(configuration)
-        val root = RemoteViews(context.packageName, R.layout.widget_penny_summary)
-            .apply(configuredContext, null) as ViewGroup
+        val root =
+            RemoteViews(context.packageName, R.layout.widget_penny_summary)
+                .apply(configuredContext, null) as ViewGroup
         val density = configuredContext.resources.displayMetrics.density
         val size = (110 * density + 0.5f).toInt()
         val addSize = (48 * density + 0.5f).toInt()
@@ -62,18 +64,22 @@ class PennyWidgetIntentTest {
         val amount = root.findViewById<View>(R.id.widget_amount)
         val support = root.findViewById<View>(R.id.widget_count)
         val add = root.findViewById<View>(R.id.widget_add_button)
-        val monthBounds = Rect(0, 0, month.width, month.height).also {
-            root.offsetDescendantRectToMyCoords(month, it)
-        }
-        val amountBounds = Rect(0, 0, amount.width, amount.height).also {
-            root.offsetDescendantRectToMyCoords(amount, it)
-        }
-        val supportBounds = Rect(0, 0, support.width, support.height).also {
-            root.offsetDescendantRectToMyCoords(support, it)
-        }
-        val addBounds = Rect(0, 0, add.width, add.height).also {
-            root.offsetDescendantRectToMyCoords(add, it)
-        }
+        val monthBounds =
+            Rect(0, 0, month.width, month.height).also {
+                root.offsetDescendantRectToMyCoords(month, it)
+            }
+        val amountBounds =
+            Rect(0, 0, amount.width, amount.height).also {
+                root.offsetDescendantRectToMyCoords(amount, it)
+            }
+        val supportBounds =
+            Rect(0, 0, support.width, support.height).also {
+                root.offsetDescendantRectToMyCoords(support, it)
+            }
+        val addBounds =
+            Rect(0, 0, add.width, add.height).also {
+                root.offsetDescendantRectToMyCoords(add, it)
+            }
 
         assertTrue(month.visibility == View.VISIBLE && monthBounds.width() > 0 && monthBounds.height() > 0)
         assertTrue(amount.visibility == View.VISIBLE && amountBounds.width() > 0 && amountBounds.height() > 0)
@@ -86,9 +92,11 @@ class PennyWidgetIntentTest {
         assertEquals(addSize, addBounds.width())
         assertEquals(addSize, addBounds.height())
         assertTrue(monthBounds.right <= addBounds.left)
-        assertTrue(listOf(monthBounds, amountBounds, supportBounds, addBounds).all {
-            it.top >= 0 && it.bottom <= root.height
-        })
+        assertTrue(
+            listOf(monthBounds, amountBounds, supportBounds, addBounds).all {
+                it.top >= 0 && it.bottom <= root.height
+            },
+        )
     }
 
     @Test
@@ -96,8 +104,9 @@ class PennyWidgetIntentTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val overview = PennyWidgetProvider.overviewIntent(context)
         val add = PennyWidgetProvider.addTransactionIntent(context)
-        val expectedFlags = Intent.FLAG_ACTIVITY_NEW_TASK or
-            Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        val expectedFlags =
+            Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
 
         assertEquals(ComponentName(context, MainActivity::class.java), overview.component)
         assertEquals(ComponentName(context, MainActivity::class.java), add.component)
@@ -110,18 +119,20 @@ class PennyWidgetIntentTest {
         assertTrue(PennyWidgetProvider.OVERVIEW_REQUEST_CODE != PennyWidgetProvider.ADD_REQUEST_CODE)
 
         val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        val overviewPending = PendingIntent.getActivity(
-            context,
-            PennyWidgetProvider.OVERVIEW_REQUEST_CODE,
-            overview,
-            pendingFlags,
-        )
-        val addPending = PendingIntent.getActivity(
-            context,
-            PennyWidgetProvider.ADD_REQUEST_CODE,
-            add,
-            pendingFlags,
-        )
+        val overviewPending =
+            PendingIntent.getActivity(
+                context,
+                PennyWidgetProvider.OVERVIEW_REQUEST_CODE,
+                overview,
+                pendingFlags,
+            )
+        val addPending =
+            PendingIntent.getActivity(
+                context,
+                PennyWidgetProvider.ADD_REQUEST_CODE,
+                add,
+                pendingFlags,
+            )
         assertTrue(overviewPending.isImmutable)
         assertTrue(addPending.isImmutable)
         assertFalse(overviewPending == addPending)
@@ -130,12 +141,76 @@ class PennyWidgetIntentTest {
     }
 
     @Test
+    fun coldStartQuickAddWaitsForLearnedHistoryAndRequiresAnAmount() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+        context
+            .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putBoolean("room_migrated", true)
+            .commit()
+        val database = FlowMoneyDatabase.get(context)
+        runBlocking {
+            database.transactionDao().upsertAll(
+                listOf(
+                    TransactionEntity(
+                        id = "learned-travel",
+                        occurredAtEpochMillis = 1_765_000_000_000,
+                        merchant = "Should not be seeded",
+                        category = "Travel",
+                        note = "Should not be seeded",
+                        cents = -4_200,
+                        recurringInterval = null,
+                    ),
+                ),
+            )
+        }
+        val sqlDatabase = database.openHelper.writableDatabase
+        sqlDatabase.beginTransaction()
+        var transactionOpen = true
+        val scenario = ActivityScenario.launch<MainActivity>(PennyWidgetProvider.addTransactionIntent(context))
+
+        try {
+            composeRule.onNodeWithTag("app_loading_state").assertIsDisplayed()
+            composeRule.onNodeWithTag("transaction_editor").assertDoesNotExist()
+
+            sqlDatabase.endTransaction()
+            transactionOpen = false
+
+            composeRule.waitUntil(5_000) {
+                runCatching {
+                    composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+                }.isSuccess
+            }
+            composeRule.onNodeWithTag("merchant_field").performScrollTo().assert(
+                SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("")),
+            )
+            composeRule.onNodeWithTag("category_chip_travel").performScrollTo().assertIsSelected()
+            composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("amount_display"))
+            composeRule.onNodeWithTag("amount_display").assertTextContains("-\$0.00")
+            composeRule.onNodeWithTag("save_transaction_button").performClick()
+            composeRule.onNodeWithText("Enter an amount").assertIsDisplayed()
+            assertTrue(runBlocking { database.transactionDao().getAll() }.size == 1)
+        } finally {
+            if (transactionOpen) sqlDatabase.endTransaction()
+            scenario.close()
+            FlowMoneyDatabase.resetForTest()
+        }
+    }
+
+    @Test
     fun onNewIntentRoutesExistingActivityToDistinctDestinations() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         FlowMoneyDatabase.resetForTest()
         context.deleteDatabase("flow_money.db")
-        context.getSharedPreferences("flow_money", Context.MODE_PRIVATE).edit()
-            .clear().putBoolean("room_migrated", true).commit()
+        context
+            .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putBoolean("room_migrated", true)
+            .commit()
         val scenario = ActivityScenario.launch(MainActivity::class.java)
 
         composeRule.onNodeWithTag("tab_transactions").performClick().assertIsSelected()

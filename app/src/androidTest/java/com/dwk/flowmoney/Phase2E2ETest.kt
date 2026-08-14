@@ -25,13 +25,6 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import java.io.File
-import java.time.Instant
-import java.time.LocalDate
-import java.time.LocalDateTime
-import java.time.LocalTime
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -42,41 +35,55 @@ import org.junit.rules.TestRule
 import org.junit.runner.Description
 import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
+import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @RunWith(AndroidJUnit4::class)
 class Phase2E2ETest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
-    private val cleanPreLaunchState = TestRule { base, _: Description ->
-        object : Statement() {
-            override fun evaluate() {
-                val context = ApplicationProvider.getApplicationContext<Context>()
-                FlowMoneyDatabase.resetForTest()
-                context.deleteDatabase("flow_money.db")
-                File(context.noBackupFilesDir, "simplefin_access_url.bin").deleteRecursively()
-                context.getSharedPreferences("flow_money", Context.MODE_PRIVATE).edit()
-                    .clear()
-                    .putBoolean("room_migrated", true)
-                    .commit()
-                context.getSharedPreferences(SimpleFinMigrationCleanup.PREFERENCES, Context.MODE_PRIVATE)
-                    .edit().clear().commit()
-                base.evaluate()
+    private val cleanPreLaunchState =
+        TestRule { base, _: Description ->
+            object : Statement() {
+                override fun evaluate() {
+                    val context = ApplicationProvider.getApplicationContext<Context>()
+                    FlowMoneyDatabase.resetForTest()
+                    context.deleteDatabase("flow_money.db")
+                    File(context.noBackupFilesDir, "simplefin_access_url.bin").deleteRecursively()
+                    context
+                        .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
+                        .edit()
+                        .clear()
+                        .putBoolean("room_migrated", true)
+                        .commit()
+                    context
+                        .getSharedPreferences(SimpleFinMigrationCleanup.PREFERENCES, Context.MODE_PRIVATE)
+                        .edit()
+                        .clear()
+                        .commit()
+                    base.evaluate()
+                }
             }
         }
-    }
 
     @get:Rule
     val rules: RuleChain = RuleChain.outerRule(cleanPreLaunchState).around(composeRule)
 
     @Test
     fun existingSimpleFinEditSurvivesRecreationAndPreservesIdentity() {
-        val original = transaction(
-            id = "simplefin:account:phase2",
-            merchant = "Original merchant",
-            source = "simplefin",
-            accountKey = "account-key",
-            accountName = "Checking",
-        )
+        val original =
+            transaction(
+                id = "simplefin:account:phase2",
+                merchant = "Original merchant",
+                source = "simplefin",
+                accountKey = "account-key",
+                accountName = "Checking",
+            )
         seed(original)
         waitForMerchant(original.merchant)
 
@@ -85,7 +92,8 @@ class Phase2E2ETest {
         composeRule.onNodeWithTag("merchant_field").performTextInput("Edited merchant")
         composeRule.activityRule.scenario.recreate()
 
-        composeRule.onNodeWithTag("merchant_field")
+        composeRule
+            .onNodeWithTag("merchant_field")
             .assertTextContains("Edited merchant")
         composeRule.onNodeWithTag("save_transaction_button").performClick()
         awaitRows { it.singleOrNull()?.merchant == "Edited merchant" }
@@ -99,12 +107,24 @@ class Phase2E2ETest {
     @Test
     fun rapidAmountDigitsAccumulateWithoutBeingDropped() {
         composeRule.onNodeWithTag("add_transaction_fab").performClick()
-        val one = composeRule.onNodeWithTag("amount_key_1")
-            .fetchSemanticsNode().config[SemanticsActions.OnClick].action!!
-        val two = composeRule.onNodeWithTag("amount_key_2")
-            .fetchSemanticsNode().config[SemanticsActions.OnClick].action!!
-        val three = composeRule.onNodeWithTag("amount_key_3")
-            .fetchSemanticsNode().config[SemanticsActions.OnClick].action!!
+        val one =
+            composeRule
+                .onNodeWithTag("amount_key_1")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+        val two =
+            composeRule
+                .onNodeWithTag("amount_key_2")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+        val three =
+            composeRule
+                .onNodeWithTag("amount_key_3")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
 
         composeRule.runOnIdle {
             one()
@@ -136,19 +156,28 @@ class Phase2E2ETest {
         assertTrue(keypad.boundsInRoot.height / composeRule.density.density >= 48f)
         composeRule.onNodeWithTag("amount_key_1").performClick()
         composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextInput("New draft merchant")
-        val category = composeRule.onNodeWithTag("category_chip_food").performScrollTo().assert(
-            SemanticsMatcher.expectValue(SemanticsProperties.Selected, true),
-        ).fetchSemanticsNode()
+        val category =
+            composeRule
+                .onNodeWithTag("category_chip_food")
+                .performScrollTo()
+                .assert(
+                    SemanticsMatcher.expectValue(SemanticsProperties.Selected, true),
+                ).fetchSemanticsNode()
         assertTrue(category.boundsInRoot.height / composeRule.density.density >= 48f)
 
         composeRule.activityRule.scenario.recreate()
         composeRule.onNodeWithTag("merchant_field").assertTextContains("New draft merchant")
-        composeRule.onNodeWithTag("transaction_editor_form")
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
             .performScrollToNode(hasTestTag("amount_display"))
         composeRule.onNodeWithTag("amount_display").assertTextContains("-$1.00")
 
-        val click = composeRule.onNodeWithTag("save_transaction_button")
-            .fetchSemanticsNode().config[SemanticsActions.OnClick].action!!
+        val click =
+            composeRule
+                .onNodeWithTag("save_transaction_button")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
         composeRule.runOnIdle {
             click()
             click()
@@ -179,10 +208,11 @@ class Phase2E2ETest {
     fun dirtySystemBackShowsSaveableDiscardDialog() {
         composeRule.onNodeWithTag("add_transaction_fab").performClick()
         composeRule.onNodeWithTag("amount_key_2").performClick()
-        composeRule.onNode(
-            SemanticsMatcher.keyIsDefined(SemanticsActions.Dismiss),
-            useUnmergedTree = true,
-        ).performSemanticsAction(SemanticsActions.Dismiss)
+        composeRule
+            .onNode(
+                SemanticsMatcher.keyIsDefined(SemanticsActions.Dismiss),
+                useUnmergedTree = true,
+            ).performSemanticsAction(SemanticsActions.Dismiss)
         composeRule.waitUntil(5_000) {
             composeRule.onAllNodesWithText("Discard changes?").fetchSemanticsNodes().isNotEmpty()
         }
@@ -213,7 +243,12 @@ class Phase2E2ETest {
         composeRule.onNodeWithTag("amount_key_4").performClick()
         composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextInput("Picker merchant")
 
-        composeRule.onNodeWithTag("transaction_editor_form")
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
+            .performScrollToNode(hasTestTag("more_details_toggle"))
+        composeRule.onNodeWithTag("more_details_toggle").performClick()
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
             .performScrollToNode(hasTestTag("date_picker_button"))
         composeRule.onNodeWithTag("date_picker_button").performClick()
         composeRule.onNodeWithText("Select date").assertIsDisplayed()
@@ -233,19 +268,21 @@ class Phase2E2ETest {
     @Test
     fun exactDeleteConfirmationDeletesAndUndoRestoresExactRow() {
         val dateTime = LocalDateTime.of(LocalDate.of(2026, 7, 10), LocalTime.of(9, 30))
-        val original = transaction(
-            id = "delete-phase2",
-            merchant = "Delete Cafe",
-            occurredAtEpochMillis = dateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),
-            cents = -1_234,
-        )
+        val original =
+            transaction(
+                id = "delete-phase2",
+                merchant = "Delete Cafe",
+                occurredAtEpochMillis = dateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),
+                cents = -1_234,
+            )
         seed(original)
         waitForMerchant(original.merchant)
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
-        val expected = "Delete expense of ${MoneyFormatter.formatUsd(1_234)} at Delete Cafe, Food on " +
-            "${dateTime.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))}?"
+        val expected =
+            "Delete expense of ${MoneyFormatter.formatUsd(1_234)} at Delete Cafe, Food on " +
+                "${dateTime.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))}?"
         composeRule.onNodeWithText(expected).assertIsDisplayed()
         composeRule.onNodeWithTag("confirm_delete_button").performClick()
         awaitRows { it.isEmpty() }
@@ -258,24 +295,30 @@ class Phase2E2ETest {
     @Test
     fun talkBackDeleteActionOpensExactConfirmation() {
         val dateTime = LocalDateTime.of(LocalDate.of(2026, 7, 11), LocalTime.of(10, 45))
-        val original = transaction(
-            id = "talkback-delete",
-            merchant = "Accessible Cafe",
-            occurredAtEpochMillis = dateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),
-            cents = -2_345,
-        )
+        val original =
+            transaction(
+                id = "talkback-delete",
+                merchant = "Accessible Cafe",
+                occurredAtEpochMillis = dateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),
+                cents = -2_345,
+            )
         seed(original)
         waitForMerchant(original.merchant)
-        val action = composeRule.onNodeWithTag("transaction_content_${original.id}")
-            .fetchSemanticsNode().config[SemanticsActions.CustomActions]
-            .single { it.label == "Delete" }.action
+        val action =
+            composeRule
+                .onNodeWithTag("transaction_content_${original.id}")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.CustomActions]
+                .single { it.label == "Delete" }
+                .action
 
         composeRule.runOnIdle { action() }
 
-        composeRule.onNodeWithText(
-            "Delete expense of ${MoneyFormatter.formatUsd(2_345)} at Accessible Cafe, Food on " +
-                "${dateTime.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))}?",
-        ).assertIsDisplayed()
+        composeRule
+            .onNodeWithText(
+                "Delete expense of ${MoneyFormatter.formatUsd(2_345)} at Accessible Cafe, Food on " +
+                    "${dateTime.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))}?",
+            ).assertIsDisplayed()
     }
 
     private fun seed(vararg transactions: Transaction) {
@@ -284,9 +327,14 @@ class Phase2E2ETest {
         }
     }
 
-    private fun rows(): List<Transaction> = runBlocking {
-        FlowMoneyDatabase.get(context()).transactionDao().getAll().map { it.toTransaction() }
-    }
+    private fun rows(): List<Transaction> =
+        runBlocking {
+            FlowMoneyDatabase
+                .get(context())
+                .transactionDao()
+                .getAll()
+                .map { it.toTransaction() }
+        }
 
     private fun awaitRows(predicate: (List<Transaction>) -> Boolean) {
         composeRule.waitUntil(5_000) { predicate(rows()) }
