@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -22,6 +23,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -47,6 +49,94 @@ class Phase2AsyncEdgeTest {
     fun clearViewModel() {
         store.clear()
         FlowMoneyDatabase.resetForTest()
+    }
+
+    @Test
+    fun startupSyncFailureDoesNotCrashComposition() {
+        val syncCalls = AtomicInteger()
+        setApp(
+            gateway = FakeGateway(),
+            coldStartSimpleFinSync = {
+                syncCalls.incrementAndGet()
+                throw IllegalStateException("profile query unavailable")
+            },
+        )
+
+        composeRule.waitUntil(5_000) { syncCalls.get() == 1 }
+        composeRule.onNodeWithText("Penny").assertIsDisplayed()
+        composeRule.onNodeWithTag("add_transaction_fab").performClick()
+        composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+    }
+
+    @Test
+    fun startupWidgetRefreshFailureDoesNotCrashComposition() {
+        val widgetRefreshCalls = AtomicInteger()
+        setApp(
+            gateway = FakeGateway(),
+            coldStartSimpleFinSync = { SimpleFinSyncResult.Success(inserted = 1, updated = 0, skipped = 0) },
+            transactionWidgetRefresh = {
+                widgetRefreshCalls.incrementAndGet()
+                throw IllegalStateException("widget service unavailable")
+            },
+        )
+
+        composeRule.waitUntil(5_000) { widgetRefreshCalls.get() == 1 }
+        composeRule.onNodeWithText("Penny").assertIsDisplayed()
+        composeRule.onNodeWithTag("add_transaction_fab").performClick()
+        composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+    }
+
+    @Test
+    fun connectSuccessMessageSurvivesWidgetRefreshFailure() {
+        val widgetRefreshCalls = AtomicInteger()
+        var receivedToken: String? = null
+        setApp(
+            gateway = FakeGateway(),
+            connectSimpleFin = { token ->
+                receivedToken = token
+                SimpleFinSyncResult.Success(inserted = 1, updated = 2, skipped = 0)
+            },
+            transactionWidgetRefresh = {
+                widgetRefreshCalls.incrementAndGet()
+                throw IllegalStateException("widget service unavailable")
+            },
+        )
+
+        composeRule.onNodeWithText("Data").performClick()
+        composeRule.onNodeWithTag("simplefin_setup_token").performScrollTo().performTextInput("setup-token")
+        composeRule.onNodeWithText("Connect").performClick()
+
+        composeRule.onNodeWithText("Synced 1 new transaction, 2 updated transactions").assertIsDisplayed()
+        assertEquals("setup-token", receivedToken)
+        assertEquals(1, widgetRefreshCalls.get())
+        assertTrue(composeRule.onAllNodesWithText("Bank connection failed").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
+    fun manualSyncSuccessMessageSurvivesWidgetRefreshFailure() {
+        val widgetRefreshCalls = AtomicInteger()
+        setApp(
+            gateway = FakeGateway(),
+            simpleFinProfile = SimpleFinProfileEntity(connectionId = "manual-sync"),
+            coldStartSimpleFinSync = { null },
+            manualSimpleFinSync = {
+                SimpleFinSyncResult.Success(inserted = 2, updated = 1, skipped = 0)
+            },
+            transactionWidgetRefresh = {
+                widgetRefreshCalls.incrementAndGet()
+                throw IllegalStateException("widget service unavailable")
+            },
+        )
+
+        composeRule.onNodeWithText("Data").performClick()
+        composeRule.waitUntil(5_000) {
+            composeRule.onAllNodesWithTag("simplefin_sync_button").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("simplefin_sync_button").performScrollTo().performClick()
+
+        composeRule.onNodeWithText("Synced 2 new transactions, 1 updated transaction").assertIsDisplayed()
+        assertEquals(1, widgetRefreshCalls.get())
+        assertTrue(composeRule.onAllNodesWithText("Bank sync failed").fetchSemanticsNodes().isEmpty())
     }
 
     @Test
@@ -255,6 +345,70 @@ class Phase2AsyncEdgeTest {
     }
 
     @Test
+    fun inFlightUndoDisablesEditorPersistenceAndRunsOneRestore() {
+        val original = transaction("undo-interleaving", "Restore First Cafe")
+        val editorTarget = transaction("undo-editor", "Keep Editing Cafe")
+        val restoreStarted = CompletableDeferred<Unit>()
+        val releaseRestore = CompletableDeferred<Unit>()
+        val gateway =
+            FakeGateway(listOf(original, editorTarget)).apply {
+                onUpsert = { transaction ->
+                    upserts += transaction
+                    restoreStarted.complete(Unit)
+                    releaseRestore.await()
+                    rows.value = rows.value.filterNot { it.id == transaction.id } + transaction
+                }
+            }
+        setApp(gateway)
+
+        composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
+        composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_button").performClick()
+        composeRule.waitUntil(5_000) { gateway.rows.value.none { it.id == original.id } }
+        val undoAction =
+            composeRule
+                .onNodeWithText("Undo")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+
+        composeRule.onNodeWithTag("transaction_content_${editorTarget.id}").performClick()
+        composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+        val saveAction =
+            composeRule
+                .onNodeWithTag("save_transaction_button")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+        val deleteAction =
+            composeRule
+                .onNodeWithTag("delete_transaction_button")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+        composeRule.runOnIdle {
+            undoAction()
+            undoAction()
+        }
+        composeRule.waitUntil(5_000) { restoreStarted.isCompleted }
+
+        composeRule.onNodeWithTag("save_transaction_button").assertIsNotEnabled()
+        composeRule.onNodeWithTag("delete_transaction_button").assertIsNotEnabled()
+        composeRule.runOnIdle {
+            saveAction()
+            deleteAction()
+        }
+        assertEquals(1, gateway.upserts.size)
+        assertTrue(composeRule.onAllNodesWithTag("confirm_delete_button").fetchSemanticsNodes().isEmpty())
+
+        releaseRestore.complete(Unit)
+        composeRule.waitUntil(5_000) { gateway.rows.value.any { it.id == original.id } }
+        composeRule.onNodeWithTag("save_transaction_button").assertIsEnabled()
+        composeRule.onNodeWithTag("delete_transaction_button").assertIsEnabled()
+        assertEquals(listOf(original), gateway.upserts)
+    }
+
+    @Test
     fun deleteCancellationIsNotReportedAsFailure() {
         val original = transaction("delete-cancelled", "Cancelled Cafe")
         val deleteStarted = CompletableDeferred<Unit>()
@@ -328,8 +482,16 @@ class Phase2AsyncEdgeTest {
         gateway: FakeGateway,
         restoration: StateRestorationTester? = null,
         transactionWidgetRefresh: suspend (Context) -> Unit = {},
+        coldStartSimpleFinSync: (suspend () -> SimpleFinSyncResult?)? = null,
+        connectSimpleFin: (suspend (String) -> SimpleFinSyncResult)? = null,
+        manualSimpleFinSync: (suspend () -> SimpleFinSyncResult)? = null,
+        simpleFinProfile: SimpleFinProfileEntity? = null,
     ) {
         val expectedTransactionIds = gateway.rows.value.map { it.id }
+        val db = FlowMoneyDatabase.get(context)
+        simpleFinProfile?.let { profile ->
+            runBlocking { db.simpleFinDao().upsertProfile(profile) }
+        }
         val simpleFinRepository = SimpleFinSyncRepository(context)
         val viewModel =
             ViewModelProvider(
@@ -337,13 +499,28 @@ class Phase2AsyncEdgeTest {
                 MainViewModel.Factory(gateway, simpleFinRepository, MutableStateFlow(emptyList())),
             )[MainViewModel::class.java]
         viewModel.reportInitializationComplete()
+        val syncOnColdStart = coldStartSimpleFinSync ?: viewModel::syncSimpleFinIfStale
+        val connect = connectSimpleFin ?: viewModel::connectSimpleFin
+        val syncManually = manualSimpleFinSync ?: viewModel::syncSimpleFinNow
         if (restoration == null) {
             composeRule.setContent {
-                FlowMoneyApp(viewModel, transactionWidgetRefresh = transactionWidgetRefresh)
+                FlowMoneyApp(
+                    viewModel = viewModel,
+                    transactionWidgetRefresh = transactionWidgetRefresh,
+                    coldStartSimpleFinSync = syncOnColdStart,
+                    connectSimpleFin = connect,
+                    manualSimpleFinSync = syncManually,
+                )
             }
         } else {
             restoration.setContent {
-                FlowMoneyApp(viewModel, transactionWidgetRefresh = transactionWidgetRefresh)
+                FlowMoneyApp(
+                    viewModel = viewModel,
+                    transactionWidgetRefresh = transactionWidgetRefresh,
+                    coldStartSimpleFinSync = syncOnColdStart,
+                    connectSimpleFin = connect,
+                    manualSimpleFinSync = syncManually,
+                )
             }
         }
         composeRule.waitUntil(5_000) {

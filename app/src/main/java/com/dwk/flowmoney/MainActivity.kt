@@ -215,7 +215,7 @@ class MainActivity : ComponentActivity() {
                 val legacyCsv = preferences.getString(KEY_TRANSACTIONS, "").orEmpty()
                 if (legacyCsv.isNotBlank()) {
                     viewModel.importTrustedLegacyCsv(legacyCsv)
-                    refreshPennyWidgets(applicationContext)
+                    bestEffortWidgetRefresh { refreshPennyWidgets(applicationContext) }
                 }
                 check(
                     preferences
@@ -405,6 +405,9 @@ fun FlowMoneyApp(
     openAddSheetRequest: Int = 0,
     openOverviewRequest: Int = 0,
     transactionWidgetRefresh: suspend (Context) -> Unit = ::refreshPennyWidgets,
+    coldStartSimpleFinSync: suspend () -> SimpleFinSyncResult? = viewModel::syncSimpleFinIfStale,
+    connectSimpleFin: suspend (String) -> SimpleFinSyncResult = viewModel::connectSimpleFin,
+    manualSimpleFinSync: suspend () -> SimpleFinSyncResult = viewModel::syncSimpleFinNow,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -468,9 +471,15 @@ fun FlowMoneyApp(
     }
 
     LaunchedEffect(Unit) {
-        val result = viewModel.syncSimpleFinIfStale()
-        if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
-            refreshPennyWidgets(context)
+        try {
+            val result = coldStartSimpleFinSync()
+            if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
+                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+            }
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Throwable) {
+            // Automatic startup sync is best-effort; do not expose failure details from bank data paths.
         }
     }
 
@@ -501,11 +510,19 @@ fun FlowMoneyApp(
                         withDismissAction = true,
                     )
                 if (result == SnackbarResult.ActionPerformed) {
-                    try {
-                        viewModel.upsert(transaction)
-                    } catch (failure: CancellationException) {
-                        throw failure
-                    } catch (_: Throwable) {
+                    val restored =
+                        try {
+                            persistenceBusy = true
+                            viewModel.upsert(transaction)
+                            true
+                        } catch (failure: CancellationException) {
+                            throw failure
+                        } catch (_: Throwable) {
+                            false
+                        } finally {
+                            persistenceBusy = false
+                        }
+                    if (!restored) {
                         snackbarHostState.showSnackbar("Could not restore $description.")
                         return@launch
                     }
@@ -571,7 +588,9 @@ fun FlowMoneyApp(
                             )
                         }
                     val importedCount = viewModel.importCsv(csv)
-                    if (importedCount > 0) refreshPennyWidgets(context)
+                    if (importedCount > 0) {
+                        bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+                    }
                     message = "Imported $importedCount transactions"
                 } catch (failure: CancellationException) {
                     throw failure
@@ -789,9 +808,9 @@ fun FlowMoneyApp(
                     scope.launch {
                         var message = "Bank connection failed"
                         try {
-                            val result = viewModel.connectSimpleFin(token)
+                            val result = connectSimpleFin(token)
                             if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
-                                refreshPennyWidgets(context)
+                                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
                             }
                             message = result.snackbarMessage()
                         } catch (failure: CancellationException) {
@@ -810,9 +829,9 @@ fun FlowMoneyApp(
                     scope.launch {
                         var message = "Bank sync failed"
                         try {
-                            val result = viewModel.syncSimpleFinNow()
+                            val result = manualSimpleFinSync()
                             if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
-                                refreshPennyWidgets(context)
+                                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
                             }
                             message = result.snackbarMessage()
                         } catch (failure: CancellationException) {

@@ -1,6 +1,8 @@
 package com.dwk.flowmoney
 
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -11,6 +13,25 @@ class MainActivityImportTest {
     @Test fun advertisedLengthProbeFailureFallsBackToUnknownLength() {
         assertThat(csvAdvertisedLength { error("provider probe failed") }).isEqualTo(-1L)
     }
+
+    @Test fun widgetRefreshFailureIsBestEffort() =
+        runTest {
+            bestEffortWidgetRefresh { throw IllegalStateException("widget service unavailable") }
+        }
+
+    @Test fun widgetRefreshCancellationIsRethrown() =
+        runTest {
+            val expected = CancellationException("cancel refresh")
+            val actual =
+                try {
+                    bestEffortWidgetRefresh { throw expected }
+                    null
+                } catch (failure: CancellationException) {
+                    failure
+                }
+
+            assertThat(actual).isSameInstanceAs(expected)
+        }
 
     @Test fun widgetQuickAddSeedsOnlyTheLearnedExpenseCategory() {
         val history =
