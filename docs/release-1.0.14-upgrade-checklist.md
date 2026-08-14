@@ -49,18 +49,22 @@ The rehearsal script encodes these v1.0.13 contracts, inspected in source:
 Additional assumptions and limitations:
 
 - The archived release is a debuggable, hand-archived APK, so `run-as` works.
-- `adb`, `apkanalyzer`, `apksigner`, and host `sqlite3` are installed. The script
-  accepts environment overrides and searches Android SDK locations, including
-  `local.properties`, command-line tools, platform-tools, and the newest found
-  build-tools directory.
+- `adb`, `apkanalyzer`, `apksigner`, host `sqlite3`, and Python 3 are installed.
+  Python reads directory tar evidence without extracting it and emits the safe
+  canonical file manifest. The script accepts environment overrides and
+  searches Android SDK locations, including `local.properties`, command-line
+  tools, platform-tools, and the newest found build-tools directory.
 - Use a standard Android Emulator/AVD running as Android user 0. The script
   requires an explicit `emulator-*` serial plus positive QEMU properties and
   rejects physical devices.
 - Generic ADB has no portable widget-host allocation/binding command. Widget
   placement and the two taps are operator actions because launchers differ;
   the script fails unless exactly one binding is detected, the binding survives
-  replacement, Penny is foregrounded, the expected UI is present, and the
-  operator explicitly attests each route.
+  replacement, Penny is foregrounded, and the operator explicitly attests each
+  route. Route UI gates are page-specific: Overview must be the sole selected
+  nav node (Transactions and Insights unselected), while Add must expose the
+  fresh expense editor's `Amount paid` and `Save expense` nodes and no edit or
+  income-editor state. Always-present nav/FAB labels are not accepted as proof.
 - A SimpleFIN credential is optional for the synthetic rehearsal because
   profile/account/ignored rows are seeded independently. To exercise a real
   credential, pass `--with-simplefin-credential` and connect inside Penny.
@@ -71,7 +75,12 @@ Additional assumptions and limitations:
   key; uninstalling destroys the premise of the test.
 - DB/WAL/SHM and all requested directories are captured when present. A missing
   WAL/SHM, `files/`, `no_backup/`, or credential is recorded explicitly rather
-  than fabricated. WorkManager files
+  than fabricated. The `files.tar` snapshots remain raw evidence, but their raw
+  hashes are not compared: the canonical fingerprint uses a byte-sorted JSONL
+  manifest of relative path, file type, and content SHA-256. It includes empty
+  directories and hashes symlink targets without extracting or following them,
+  so tar order, mtime, mode, uid/gid, and header differences cannot create a
+  false mismatch. Unsupported special entries fail closed. WorkManager files
   under `no_backup/` may change as scheduler bookkeeping; they remain in raw
   evidence but are intentionally excluded from the user-data fingerprint. The
   credential ciphertext itself is compared exactly when present.
@@ -126,8 +135,15 @@ color; API 26 covers the minimum SDK.
 - [ ] API 31+: dynamic color enabled in light and dark wallpaper schemes.
   Also disable dynamic color/change to a non-dynamic image when practical to
   check Penny's fallback schemes.
-- [ ] Compact phone width (`<600dp`) and wide/tablet or resized-emulator width
-  (`>=600dp`); verify bottom navigation versus navigation rail behavior.
+- [ ] Exercise widths immediately below `600dp`, at `600dp`, and at `840dp`
+  (plus a typical compact phone width). Below `600dp`, expect bottom navigation
+  and no rail. At both `600dp` and the explicitly expanded `840dp` width, expect
+  the navigation rail and no bottom navigation; verify centered/bounded page
+  and editor content, insets, FAB reachability, and no stretched, clipped, or
+  inaccessible controls. Capture named screenshots of Overview, Transactions,
+  Insights, the data sheet, and the transaction editor at `600dp` and `840dp`
+  in portrait/resizable-window form, including at least one dark or dynamic
+  color variant at each width.
 - [ ] Portrait and landscape; rotate while on Overview, Transactions, Insights,
   the data sheet, and the transaction editor.
 - [ ] Show/hide the software keyboard in merchant, note, amount/date/time, CSV,
@@ -155,6 +171,31 @@ color; API 26 covers the minimum SDK.
   and large/negative/positive amounts.
 - [ ] Exercise SimpleFIN disconnected, connected, paused/reconnect-required,
   manual sync, cadence change, and failure UI without exposing a credential.
+
+### Real widget refresh-broadcast delivery
+
+Run every item below on API 26 and again on API 31+. Use a bound widget with a
+known current-period summary and capture before/after screenshots plus system
+broadcast-delivery evidence (`logcat`/`dumpsys activity broadcasts`) naming
+`PennyWidgetProvider` when the image exposes it. An explicit `am broadcast` is
+not proof: trigger each broadcast through the corresponding real system change.
+Restore automatic time/timezone and the original locale when finished.
+
+- [ ] `DATE_CHANGED`: with automatic date/time disabled on the disposable AVD,
+  change the calendar date across a day boundary in system Settings. Confirm
+  actual `android.intent.action.DATE_CHANGED` delivery and a correct, non-stale
+  widget redraw (use a month boundary seed when practical).
+- [ ] `TIME_SET`: change the wall-clock time within the same date in system
+  Settings. Confirm actual `android.intent.action.TIME_SET` delivery and a
+  successful widget redraw with unchanged correct totals.
+- [ ] `TIMEZONE_CHANGED`: select a different timezone in system Settings.
+  Confirm actual `android.intent.action.TIMEZONE_CHANGED` delivery and correct
+  local-date/month attribution in the refreshed widget.
+- [ ] `LOCALE_CHANGED`: change the system language/region in Settings. Confirm
+  actual `android.intent.action.LOCALE_CHANGED` delivery and a successful
+  redraw. Penny remains English by product configuration; verify readable
+  English content, locale-appropriate system integration, and no crash/stale
+  widget rather than expecting translated app strings.
 
 ### Widget visual and route evidence
 
@@ -226,7 +267,10 @@ The script must pass all of these; do not hand-waive a failed gate:
 - [ ] Fresh archived install and successful `run-as` startup snapshot.
 - [ ] Three representative transaction rows (local expense, local income,
   SimpleFIN expense), both preference files/all existing keys, one SimpleFIN
-  profile, account marker, and ignored-transaction marker.
+  profile, account marker, and ignored-transaction marker. Seed DB/preferences
+  are streamed from the host directly through `run-as` into an app-private
+  temporary and atomically renamed; no seed bytes are staged in
+  `/data/local/tmp`.
 - [ ] Profile intentionally paused during rehearsal to avoid an external sync
   mutating deterministic seed data.
 - [ ] Exactly one launcher-bound widget with a captured baseline screenshot.
@@ -239,11 +283,14 @@ The script must pass all of these; do not hand-waive a failed gate:
 - [ ] Widget ID/host/provider binding is byte-for-byte canonical-equivalent
   immediately after replacement and after launch/routes.
 - [ ] Widget body → Overview and plus → Add transaction, with foreground/UI
-  verification, explicit operator attestation, UI dumps, and screenshots.
+  verification, explicit operator attestation, UI dumps, and screenshots. The
+  Overview dump must prove selected/unselected nav state; the Add dump must
+  prove fresh expense-editor controls, not merely match the persistent FAB.
 - [ ] Before/after host SQLite `PRAGMA quick_check` returns exactly `ok`.
-- [ ] Canonical logical rows, both preference files, `files/`, encrypted
-  credential presence/hash, and widget binding have the same combined
-  fingerprint before/after.
+- [ ] Canonical logical rows, both preference files, deterministic sorted
+  `files/` type/content manifest, encrypted credential presence/hash, and widget
+  binding have the same combined fingerprint before/after. Retain each raw
+  `files.tar` only as evidence; do not compare its metadata-sensitive hash.
 - [ ] `result.txt` says `PASS`; retain `apk-preflight.txt`, installed metadata,
   run-as manifests, fingerprints, UI dumps, screenshots, and raw snapshots.
 
@@ -278,8 +325,11 @@ pass.
   - `no_backup/simplefin_access_url.bin` separately when present.
 - [ ] Run host SQLite `PRAGMA quick_check` against a working copy with its
   coherent WAL/SHM sidecars. Record table counts and canonical ordered-row
-  hashes, preference hashes/key values, regular `files/` hash, credential
-  presence/ciphertext hash, widget ID/host/provider, package UID, and APK cert.
+  hashes, preference hashes/key values, deterministic sorted relative-path +
+  file-type/content-SHA-256 manifest for `files/` (including empty directories
+  and symlinks safely), credential presence/ciphertext hash,
+  widget ID/host/provider, package UID, and APK cert. Keep the raw tar as
+  evidence but do not use its metadata-sensitive hash for equality.
   Do not print row contents or any access URL.
 - [ ] Remember: the run-as snapshot cannot restore the Android Keystore key.
   Never test it by uninstalling. A same-signer replacement is the only approved

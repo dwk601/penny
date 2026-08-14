@@ -35,6 +35,7 @@ ADB_BIN=""
 APKANALYZER_BIN=""
 APKSIGNER_BIN=""
 SQLITE3_BIN=""
+PYTHON3_BIN=""
 SHA256_BIN=""
 SHA256_STYLE=""
 
@@ -71,14 +72,15 @@ Options:
   -h, --help                 Show this help without touching a device.
 
 Environment overrides:
-  ADB, APKANALYZER, APKSIGNER, SQLITE3
+  ADB, APKANALYZER, APKSIGNER, SQLITE3, PYTHON3
 
 Interactive steps:
   The operator must confirm an AVD snapshot, optionally connect SimpleFIN in the
   app, add exactly one Penny widget through the launcher, and visually attest
   the widget body (Overview) and plus-button (Add transaction) routes. Generic
   ADB has no portable launcher widget-allocation API, so the script verifies the
-  binding and route results rather than pretending launcher UI is universal.
+  binding plus page-specific selected-tab/editor semantics instead of treating
+  always-visible navigation or FAB labels as route proof.
 
 Artifacts:
   The output directory is mode 0700 and contains mode-0600 run-as snapshots,
@@ -201,7 +203,7 @@ command_or_path() {
 version_key() {
 	# Android build-tool directory names are numeric dotted versions. A fixed
 	# width key avoids relying on GNU sort -V, which is absent on older macOS.
-	awk -F. '{printf "%09d%09d%09d\\n", $1 + 0, $2 + 0, $3 + 0}' <<<"${1%%-*}"
+	awk -F. '{printf "%09d%09d%09d\n", $1 + 0, $2 + 0, $3 + 0}' <<<"${1%%-*}"
 }
 
 latest_build_tool() {
@@ -269,6 +271,7 @@ resolve_tools() {
 	APKSIGNER_BIN="$(command_or_path "${APKSIGNER:-apksigner}")"
 	[[ -n "$APKSIGNER_BIN" ]] || APKSIGNER_BIN="$(latest_build_tool apksigner)"
 	SQLITE3_BIN="$(command_or_path "${SQLITE3:-sqlite3}")"
+	PYTHON3_BIN="$(command_or_path "${PYTHON3:-python3}")"
 
 	if command -v sha256sum >/dev/null 2>&1; then
 		SHA256_BIN="$(command -v sha256sum)"
@@ -282,6 +285,7 @@ resolve_tools() {
 	[[ -x "$APKANALYZER_BIN" ]] || die "apkanalyzer not found; set APKANALYZER or install Android command-line tools"
 	[[ -x "$APKSIGNER_BIN" ]] || die "apksigner not found; set APKSIGNER or install Android build-tools"
 	[[ -x "$SQLITE3_BIN" ]] || die "sqlite3 not found; set SQLITE3 or install the host sqlite3 CLI"
+	[[ -x "$PYTHON3_BIN" ]] || die "python3 not found; set PYTHON3 or install Python 3 for safe tar canonicalization"
 	[[ -x "$SHA256_BIN" ]] || die "sha256sum or shasum is required"
 }
 
@@ -406,11 +410,13 @@ Resolved tools:
   apkanalyzer: $APKANALYZER_BIN
   apksigner:   $APKSIGNER_BIN
   sqlite3:     $SQLITE3_BIN
+  python3:     $PYTHON3_BIN
 
 Read/write plan (actual mode only):
   1. Require a fresh/restored QEMU AVD and install archived $OLD_VERSION_NAME/$OLD_VERSION_CODE.
   2. Snapshot, seed deterministic DB rows and both preference contracts, and verify quick_check.
-  3. Require one launcher-bound Penny widget and capture the baseline canonical fingerprint.
+  3. Require one launcher-bound Penny widget and capture the baseline canonical fingerprint,
+     using a sorted file type/content manifest rather than tar metadata for files/.
   4. Run exactly: adb -s SERIAL install -r NEW_APK
   5. Fail closed on package, certificate, version, UID, widget, quick_check, or fingerprint mismatch.
   6. Require visual checks of both widget routes and retain secure before/after run-as snapshots.
@@ -644,15 +650,18 @@ capture_snapshot() {
 install_private_file() {
 	local source="$1"
 	local relative="$2"
-	local remote
-	remote="/data/local/tmp/penny-upgrade-${$}-$(basename "$relative")"
-	adb_cmd push "$source" "$remote" >/dev/null
-	shell_cmd chmod 0644 "$remote" >/dev/null
-	if ! run_as_sh "cat '$remote' > '$relative' && chmod 600 '$relative'" >/dev/null; then
-		shell_cmd rm -f "$remote" >/dev/null 2>&1 || true
-		die "Could not write run-as file: $relative"
+	local temporary command
+	[[ -f "$source" && -r "$source" ]] || die "Private seed source is not readable: $source"
+
+	# Stream bytes directly into app-private storage. Never stage seed data in
+	# /data/local/tmp, where another shell process could read it between push,
+	# chmod, and cleanup. Use an app-private temporary for atomic replacement.
+	temporary="${relative}.penny-upgrade-${$}.part"
+	command="umask 077; rm -f '$temporary'; cat > '$temporary' && chmod 600 '$temporary' && mv -f '$temporary' '$relative'"
+	if ! adb_cmd exec-out "run-as '$PACKAGE' sh -c \"$command\"" <"$source" >/dev/null; then
+		run_as_sh "rm -f '$temporary'" >/dev/null 2>&1 || true
+		die "Could not stream run-as file into app-private storage: $relative"
 	fi
-	shell_cmd rm -f "$remote" >/dev/null
 }
 
 sqlite_quick_check() {
@@ -818,6 +827,89 @@ verify_pref_contracts() {
 		die "simplefin_migration_cleanup.xml completion key is not true"
 }
 
+canonicalize_tar_directory() {
+	local archive="$1"
+	local root="$2"
+	local destination="$3"
+	local part="${destination}.part"
+
+	# Read but never extract the untrusted archive. JSON safely represents every
+	# relative path (including whitespace/newlines), and byte-wise path sorting
+	# plus content hashes ignores tar order, mtime, uid/gid, mode, and headers.
+	if ! "$PYTHON3_BIN" - "$archive" "$root" >"$part" <<'PY'
+import hashlib
+import json
+import sys
+import tarfile
+
+archive_path, root = sys.argv[1:]
+if not root or "/" in root or root in {".", ".."}:
+    raise SystemExit("invalid archive root")
+
+records = []
+seen = set()
+with tarfile.open(archive_path, mode="r:*") as archive:
+    for member in archive:
+        name = member.name.rstrip("/") if member.isdir() else member.name
+        if name == root:
+            relative = "."
+        elif name.startswith(root + "/"):
+            relative = name[len(root) + 1 :]
+        else:
+            raise SystemExit(f"archive member escapes {root}/: {name!r}")
+
+        if relative != ".":
+            parts = relative.split("/")
+            if not relative or any(part in {"", ".", ".."} for part in parts):
+                raise SystemExit(f"unsafe archive member path: {name!r}")
+        if relative in seen:
+            raise SystemExit(f"duplicate archive member path: {relative!r}")
+        seen.add(relative)
+
+        record = {"path": relative}
+        if member.isdir():
+            record.update(type="directory", sha256=None)
+        elif member.isfile() or member.islnk():
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise SystemExit(f"could not read archive member: {name!r}")
+            digest = hashlib.sha256()
+            with stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            record.update(
+                type="hardlink" if member.islnk() else "file",
+                sha256=digest.hexdigest().upper(),
+            )
+            if member.islnk():
+                record["link_target_sha256"] = hashlib.sha256(
+                    member.linkname.encode("utf-8", "surrogateescape")
+                ).hexdigest().upper()
+        elif member.issym():
+            record.update(
+                type="symlink",
+                sha256=hashlib.sha256(
+                    member.linkname.encode("utf-8", "surrogateescape")
+                ).hexdigest().upper(),
+            )
+        else:
+            raise SystemExit(f"unsupported archive member type: {name!r}")
+        records.append(record)
+
+if "." not in seen:
+    raise SystemExit(f"archive does not contain root directory {root!r}")
+records.sort(key=lambda record: record["path"].encode("utf-8", "surrogateescape"))
+for record in records:
+    print(json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+PY
+	then
+		rm -f "$part"
+		die "Could not create safe canonical manifest for $archive"
+	fi
+	mv "$part" "$destination"
+	chmod 600 "$destination"
+}
+
 create_canonical_fingerprint() {
 	local snapshot_name="$1"
 	local widget_canonical="$2"
@@ -864,14 +956,15 @@ SQL
 		die "$snapshot_name is missing the required encrypted SimpleFIN credential file"
 	fi
 	if [[ -f "$raw/files.tar" ]]; then
-		files_component="PRESENT:$(sha256_file "$raw/files.tar")"
+		canonicalize_tar_directory "$raw/files.tar" files "$canonical/files-manifest.jsonl"
+		files_component="PRESENT:$(sha256_file "$canonical/files-manifest.jsonl")"
 	fi
 
 	cat >"$canonical/fingerprint-components.txt" <<EOF
 database_logical_sha256=$(sha256_file "$canonical/database-logical.txt")
 flow_money_preferences_sha256=$(sha256_file "$raw/shared_prefs/flow_money.xml")
 simplefin_cleanup_preferences_sha256=$(sha256_file "$raw/shared_prefs/simplefin_migration_cleanup.xml")
-files_archive=$files_component
+files_manifest=$files_component
 simplefin_credential=$credential_component
 widget_binding_sha256=$(sha256_file "$widget_canonical")
 EOF
@@ -905,6 +998,53 @@ capture_ui_dump() {
 	die "Could not capture UI hierarchy"
 }
 
+ui_node_has_label() {
+	local dump="$1"
+	local label="$2"
+	awk -v label="$label" '
+        BEGIN { RS=">" }
+        /<node[[:space:]]/ {
+            if (index($0, "text=\"" label "\"") ||
+                index($0, "content-desc=\"" label "\"")) found=1
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$dump"
+}
+
+ui_node_has_label_and_selected() {
+	local dump="$1"
+	local label="$2"
+	local selected="$3"
+	awk -v label="$label" -v selected="$selected" '
+        BEGIN { RS=">" }
+        /<node[[:space:]]/ {
+            labeled = index($0, "text=\"" label "\"") ||
+                      index($0, "content-desc=\"" label "\"")
+            if (labeled && index($0, "selected=\"" selected "\"")) matches++
+        }
+        END { exit(matches == 1 ? 0 : 1) }
+    ' "$dump"
+}
+
+overview_route_dump_is_specific() {
+	local dump="$1"
+	ui_node_has_label_and_selected "$dump" "Overview" true &&
+		ui_node_has_label_and_selected "$dump" "Transactions" false &&
+		ui_node_has_label_and_selected "$dump" "Insights" false
+}
+
+add_route_dump_is_specific() {
+	local dump="$1"
+	# "Add transaction" alone is the always-present FAB description. Require
+	# fresh expense-editor-only controls and reject edit/income editor states.
+	ui_node_has_label "$dump" "Add transaction" &&
+		ui_node_has_label "$dump" "Amount paid" &&
+		ui_node_has_label "$dump" "Save expense" &&
+		! ui_node_has_label "$dump" "Edit transaction" &&
+		! ui_node_has_label "$dump" "Income received" &&
+		! ui_node_has_label "$dump" "Save income"
+}
+
 verify_widget_routes() {
 	local route_dir="$OUTPUT_DIR/20-candidate/routes"
 	mkdir -p "$route_dir"
@@ -915,20 +1055,20 @@ verify_widget_routes() {
 		"Tap the Penny widget body (not +). Verify Penny opens with Overview selected."
 	assert_foreground_activity
 	capture_ui_dump "$route_dir/overview-window.xml"
-	grep -Eq 'text="Overview"|content-desc="Overview"' "$route_dir/overview-window.xml" ||
-		die "Overview label was not present after the widget body route"
+	overview_route_dump_is_specific "$route_dir/overview-window.xml" ||
+		die "Overview route lacked one selected Overview nav node and unselected Transactions/Insights nodes"
 	capture_screen "$route_dir/overview-route.png"
 
 	shell_cmd input keyevent HOME >/dev/null
 	sleep 1
 	confirm_exact "ADD-OK" \
-		"Tap the Penny widget + button. Verify a fresh Add transaction sheet opens."
+		"Tap the Penny widget + button. Verify a fresh expense Add transaction editor opens."
 	assert_foreground_activity
 	capture_ui_dump "$route_dir/add-window.xml"
-	grep -Eq 'text="Add transaction"|content-desc="Add transaction"' "$route_dir/add-window.xml" ||
-		die "Add transaction UI was not present after the widget + route"
+	add_route_dump_is_specific "$route_dir/add-window.xml" ||
+		die "Add route lacked fresh expense-editor semantics (Amount paid and Save expense)"
 	capture_screen "$route_dir/add-route.png"
-	log "Both widget routes were operator-attested and UI/foreground-verified"
+	log "Both widget routes were operator-attested and page-specific UI/foreground-verified"
 }
 
 install_archived
