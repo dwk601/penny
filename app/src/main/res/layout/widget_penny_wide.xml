@@ -56,9 +56,9 @@
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_weight="1"
+            android:layout_weight="1.15"
             android:orientation="vertical"
-            android:paddingRight="6dp">
+            android:paddingRight="4dp">
 
             <TextView
                 android:id="@+id/widget_amount"
@@ -66,7 +66,7 @@
                 android:layout_height="0dp"
                 android:layout_weight="3"
                 android:autoSizeMaxTextSize="25sp"
-                android:autoSizeMinTextSize="8sp"
+                android:autoSizeMinTextSize="7sp"
                 android:autoSizeStepGranularity="1sp"
                 android:autoSizeTextType="uniform"
                 android:ellipsize="end"
@@ -108,7 +108,7 @@
             android:gravity="center_vertical"
             android:includeFontPadding="false"
             android:maxLines="3"
-            android:paddingLeft="6dp"
+            android:paddingLeft="4dp"
             android:text="@string/widget_no_spend"
             android:textColor="@color/widget_on_surface_inverse_muted" />
     </LinearLayout>

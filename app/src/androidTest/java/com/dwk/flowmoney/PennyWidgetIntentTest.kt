@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.text.TextUtils
@@ -73,6 +74,14 @@ class PennyWidgetIntentTest {
                     label = "This month",
                     amount = "\$12,345.67",
                     compactAmount = "\$12K",
+                    count = "4 txns",
+                    topCategory = categoryRows.first(),
+                    topCategories = categoryRows,
+                ),
+                WidgetSummary(
+                    label = "This month",
+                    amount = "\$123,456.78",
+                    compactAmount = "\$123K",
                     count = "4 txns",
                     topCategory = categoryRows.first(),
                     topCategories = categoryRows,
@@ -166,11 +175,12 @@ class PennyWidgetIntentTest {
                             textView = textView,
                             ellipsisPermitted = textView.id in case.permittedEllipsisIds,
                         )
-                        if (textView.id == R.id.widget_amount && fontScale == 1f) {
-                            assertTrue(
-                                "$textDescription should remain at least 11dp at the default font scale",
-                                textView.textSize / density >= 11f,
-                            )
+                        if (
+                            textView.id == R.id.widget_amount ||
+                            textView.id == R.id.widget_count ||
+                            textView.id == R.id.widget_categories
+                        ) {
+                            assertUniformTextMinimum(textDescription, textView, configuredContext, minimumSp = 7f)
                         }
                         if (textView.id == R.id.widget_categories) {
                             assertEquals("$textDescription rows", 3, textView.layout.lineCount)
@@ -196,6 +206,9 @@ class PennyWidgetIntentTest {
                     assertEquals("$description add width", addSize, addBounds.width())
                     assertEquals("$description add height", addSize, addBounds.height())
                     assertUniformAddButtonAutoSize(description, addButton, configuredContext)
+                    if (case.layoutId == R.layout.widget_penny_compact) {
+                        assertCompactRoundedCardGeometry(description, root, visibleText, density)
+                    }
                 }
             }
         }
@@ -245,7 +258,14 @@ class PennyWidgetIntentTest {
     @Test
     fun pre31OrientationContainerSelectsLandscapeThenPortraitChildren() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val summary = WidgetSummary("This month", "\$123.45", "4 txns", "Food \$80.00")
+        val summary =
+            WidgetSummary(
+                label = "This month",
+                amount = "\$123.45",
+                count = "4 txns",
+                topCategory = "Food \$80.00",
+                compactAmount = "\$123.45",
+            )
         val options =
             Bundle().apply {
                 putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 110)
@@ -315,10 +335,12 @@ class PennyWidgetIntentTest {
                     .apply(context, null) as ViewGroup
 
             assertEquals(summary.label, root.findViewById<TextView>(R.id.widget_spent_label).text.toString())
+            val amount = root.findViewById<TextView>(R.id.widget_amount)
             assertEquals(
                 if (layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount,
-                root.findViewById<TextView>(R.id.widget_amount).text.toString(),
+                amount.text.toString(),
             )
+            assertEquals(summary.amount, amount.contentDescription.toString())
             assertEquals("+", root.findViewById<TextView>(R.id.widget_add_button).text.toString())
             assertTrue(root.hasOnClickListeners())
             assertTrue(root.findViewById<View>(R.id.widget_add_button).hasOnClickListeners())
@@ -710,6 +732,68 @@ class PennyWidgetIntentTest {
                 "$description did not lay out all required text",
                 textView.text.length,
                 layout.getLineEnd(layout.lineCount - 1),
+            )
+        }
+    }
+
+    private fun assertUniformTextMinimum(
+        description: String,
+        textView: TextView,
+        context: Context,
+        minimumSp: Float,
+    ) {
+        val metrics = context.resources.displayMetrics
+        val configuredMinSp = pixelsToSp(textView.autoSizeMinTextSize.toFloat(), metrics)
+        val actualSp = pixelsToSp(textView.textSize, metrics)
+        assertEquals(
+            "$description autosize type",
+            TextView.AUTO_SIZE_TEXT_TYPE_UNIFORM,
+            textView.autoSizeTextType,
+        )
+        assertTrue(
+            "$description configured minimum was ${configuredMinSp}sp",
+            configuredMinSp + 0.25f >= minimumSp,
+        )
+        assertTrue(
+            "$description rendered below ${minimumSp}sp at ${actualSp}sp",
+            actualSp + 0.25f >= minimumSp,
+        )
+    }
+
+    private fun assertCompactRoundedCardGeometry(
+        description: String,
+        root: ViewGroup,
+        visibleText: List<TextView>,
+        density: Float,
+    ) {
+        val requiredInset = (8 * density + 0.5f).toInt()
+        val requiredGap = (4 * density + 0.5f).toInt()
+        assertTrue("$description left inset", root.paddingLeft >= requiredInset)
+        assertTrue("$description right inset", root.paddingRight >= requiredInset)
+
+        val textColumnBounds = descendantBounds(root, root.getChildAt(0))
+        val addBounds = descendantBounds(root, root.findViewById(R.id.widget_add_button))
+        assertTrue(
+            "$description add pill gap was ${addBounds.left - textColumnBounds.right}px",
+            addBounds.left - textColumnBounds.right >= requiredGap,
+        )
+
+        val background = root.background as GradientDrawable
+        val cornerRadius = background.cornerRadius
+        val safeInset = minOf(root.paddingLeft, root.paddingRight).toFloat()
+        assertTrue(
+            "$description corner radius $cornerRadius exceeds safe inset $safeInset",
+            cornerRadius <= safeInset + 0.5f,
+        )
+        visibleText.forEach { textView ->
+            val bounds = descendantBounds(root, textView)
+            assertTrue(
+                "$description ${viewDescription(root.context, textView)} can draw left of the rounded card: $bounds",
+                bounds.left + 0.5f >= cornerRadius,
+            )
+            assertTrue(
+                "$description ${viewDescription(root.context, textView)} can draw right of the rounded card: $bounds",
+                bounds.right - 0.5f <= root.width - cornerRadius,
             )
         }
     }

@@ -79,7 +79,7 @@ class TransactionDaoDataPathTest {
             FlowMoneyDatabase.get(context).transactionDao().upsertAll(
                 listOf(
                     entity("old", start - 1, cents = -90_000, category = "Old"),
-                    entity("start-boundary", start, cents = -500, category = "Food"),
+                    entity("start-boundary", start, cents = -123_456, category = "Food"),
                     entity("current-month", start + 1, cents = 200, category = "Income"),
                     entity("end-boundary", end, cents = -80_000, category = "Future"),
                 ),
@@ -90,12 +90,14 @@ class TransactionDaoDataPathTest {
             assertEquals(
                 WidgetSummary(
                     label = "This month",
-                    amount = "\$5.00",
+                    amount = "\$1,234.56",
                     count = "2 txns",
-                    topCategory = "Food \$5.00",
+                    topCategory = "Food \$1,234.56",
+                    compactAmount = "\$1.2K",
                 ),
                 summary,
             )
+            assertEquals("\$1.2K", summary.compactAmount)
             assertFalse(summary.toString().contains("start-boundary"))
             assertFalse(summary.toString().contains("current-month"))
         }
@@ -135,6 +137,7 @@ class TransactionDaoDataPathTest {
                     count = "2 txns",
                     topCategory = "Travel \$7.00",
                     topCategories = listOf("Travel \$7.00", "Food \$5.00"),
+                    compactAmount = "\$12.00",
                 ),
                 summary,
             )

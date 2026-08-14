@@ -3,11 +3,11 @@
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/widget_penny_card_background"
+    android:background="@drawable/widget_penny_compact_background"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingLeft="2dp"
-    android:paddingRight="2dp">
+    android:paddingLeft="8dp"
+    android:paddingRight="8dp">
 
     <LinearLayout
         android:layout_width="0dp"
@@ -37,7 +37,7 @@
             android:layout_height="0dp"
             android:layout_weight="1.2"
             android:autoSizeMaxTextSize="20sp"
-            android:autoSizeMinTextSize="8sp"
+            android:autoSizeMinTextSize="7sp"
             android:autoSizeStepGranularity="1sp"
             android:autoSizeTextType="uniform"
             android:ellipsize="end"
@@ -47,6 +47,7 @@
             android:maxLines="1"
             android:text="@string/widget_amount_fallback"
             android:textColor="@color/widget_on_surface_inverse"
+            android:textScaleX="0.75"
             android:textStyle="bold" />
     </LinearLayout>
 
@@ -54,6 +55,7 @@
         android:id="@+id/widget_add_button"
         android:layout_width="48dp"
         android:layout_height="48dp"
+        android:layout_marginLeft="4dp"
         android:background="@drawable/widget_penny_quick_add_background"
         android:contentDescription="@string/widget_quick_add_description"
         android:autoSizeMaxTextSize="23sp"

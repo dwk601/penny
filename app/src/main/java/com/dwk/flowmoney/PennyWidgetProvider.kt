@@ -269,6 +269,7 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                 R.id.widget_amount,
                 if (layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount,
             )
+            views.setContentDescription(R.id.widget_amount, summary.amount)
             views.setTextViewText(R.id.widget_add_button, context.getString(R.string.widget_quick_add))
             views.setContentDescription(R.id.widget_add_button, context.getString(R.string.widget_quick_add_description))
             when (layoutId) {
@@ -329,8 +330,8 @@ internal fun runWidgetBroadcastUpdateAtRunnableBoundary(
     try {
         runWidgetBroadcastUpdate(update, finish)
     } catch (_: Throwable) {
-        // This bare Runnable has no owning Job or caller to notify. Contain failures from both
-        // the update and PendingResult.finish(); Job-owned callers use runWidgetBroadcastUpdate.
+        // Dispatchers.IO has no exception channel for this Runnable. Contain failures from both
+        // the update and PendingResult.finish() after making exactly one finish attempt.
     }
 }
 
@@ -393,5 +394,5 @@ internal data class WidgetSummary(
     val count: String,
     val topCategory: String,
     val topCategories: List<String> = listOf(topCategory),
-    val compactAmount: String = amount,
+    val compactAmount: String,
 )
