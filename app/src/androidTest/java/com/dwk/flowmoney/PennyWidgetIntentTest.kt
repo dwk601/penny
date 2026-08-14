@@ -9,8 +9,10 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.text.TextUtils
+import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
@@ -48,13 +50,33 @@ class PennyWidgetIntentTest {
     @Test
     fun everyWidgetLayoutFitsAtSupportedFontScales() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val summary =
-            WidgetSummary(
-                label = "This month",
-                amount = "\$123.45",
-                count = "4 txns",
-                topCategory = "Food \$80.00",
-                topCategories = listOf("Food \$80.00", "Travel \$43.45"),
+        val categoryRows = listOf("Food \$80.00", "Travel \$43.45", "Bills \$12.34")
+        val summaries =
+            listOf(
+                WidgetSummary(
+                    label = "This month",
+                    amount = "\$123.45",
+                    compactAmount = "\$123.45",
+                    count = "4 txns",
+                    topCategory = categoryRows.first(),
+                    topCategories = categoryRows,
+                ),
+                WidgetSummary(
+                    label = "This month",
+                    amount = "\$1,234.56",
+                    compactAmount = "\$1.2K",
+                    count = "4 txns",
+                    topCategory = categoryRows.first(),
+                    topCategories = categoryRows,
+                ),
+                WidgetSummary(
+                    label = "This month",
+                    amount = "\$12,345.67",
+                    compactAmount = "\$12K",
+                    count = "4 txns",
+                    topCategory = categoryRows.first(),
+                    topCategories = categoryRows,
+                ),
             )
         val cases =
             listOf(
@@ -66,7 +88,6 @@ class PennyWidgetIntentTest {
                     requiredText =
                         mapOf(
                             R.id.widget_spent_label to "This month",
-                            R.id.widget_amount to "\$123.45",
                             R.id.widget_add_button to "+",
                         ),
                     permittedEllipsisIds = setOf(R.id.widget_spent_label),
@@ -79,7 +100,6 @@ class PennyWidgetIntentTest {
                     requiredText =
                         mapOf(
                             R.id.widget_spent_label to "This month",
-                            R.id.widget_amount to "\$123.45",
                             R.id.widget_count to "4 txns · Food \$80.00",
                             R.id.widget_add_button to "+",
                         ),
@@ -92,9 +112,8 @@ class PennyWidgetIntentTest {
                     requiredText =
                         mapOf(
                             R.id.widget_spent_label to "This month",
-                            R.id.widget_amount to "\$123.45",
                             R.id.widget_count to "4 txns",
-                            R.id.widget_categories to "Food \$80.00\nTravel \$43.45",
+                            R.id.widget_categories to categoryRows.joinToString("\n"),
                             R.id.widget_add_button to "+",
                         ),
                 ),
@@ -104,64 +123,80 @@ class PennyWidgetIntentTest {
             val configuration = Configuration(context.resources.configuration).apply { this.fontScale = fontScale }
             val configuredContext = context.createConfigurationContext(configuration)
             val density = configuredContext.resources.displayMetrics.density
-            cases.forEach { case ->
-                val root =
-                    PennyWidgetProvider
-                        .viewsForLayout(configuredContext, summary, case.layoutId)
-                        .apply(configuredContext, null) as ViewGroup
-                val width = (case.widthDp * density + 0.5f).toInt()
-                val height = (case.heightDp * density + 0.5f).toInt()
-                val addSize = (48 * density + 0.5f).toInt()
-                val description = "${case.name} at fontScale $fontScale"
+            summaries.forEach { summary ->
+                cases.forEach { case ->
+                    val root =
+                        PennyWidgetProvider
+                            .viewsForLayout(configuredContext, summary, case.layoutId)
+                            .apply(configuredContext, null) as ViewGroup
+                    val width = (case.widthDp * density + 0.5f).toInt()
+                    val height = (case.heightDp * density + 0.5f).toInt()
+                    val addSize = (48 * density + 0.5f).toInt()
+                    val description = "${case.name}, ${summary.amount}, at fontScale $fontScale"
+                    val expectedAmount =
+                        if (case.layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount
+                    val requiredText = case.requiredText + (R.id.widget_amount to expectedAmount)
 
-                root.measure(
-                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
-                )
-                root.layout(0, 0, root.measuredWidth, root.measuredHeight)
-
-                assertEquals("$description width", width, root.measuredWidth)
-                assertEquals("$description height", height, root.measuredHeight)
-
-                val visibleChildren = visibleDescendants(root)
-                visibleChildren.forEach { child ->
-                    val bounds = descendantBounds(root, child)
-                    val childDescription = "$description ${viewDescription(configuredContext, child)}"
-                    assertTrue("$childDescription has empty bounds $bounds", bounds.width() > 0 && bounds.height() > 0)
-                    assertTrue("$childDescription starts outside the root: $bounds", bounds.left >= 0 && bounds.top >= 0)
-                    assertTrue("$childDescription exceeds the right edge: $bounds", bounds.right <= root.width)
-                    assertTrue("$childDescription exceeds the bottom edge: $bounds", bounds.bottom <= root.height)
-                }
-
-                val visibleText = visibleChildren.filterIsInstance<TextView>()
-                assertEquals("$description visible text IDs", case.requiredText.keys, visibleText.map { it.id }.toSet())
-                visibleText.forEach { textView ->
-                    val expected = case.requiredText.getValue(textView.id)
-                    assertEquals("$description ${viewDescription(configuredContext, textView)} text", expected, textView.text.toString())
-                    assertTextFits(
-                        description = "$description ${viewDescription(configuredContext, textView)}",
-                        textView = textView,
-                        ellipsisPermitted = textView.id in case.permittedEllipsisIds,
+                    root.measure(
+                        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
                     )
-                }
+                    root.layout(0, 0, root.measuredWidth, root.measuredHeight)
 
-                visibleText.indices.forEach { firstIndex ->
-                    for (secondIndex in firstIndex + 1 until visibleText.size) {
-                        val first = visibleText[firstIndex]
-                        val second = visibleText[secondIndex]
-                        val firstBounds = descendantBounds(root, first)
-                        val secondBounds = descendantBounds(root, second)
-                        assertFalse(
-                            "$description ${viewDescription(configuredContext, first)} overlaps " +
-                                "${viewDescription(configuredContext, second)}: $firstBounds / $secondBounds",
-                            Rect.intersects(firstBounds, secondBounds),
-                        )
+                    assertEquals("$description width", width, root.measuredWidth)
+                    assertEquals("$description height", height, root.measuredHeight)
+
+                    val visibleChildren = visibleDescendants(root)
+                    visibleChildren.forEach { child ->
+                        val bounds = descendantBounds(root, child)
+                        val childDescription = "$description ${viewDescription(configuredContext, child)}"
+                        assertTrue("$childDescription has empty bounds $bounds", bounds.width() > 0 && bounds.height() > 0)
+                        assertTrue("$childDescription starts outside the root: $bounds", bounds.left >= 0 && bounds.top >= 0)
+                        assertTrue("$childDescription exceeds the right edge: $bounds", bounds.right <= root.width)
+                        assertTrue("$childDescription exceeds the bottom edge: $bounds", bounds.bottom <= root.height)
                     }
-                }
 
-                val addBounds = descendantBounds(root, root.findViewById(R.id.widget_add_button))
-                assertEquals("$description add width", addSize, addBounds.width())
-                assertEquals("$description add height", addSize, addBounds.height())
+                    val visibleText = visibleChildren.filterIsInstance<TextView>()
+                    assertEquals("$description visible text IDs", requiredText.keys, visibleText.map { it.id }.toSet())
+                    visibleText.forEach { textView ->
+                        val textDescription = "$description ${viewDescription(configuredContext, textView)}"
+                        assertEquals("$textDescription text", requiredText.getValue(textView.id), textView.text.toString())
+                        assertTextFits(
+                            description = textDescription,
+                            textView = textView,
+                            ellipsisPermitted = textView.id in case.permittedEllipsisIds,
+                        )
+                        if (textView.id == R.id.widget_amount && fontScale == 1f) {
+                            assertTrue(
+                                "$textDescription should remain at least 11dp at the default font scale",
+                                textView.textSize / density >= 11f,
+                            )
+                        }
+                        if (textView.id == R.id.widget_categories) {
+                            assertEquals("$textDescription rows", 3, textView.layout.lineCount)
+                        }
+                    }
+
+                    visibleText.indices.forEach { firstIndex ->
+                        for (secondIndex in firstIndex + 1 until visibleText.size) {
+                            val first = visibleText[firstIndex]
+                            val second = visibleText[secondIndex]
+                            val firstBounds = descendantBounds(root, first)
+                            val secondBounds = descendantBounds(root, second)
+                            assertFalse(
+                                "$description ${viewDescription(configuredContext, first)} overlaps " +
+                                    "${viewDescription(configuredContext, second)}: $firstBounds / $secondBounds",
+                                Rect.intersects(firstBounds, secondBounds),
+                            )
+                        }
+                    }
+
+                    val addButton = root.findViewById<TextView>(R.id.widget_add_button)
+                    val addBounds = descendantBounds(root, addButton)
+                    assertEquals("$description add width", addSize, addBounds.width())
+                    assertEquals("$description add height", addSize, addBounds.height())
+                    assertUniformAddButtonAutoSize(description, addButton, configuredContext)
+                }
             }
         }
     }
@@ -262,10 +297,11 @@ class PennyWidgetIntentTest {
         val summary =
             WidgetSummary(
                 label = "This month",
-                amount = "\$123.45",
+                amount = "\$1,234.56",
                 count = "4 txns",
                 topCategory = "Food \$80.00",
-                topCategories = listOf("Food \$80.00", "Travel \$43.45"),
+                topCategories = listOf("Food \$80.00", "Travel \$43.45", "Bills \$12.34"),
+                compactAmount = "\$1.2K",
             )
 
         listOf(
@@ -279,7 +315,10 @@ class PennyWidgetIntentTest {
                     .apply(context, null) as ViewGroup
 
             assertEquals(summary.label, root.findViewById<TextView>(R.id.widget_spent_label).text.toString())
-            assertEquals(summary.amount, root.findViewById<TextView>(R.id.widget_amount).text.toString())
+            assertEquals(
+                if (layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount,
+                root.findViewById<TextView>(R.id.widget_amount).text.toString(),
+            )
             assertEquals("+", root.findViewById<TextView>(R.id.widget_add_button).text.toString())
             assertTrue(root.hasOnClickListeners())
             assertTrue(root.findViewById<View>(R.id.widget_add_button).hasOnClickListeners())
@@ -295,7 +334,7 @@ class PennyWidgetIntentTest {
                 R.layout.widget_penny_wide -> {
                     assertEquals("4 txns", root.findViewById<TextView>(R.id.widget_count).text.toString())
                     assertEquals(
-                        "Food \$80.00\nTravel \$43.45",
+                        "Food \$80.00\nTravel \$43.45\nBills \$12.34",
                         root.findViewById<TextView>(R.id.widget_categories).text.toString(),
                     )
                 }
@@ -674,6 +713,38 @@ class PennyWidgetIntentTest {
             )
         }
     }
+
+    private fun assertUniformAddButtonAutoSize(
+        description: String,
+        addButton: TextView,
+        context: Context,
+    ) {
+        val metrics = context.resources.displayMetrics
+        val minSp = pixelsToSp(addButton.autoSizeMinTextSize.toFloat(), metrics)
+        val maxSp = pixelsToSp(addButton.autoSizeMaxTextSize.toFloat(), metrics)
+        assertEquals("$description add autosize type", TextView.AUTO_SIZE_TEXT_TYPE_UNIFORM, addButton.autoSizeTextType)
+        assertEquals("$description add autosize minimum", 14f, minSp, 0.25f)
+        assertEquals("$description add autosize maximum", 23f, maxSp, 0.25f)
+        assertTrue(
+            "$description add text below autosize minimum",
+            addButton.textSize + 0.5f >= addButton.autoSizeMinTextSize,
+        )
+        assertTrue(
+            "$description add text above autosize maximum",
+            addButton.textSize - 0.5f <= addButton.autoSizeMaxTextSize,
+        )
+    }
+
+    private fun pixelsToSp(
+        pixels: Float,
+        metrics: android.util.DisplayMetrics,
+    ): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            TypedValue.deriveDimension(TypedValue.COMPLEX_UNIT_SP, pixels, metrics)
+        } else {
+            @Suppress("DEPRECATION")
+            pixels / metrics.scaledDensity
+        }
 
     private fun viewDescription(
         context: Context,

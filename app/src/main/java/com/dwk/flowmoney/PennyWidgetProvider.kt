@@ -14,6 +14,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
@@ -130,6 +132,7 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                     amount = MoneyFormatter.formatUsd(0),
                     count = context.getString(R.string.widget_open_app),
                     topCategory = context.getString(R.string.widget_unavailable),
+                    compactAmount = formatCompactWidgetUsd(0),
                 )
             }
 
@@ -181,6 +184,7 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                     ),
                 topCategory = categoryRows.firstOrNull() ?: noSpend,
                 topCategories = categoryRows.ifEmpty { listOf(noSpend) },
+                compactAmount = formatCompactWidgetUsd(metrics.spentCents),
             )
         }
 
@@ -261,7 +265,10 @@ open class PennyWidgetProvider : AppWidgetProvider() {
 
             val views = RemoteViews(context.packageName, layoutId)
             views.setTextViewText(R.id.widget_spent_label, summary.label)
-            views.setTextViewText(R.id.widget_amount, summary.amount)
+            views.setTextViewText(
+                R.id.widget_amount,
+                if (layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount,
+            )
             views.setTextViewText(R.id.widget_add_button, context.getString(R.string.widget_quick_add))
             views.setContentDescription(R.id.widget_add_button, context.getString(R.string.widget_quick_add_description))
             when (layoutId) {
@@ -321,8 +328,9 @@ internal fun runWidgetBroadcastUpdateAtRunnableBoundary(
 ) {
     try {
         runWidgetBroadcastUpdate(update, finish)
-    } catch (_: CancellationException) {
-        // This is a bare dispatcher Runnable, so cancellation has no owning Job to notify.
+    } catch (_: Throwable) {
+        // This bare Runnable has no owning Job or caller to notify. Contain failures from both
+        // the update and PendingResult.finish(); Job-owned callers use runWidgetBroadcastUpdate.
     }
 }
 
@@ -341,10 +349,49 @@ internal fun runWidgetBroadcastUpdate(
     }
 }
 
+private data class CompactUsdMagnitude(
+    val dollars: BigDecimal,
+    val suffix: String,
+)
+
+private val compactUsdMagnitudes =
+    listOf(
+        CompactUsdMagnitude(BigDecimal("1000"), "K"),
+        CompactUsdMagnitude(BigDecimal("1000000"), "M"),
+        CompactUsdMagnitude(BigDecimal("1000000000"), "B"),
+        CompactUsdMagnitude(BigDecimal("1000000000000"), "T"),
+        CompactUsdMagnitude(BigDecimal("1000000000000000"), "Q"),
+    )
+
+/**
+ * Abbreviates only the amount shown by the narrow compact widget. Values below $1,000 remain
+ * exact; larger values use about two significant digits and locale-independent half-up rounding.
+ * Standard and wide widgets deliberately continue to bind [WidgetSummary.amount].
+ */
+internal fun formatCompactWidgetUsd(cents: Long): String {
+    val absoluteDollars = BigDecimal.valueOf(cents).movePointLeft(2).abs()
+    var magnitudeIndex = compactUsdMagnitudes.indexOfLast { absoluteDollars >= it.dollars }
+    if (magnitudeIndex < 0) return MoneyFormatter.formatUsd(cents)
+
+    while (true) {
+        val magnitude = compactUsdMagnitudes[magnitudeIndex]
+        val scaled = absoluteDollars.divide(magnitude.dollars)
+        val decimalPlaces = if (scaled < BigDecimal.TEN) 1 else 0
+        val rounded = scaled.setScale(decimalPlaces, RoundingMode.HALF_UP).stripTrailingZeros()
+        if (rounded >= BigDecimal("1000") && magnitudeIndex < compactUsdMagnitudes.lastIndex) {
+            magnitudeIndex++
+            continue
+        }
+        val sign = if (cents < 0) "-" else ""
+        return "$sign\$${rounded.toPlainString()}${magnitude.suffix}"
+    }
+}
+
 internal data class WidgetSummary(
     val label: String,
     val amount: String,
     val count: String,
     val topCategory: String,
     val topCategories: List<String> = listOf(topCategory),
+    val compactAmount: String = amount,
 )

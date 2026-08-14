@@ -7,7 +7,7 @@
     android:orientation="vertical"
     android:paddingLeft="10dp"
     android:paddingRight="10dp"
-    android:paddingBottom="6dp">
+    android:paddingBottom="2dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -37,10 +37,13 @@
             android:layout_height="48dp"
             android:background="@drawable/widget_penny_quick_add_background"
             android:contentDescription="@string/widget_quick_add_description"
+            android:autoSizeMaxTextSize="23sp"
+            android:autoSizeMinTextSize="14sp"
+            android:autoSizeStepGranularity="1sp"
+            android:autoSizeTextType="uniform"
             android:gravity="center"
             android:text="@string/widget_quick_add"
             android:textColor="@color/widget_on_quick_add"
-            android:textSize="23sp"
             android:textStyle="bold" />
     </LinearLayout>
 
@@ -63,7 +66,7 @@
                 android:layout_height="0dp"
                 android:layout_weight="3"
                 android:autoSizeMaxTextSize="25sp"
-                android:autoSizeMinTextSize="10sp"
+                android:autoSizeMinTextSize="8sp"
                 android:autoSizeStepGranularity="1sp"
                 android:autoSizeTextType="uniform"
                 android:ellipsize="end"
@@ -98,13 +101,13 @@
             android:layout_height="match_parent"
             android:layout_weight="1.1"
             android:autoSizeMaxTextSize="11sp"
-            android:autoSizeMinTextSize="6sp"
+            android:autoSizeMinTextSize="7sp"
             android:autoSizeStepGranularity="1sp"
             android:autoSizeTextType="uniform"
             android:ellipsize="end"
             android:gravity="center_vertical"
             android:includeFontPadding="false"
-            android:maxLines="2"
+            android:maxLines="3"
             android:paddingLeft="6dp"
             android:text="@string/widget_no_spend"
             android:textColor="@color/widget_on_surface_inverse_muted" />
