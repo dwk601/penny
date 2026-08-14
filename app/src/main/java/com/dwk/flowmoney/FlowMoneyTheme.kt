@@ -17,6 +17,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.colorspace.ColorSpaces
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
@@ -26,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 @Immutable
 internal data class FinanceColors(
@@ -46,13 +48,13 @@ private val DarkFinanceColors =
     )
 
 private const val MinimumFinanceContrast = 4.5f
+private const val WcagLuminanceOffset = 0.05f
 private const val FinanceAdjustmentSearchSteps = 64
 private const val FinanceAdjustmentRefinementSteps = 12
-private const val SafeToneSearchSteps = 1024
 
 internal val LocalFinanceColors = staticCompositionLocalOf { LightFinanceColors }
 
-private fun contrastRatio(
+internal fun financeContrastRatio(
     foreground: Color,
     background: Color,
 ): Float {
@@ -60,22 +62,21 @@ private fun contrastRatio(
     val backgroundLuminance = background.luminance()
     val lighter = maxOf(foregroundLuminance, backgroundLuminance)
     val darker = minOf(foregroundLuminance, backgroundLuminance)
-    return (lighter + 0.05f) / (darker + 0.05f)
+    return (lighter + WcagLuminanceOffset) / (darker + WcagLuminanceOffset)
 }
 
-private fun Color.hasFinanceTextContrast(backgrounds: List<Color>): Boolean =
-    backgrounds.all { background -> contrastRatio(this, background) >= MinimumFinanceContrast }
+private fun Color.minimumContrast(backgrounds: List<Color>): Float =
+    backgrounds.minOf { background -> financeContrastRatio(this, background) }
+
+private fun Color.hasFinanceTextContrast(backgrounds: List<Color>): Boolean = minimumContrast(backgrounds) >= MinimumFinanceContrast
 
 private fun FinanceColors.minimumContrast(backgrounds: List<Color>): Float =
-    minOf(
-        backgrounds.minOf { background -> contrastRatio(income, background) },
-        backgrounds.minOf { background -> contrastRatio(expense, background) },
-    )
+    minOf(income.minimumContrast(backgrounds), expense.minimumContrast(backgrounds))
 
 private fun FinanceColors.hasFinanceTextContrast(backgrounds: List<Color>): Boolean =
     income.hasFinanceTextContrast(backgrounds) && expense.hasFinanceTextContrast(backgrounds)
 
-private fun ColorScheme.financeTextBackgrounds(): List<Color> =
+internal fun ColorScheme.financeTextBackgrounds(): List<Color> =
     listOf(
         background,
         surface,
@@ -91,60 +92,88 @@ private fun ColorScheme.financeTextBackgrounds(): List<Color> =
         errorContainer,
     )
 
-private fun ColorScheme.safeFinanceContentColor(backgrounds: List<Color>): Color {
+private fun neutralColorAtLuminance(luminance: Float): Color =
+    Color(
+        red = luminance,
+        green = luminance,
+        blue = luminance,
+        colorSpace = ColorSpaces.LinearSrgb,
+    )
+
+private fun ColorScheme.bestSharedFinanceContentColor(backgrounds: List<Color>): Color {
     if (onSurface.hasFinanceTextContrast(backgrounds)) return onSurface
 
-    // ColorScheme normally guarantees onSurface across its surface family. Keep a
-    // deterministic fallback for synthetic or vendor schemes that break that contract.
-    return (0..SafeToneSearchSteps)
-        .asSequence()
-        .map { step ->
-            val channel = step.toFloat() / SafeToneSearchSteps
-            Color(channel, channel, channel)
-        }.filter { color -> color.hasFinanceTextContrast(backgrounds) }
-        .minByOrNull { color -> abs(color.luminance() - onSurface.luminance()) }
-        ?: error("Resolved finance backgrounds have no shared WCAG 4.5:1 content tone")
+    val backgroundLuminances = backgrounds.map(Color::luminance).distinct().sorted()
+    val candidateLuminances =
+        buildList {
+            add(0f)
+            backgroundLuminances.zipWithNext { lower, upper ->
+                // Within a gap, contrast to the nearest background on each side is
+                // balanced at sqrt((lower + .05) * (upper + .05)) - .05. Along with
+                // black and white, these are all continuous maximin candidates.
+                add(
+                    sqrt(
+                        (lower + WcagLuminanceOffset) *
+                            (upper + WcagLuminanceOffset),
+                    ) - WcagLuminanceOffset,
+                )
+            }
+            add(1f)
+        }
+    val preferredLuminance = onSurface.luminance()
+
+    // Evaluate the represented colors, then break exact score ties by proximity to
+    // onSurface and finally by the darker tone. At most 13 tones are considered for
+    // the 12 finance backgrounds, so this stays deterministic and cheap in composition.
+    return candidateLuminances
+        .map(::neutralColorAtLuminance)
+        .maxWithOrNull(
+            compareBy<Color> { color -> color.minimumContrast(backgrounds) }
+                .thenBy { color -> -abs(color.luminance() - preferredLuminance) }
+                .thenBy { color -> -color.luminance() },
+        ) ?: neutralColorAtLuminance(0f)
 }
 
-private fun FinanceColors.adjustedToward(
+private fun Color.adjustedToward(
     safeContentColor: Color,
     backgrounds: List<Color>,
-): FinanceColors {
+): Color {
     if (hasFinanceTextContrast(backgrounds)) return this
+    if (!safeContentColor.hasFinanceTextContrast(backgrounds)) return safeContentColor
 
-    fun adjusted(fraction: Float) =
-        FinanceColors(
-            income = lerp(income, safeContentColor, fraction),
-            expense = lerp(expense, safeContentColor, fraction),
-        )
+    fun adjusted(fraction: Float): Color = lerp(this, safeContentColor, fraction)
 
     var failingFraction = 0f
     var passingFraction = 1f
-    var passingColors = FinanceColors(safeContentColor, safeContentColor)
     for (step in 1..FinanceAdjustmentSearchSteps) {
         val fraction = step.toFloat() / FinanceAdjustmentSearchSteps
-        val colors = adjusted(fraction)
-        if (colors.hasFinanceTextContrast(backgrounds)) {
+        if (adjusted(fraction).hasFinanceTextContrast(backgrounds)) {
             passingFraction = fraction
-            passingColors = colors
             break
         }
         failingFraction = fraction
     }
     repeat(FinanceAdjustmentRefinementSteps) {
         val fraction = (failingFraction + passingFraction) / 2f
-        val colors = adjusted(fraction)
-        if (colors.hasFinanceTextContrast(backgrounds)) {
+        if (adjusted(fraction).hasFinanceTextContrast(backgrounds)) {
             passingFraction = fraction
-            passingColors = colors
         } else {
             failingFraction = fraction
         }
     }
-    return passingColors
+    return adjusted(passingFraction)
 }
 
-private fun ColorScheme.resolveFinanceColors(): FinanceColors {
+private fun FinanceColors.adjustedToward(
+    safeContentColor: Color,
+    backgrounds: List<Color>,
+): FinanceColors =
+    FinanceColors(
+        income = income.adjustedToward(safeContentColor, backgrounds),
+        expense = expense.adjustedToward(safeContentColor, backgrounds),
+    )
+
+internal fun ColorScheme.resolveFinanceColors(): FinanceColors {
     val backgrounds = financeTextBackgrounds()
     val candidates = listOf(LightFinanceColors, DarkFinanceColors)
     candidates
@@ -154,7 +183,7 @@ private fun ColorScheme.resolveFinanceColors(): FinanceColors {
 
     val bestCandidate = candidates.maxBy { candidate -> candidate.minimumContrast(backgrounds) }
     return bestCandidate.adjustedToward(
-        safeContentColor = safeFinanceContentColor(backgrounds),
+        safeContentColor = bestSharedFinanceContentColor(backgrounds),
         backgrounds = backgrounds,
     )
 }
@@ -238,6 +267,9 @@ private val FlowMoneyDarkColorScheme =
         surfaceContainerLow = Color(0xFF171C18),
         surfaceContainerLowest = Color(0xFF0B0F0C),
     )
+
+internal fun flowMoneyStaticColorScheme(darkTheme: Boolean): ColorScheme =
+    if (darkTheme) FlowMoneyDarkColorScheme else FlowMoneyLightColorScheme
 
 private val FlowMoneyTypography =
     Typography(
@@ -323,8 +355,7 @@ internal fun FlowMoneyTheme(
         when {
             dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && darkTheme -> dynamicDarkColorScheme(context)
             dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> dynamicLightColorScheme(context)
-            darkTheme -> FlowMoneyDarkColorScheme
-            else -> FlowMoneyLightColorScheme
+            else -> flowMoneyStaticColorScheme(darkTheme)
         }
     val financeColors = remember(colors) { colors.resolveFinanceColors() }
 
