@@ -148,8 +148,11 @@ color; API 26 covers the minimum SDK.
 - [ ] Font scales: exactly `1.0`, `1.5`, and `2.0` (also spot-check `0.85` if
   available). Record the original value first. Run only one pass command at a
   time on a disposable test device, wait for configuration recreation, and
-  complete the full UI pass before copying the next command. Verify no clipped
-  values/actions, unusable fields, or hidden widget content.
+  complete the full UI pass before copying the next command. Verify app
+  values/actions remain readable, fields remain usable, and primary content is
+  reachable. For widgets, apply the size-specific font-scale and truncation
+  gates under **Widget visual and route evidence**; expressly permitted
+  truncation or omission is not a failure.
 
   Capture the original value once:
 
@@ -261,13 +264,14 @@ Restore automatic time/timezone and the original locale when finished.
   `4x2`. Also drag the horizontal and vertical axes independently and then both
   axes together across the layout boundaries; do not treat placement at only
   the default `2x2` size as a pass.
-- [ ] At every API 31+ size, verify the `This month` label, correct
-  size-appropriate amount, and distinct 48dp Add target remain visible,
-  readable, and unclipped. Test at least one known month totaling below
-  `$1,000` and one known month totaling at or above `$1,000`, calculating the
-  expected display from the exact cents. Compact `2x1` must show exact dollars
-  and cents below `$1,000`; at or above `$1,000`, it intentionally shows a
-  deterministic abbreviated magnitude (`K`/`M`/`B`/`T`/`Q`): round half up
+- [ ] At font scale `1.0`, verify at every API 31+ size that the full `This
+  month` label, correct size-appropriate amount, and distinct 48dp Add target
+  remain visible, readable, and unclipped. Test at least one known month
+  totaling below `$1,000` and one known month totaling at or above `$1,000`,
+  calculating the expected display from the exact cents. Compact `2x1` must
+  show exact dollars and cents below `$1,000`; at or above `$1,000`, it
+  intentionally shows a deterministic abbreviated magnitude
+  (`K`/`M`/`B`/`T`/`Q`): round half up
   to one decimal below 10 magnitude units or to a whole number otherwise,
   remove a trailing zero, and promote a rounded `1000` to the next suffix.
   Compare the displayed value with that expected rounding, and use TalkBack to
@@ -281,10 +285,21 @@ Restore automatic time/timezone and the original locale when finished.
   note, account, individual-transaction, or SimpleFIN credential details.
 - [ ] Capture named API 31+ screenshots for `2x1`, `2x2`, `4x2`, and both-axis
   boundary resizes in day/light and night/dark dynamic-color schemes. Repeat all
-  three canonical sizes at font scale `2.0`; verify the label, amount, and 48dp
-  Add target still fit, with size-appropriate totals/categories and no overlap,
-  ellipsis of required values, or lost route target. Include normal-font
-  fallback-color evidence when dynamic color is disabled or unavailable.
+  three canonical sizes at font scale `2.0`. At every size, the complete
+  size-appropriate visual amount must remain visible and readable without
+  clipping or ellipsis, and the distinct 48dp Add target must remain fully
+  visible, unobscured, and tappable. The full `This month` label must remain
+  readable without clipping or ellipsis at `2x2` and `4x2`; at compact `2x1`
+  only, it may truncate or end-ellipsize as needed. The `2x2` summary and `4x2`
+  transaction/category supporting text may do the same at this elevated font
+  scale. Permitted truncation must leave readable text bounded within its own
+  region. It must not clip glyphs, overlap another element, or displace the
+  amount or Add target, and must expose only the aggregate information allowed
+  above. The preceding amount requirements still apply: exact dollars and cents
+  at `2x2`/`4x2`, the specified exact/abbreviated compact visual display, and the
+  compact TalkBack exact total. No visual amount may truncate or ellipsize.
+  Include normal-font fallback-color evidence when dynamic color is disabled or
+  unavailable.
 - [ ] On API 26, place one bound widget, record its launcher-reported min/max
   app-widget options, and resize it horizontally, vertically, and on both axes
   through compact, standard, and wide bounds. Confirm each options change
@@ -296,11 +311,13 @@ Restore automatic time/timezone and the original locale when finished.
 - [ ] Repeat the API 26 resize/options and portrait/landscape checks in day/light
   and night/dark and at font scale `2.0` (dynamic color is not applicable).
   Repeat both the below-`$1,000` and at-or-above-`$1,000` known-month cases and
-  apply the same gates for compact exact/abbreviated visual amounts, expected
-  rounding, compact TalkBack exact totals, standard/wide exact visual amounts,
-  the label, 48dp Add target, size-appropriate transaction total/top-category,
-  privacy, clipping, contrast, and add/delete refresh. Retain named screenshots
-  for every canonical size and orientation.
+  apply the same size-specific gates above for normal font and font scale
+  `2.0`: compact exact/abbreviated visual amounts, expected rounding, compact
+  TalkBack exact totals, standard/wide exact visual amounts, size-appropriate
+  transaction total/top-category content, label and supporting-text truncation
+  boundaries, the intact 48dp Add target, no overlap, privacy, contrast, and
+  add/delete refresh.
+  Retain named screenshots for every canonical size and orientation.
 - [ ] Keep the same launcher grid position and the same app-widget ID/host/provider
   binding for corresponding baseline/final comparisons on both API families.
   Responsive evidence must change size, so baseline and final screenshots are
