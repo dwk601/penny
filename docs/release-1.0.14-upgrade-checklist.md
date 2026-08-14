@@ -255,12 +255,43 @@ Restore automatic time/timezone and the original locale when finished.
 
 ### Widget visual and route evidence
 
-- [ ] Place the Penny 2x2 widget with current-month seeded spending visible.
-- [ ] Capture named baseline and final screenshots at minimum for normal font,
-  large font (`1.5`), light, dark, and API 31+ dynamic color. Keep the widget at
-  the same launcher grid position and size for comparisons.
-- [ ] Verify amount, transaction count, top category/support text, no clipping,
-  48dp plus target, contrast, and update after adding/deleting a transaction.
+- [ ] On API 31+, place one bound Penny widget with known current-month seeded
+  spending, then use the launcher resize handles/options to exercise all three
+  advertised responsive sizes: compact/short `2x1`, standard `2x2`, and wide
+  `4x2`. Also drag the horizontal and vertical axes independently and then both
+  axes together across the layout boundaries; do not treat placement at only
+  the default `2x2` size as a pass.
+- [ ] At every API 31+ size, verify the `This month` label, correct amount, and
+  distinct 48dp Add target remain visible, readable, and unclipped. At `2x2`,
+  verify the transaction total plus top-category supporting text; at `4x2`,
+  verify the transaction total and top-categories list. Confirm compact `2x1`
+  intentionally omits supporting details rather than clipping them. Verify
+  contrast and updates after adding/deleting a transaction, and confirm the
+  widget exposes only aggregate spending/category information—not merchant,
+  note, account, individual-transaction, or SimpleFIN credential details.
+- [ ] Capture named API 31+ screenshots for `2x1`, `2x2`, `4x2`, and both-axis
+  boundary resizes in day/light and night/dark dynamic-color schemes. Repeat all
+  three canonical sizes at font scale `2.0`; verify the label, amount, and 48dp
+  Add target still fit, with size-appropriate totals/categories and no overlap,
+  ellipsis of required values, or lost route target. Include normal-font
+  fallback-color evidence when dynamic color is disabled or unavailable.
+- [ ] On API 26, place one bound widget, record its launcher-reported min/max
+  app-widget options, and resize it horizontally, vertically, and on both axes
+  through compact, standard, and wide bounds. Confirm each options change
+  redraws the expected layout. Without deleting or rebinding it, rotate the
+  launcher portrait → landscape → portrait at bounds that select different
+  portrait and landscape layouts; screenshot each orientation and verify the
+  dual `RemoteViews` switch, content, and routes rather than accepting one
+  stretched or stale layout in both orientations.
+- [ ] Repeat the API 26 resize/options and portrait/landscape checks in day/light
+  and night/dark and at font scale `2.0` (dynamic color is not applicable).
+  Apply the same label, amount, 48dp Add target, size-appropriate transaction
+  total/top-category, privacy, clipping, contrast, and add/delete-refresh gates,
+  and retain named screenshots for every canonical size and orientation.
+- [ ] Keep the same launcher grid position and the same app-widget ID/host/provider
+  binding for corresponding baseline/final comparisons on both API families.
+  Responsive evidence must change size, so baseline and final screenshots are
+  **not** required to use the same widget dimensions.
 - [ ] Open Penny and select Transactions or Insights; capture/verify that exact
   non-Overview selection, then press HOME and tap the widget body. Penny must
   open/reuse `MainActivity` and return the selected tab to Overview. Starting on

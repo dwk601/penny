@@ -1386,6 +1386,7 @@ self_test_pass() {
 self_test_fail() {
 	warn "SELF-TEST FAIL: $1"
 	SELF_TEST_FAILURE_COUNT=$((SELF_TEST_FAILURE_COUNT + 1))
+	return 0
 }
 
 make_mock_executable() {
@@ -1507,21 +1508,71 @@ portable_mode() {
 	stat -f '%Lp' "$path" 2>/dev/null || stat -c '%a' "$path"
 }
 
+run_self_test_ui_capture_configured() {
+	local mock_adb="$1"
+	local counter="$2"
+	local args_log="$3"
+	local destination="$4"
+	local behavior="$5"
+	local python3_bin="$6"
+	# These locals dynamically shadow the production globals for this call only.
+	local ADB_BIN="$mock_adb"
+	local PYTHON3_BIN="$python3_bin"
+	local SERIAL="emulator-5554"
+	local UI_DUMP_TIMEOUT_SECONDS=1
+	local UI_DUMP_MAX_ATTEMPTS=3
+	local UI_DUMP_RETRY_DELAY_SECONDS=0
+
+	export MOCK_ADB_COUNTER="$counter"
+	export MOCK_ADB_ARGS="$args_log"
+	export MOCK_ADB_BEHAVIOR="$behavior"
+	capture_ui_dump "$destination"
+}
+
+run_self_test_ui_capture_case() (
+	# Keep capture_ui_dump's production die/exit behavior inside this process.
+	run_self_test_ui_capture_configured "$@"
+)
+
+run_self_test_ui_sanitize_case() {
+	local python3_bin="$1"
+	shift
+	local PYTHON3_BIN="$python3_bin"
+	sanitize_ui_dump "$@"
+}
+
 self_test_ui_capture() {
 	local test_root="$1"
 	local mock_adb="$test_root/mock-adb"
-	local counter="$test_root/mock-adb.counter"
-	local args_log="$test_root/mock-adb.args"
+	local retry_counter="$test_root/mock-adb-retry.counter"
+	local retry_args_log="$test_root/mock-adb-retry.args"
 	local capture_dir="$test_root/ui-capture"
 	local destination="$capture_dir/window.xml"
+	local exhausted_counter="$test_root/mock-adb-exhausted.counter"
+	local exhausted_args_log="$test_root/mock-adb-exhausted.args"
+	local exhausted_capture_dir="$test_root/ui-capture-exhausted"
+	local exhausted_destination="$exhausted_capture_dir/window.xml"
+	local exhausted_output="$test_root/ui-capture-exhausted.output.log"
+	local retry_output="$test_root/ui-capture-retry.output.log"
 	local duplicate_source="$test_root/duplicate-hierarchy.stdout"
 	local duplicate_destination="$test_root/duplicate-hierarchy.xml"
 	local duplicate_diagnostic="$test_root/duplicate-hierarchy.validation.log"
-	local file bad_mode=0
+	local parent_adb_bin="$ADB_BIN"
+	local parent_python3_bin="$PYTHON3_BIN"
+	local parent_serial="$SERIAL"
+	local parent_timeout="$UI_DUMP_TIMEOUT_SECONDS"
+	local parent_max_attempts="$UI_DUMP_MAX_ATTEMPTS"
+	local parent_retry_delay="$UI_DUMP_RETRY_DELAY_SECONDS"
+	local python3_bin retry_status exhausted_status attempt file directory
+	local exhausted_evidence=1
+	local bad_mode=0
 
-	printf '0\n' >"$counter"
-	: >"$args_log"
-	chmod 600 "$counter" "$args_log"
+	python3_bin="$(command -v python3)"
+	printf '0\n' >"$retry_counter"
+	printf '0\n' >"$exhausted_counter"
+	: >"$retry_args_log"
+	: >"$exhausted_args_log"
+	chmod 600 "$retry_counter" "$exhausted_counter" "$retry_args_log" "$exhausted_args_log"
 	cat >"$mock_adb" <<'SH'
 #!/bin/sh
 set -eu
@@ -1529,43 +1580,78 @@ printf '%s\n' "$*" >>"$MOCK_ADB_ARGS"
 count="$(cat "$MOCK_ADB_COUNTER")"
 count=$((count + 1))
 printf '%s\n' "$count" >"$MOCK_ADB_COUNTER"
-case "$count" in
-1)
-	exec sleep 2
+case "$MOCK_ADB_BEHAVIOR" in
+retry-then-success)
+	case "$count" in
+	1)
+		exec sleep 2
+		;;
+	2)
+		printf 'mock transport warning\n' >&2
+		printf 'status without XML\r\n'
+		;;
+	*)
+		printf 'shell status noise\r\n<?xml version="1.0" encoding="UTF-8"?>\r\n<hierarchy rotation="0"><node text="Amount paid" /></hierarchy>\r\nUI hierarchy status\r\nmock-prompt$ '
+		;;
+	esac
 	;;
-2)
-	printf 'mock transport warning\n' >&2
+always-malformed)
+	printf 'mock malformed attempt %s\n' "$count" >&2
 	printf 'status without XML\r\n'
 	;;
 *)
-	printf 'shell status noise\r\n<?xml version="1.0" encoding="UTF-8"?>\r\n<hierarchy rotation="0"><node text="Amount paid" /></hierarchy>\r\nUI hierarchy status\r\nmock-prompt$ '
+	exit 98
 	;;
 esac
 SH
 	chmod 700 "$mock_adb"
 
-	ADB_BIN="$mock_adb"
-	PYTHON3_BIN="$(command -v python3)"
-	SERIAL="emulator-5554"
-	UI_DUMP_TIMEOUT_SECONDS=1
-	UI_DUMP_MAX_ATTEMPTS=3
-	UI_DUMP_RETRY_DELAY_SECONDS=0
-	export MOCK_ADB_COUNTER="$counter" MOCK_ADB_ARGS="$args_log"
+	if run_self_test_ui_capture_case "$mock_adb" "$exhausted_counter" "$exhausted_args_log" \
+		"$exhausted_destination" always-malformed "$python3_bin" >"$exhausted_output" 2>&1; then
+		exhausted_status=0
+	else
+		exhausted_status=$?
+	fi
+	chmod 600 "$exhausted_output"
+	for attempt in 1 2 3; do
+		if [[ ! -f "$exhausted_destination.uiautomator-attempt-${attempt}.status" ]] ||
+			! grep -Fq "attempt=$attempt" "$exhausted_destination.uiautomator-attempt-${attempt}.status"; then
+			exhausted_evidence=0
+		fi
+	done
+	if [[ $exhausted_status -ne 0 ]] &&
+		[[ "$(cat "$exhausted_counter")" == "3" ]] &&
+		[[ "$(wc -l <"$exhausted_args_log" | tr -d ' ')" == "3" ]] &&
+		[[ ! -e "$exhausted_destination" ]] &&
+		[[ $exhausted_evidence -eq 1 ]] &&
+		grep -Fq 'ERROR: Could not stream and validate UI hierarchy' "$exhausted_output"; then
+		self_test_pass "UI dump fails closed after exactly the maximum malformed attempts"
+	else
+		self_test_fail "UI dump exhaustion did not fail closed after the maximum attempts"
+	fi
 
-	if capture_ui_dump "$destination" &&
+	if run_self_test_ui_capture_case "$mock_adb" "$retry_counter" "$retry_args_log" \
+		"$destination" retry-then-success "$python3_bin" >"$retry_output" 2>&1; then
+		retry_status=0
+	else
+		retry_status=$?
+	fi
+	chmod 600 "$retry_output"
+	if [[ $retry_status -eq 0 ]] &&
 		grep -Fq '<hierarchy rotation="0">' "$destination" &&
 		! grep -Fq 'shell status noise' "$destination" &&
 		! grep -Fq $'\r' "$destination"; then
-		self_test_pass "UI dump retries timeout/malformed output and sanitizes one CR-delimited hierarchy"
+		self_test_pass "UI dump self-tests continue after isolated exhaustion and sanitize a later retry"
 	else
-		self_test_fail "UI dump mock did not produce one sanitized hierarchy"
+		self_test_fail "UI dump retry mock did not produce one sanitized hierarchy"
 	fi
 
 	printf '%s\n%s\n' \
 		'<?xml version="1.0"?><hierarchy></hierarchy>' \
 		'<?xml version="1.0"?><hierarchy></hierarchy>' >"$duplicate_source"
 	chmod 600 "$duplicate_source"
-	if sanitize_ui_dump "$duplicate_source" "$duplicate_destination" 2>"$duplicate_diagnostic"; then
+	if run_self_test_ui_sanitize_case "$python3_bin" "$duplicate_source" \
+		"$duplicate_destination" 2>"$duplicate_diagnostic"; then
 		self_test_fail "UI dump sanitizer accepted duplicate hierarchies"
 	elif grep -Fq 'exactly one complete hierarchy' "$duplicate_diagnostic" &&
 		[[ ! -e "$duplicate_destination" ]]; then
@@ -1575,9 +1661,9 @@ SH
 		self_test_fail "UI dump sanitizer rejected duplicates without its curated diagnostic"
 	fi
 
-	if grep -Fq 'exec-out uiautomator dump /proc/self/fd/1' "$args_log" &&
-		[[ "$(wc -l <"$args_log" | tr -d ' ')" == "3" ]] &&
-		! grep -Eq '/sdcard|/data/local/tmp|/dev/tty' "$args_log"; then
+	if grep -Fq 'exec-out uiautomator dump /proc/self/fd/1' "$retry_args_log" &&
+		[[ "$(wc -l <"$retry_args_log" | tr -d ' ')" == "3" ]] &&
+		! grep -Eq '/sdcard|/data/local/tmp|/dev/tty' "$retry_args_log" "$exhausted_args_log"; then
 		self_test_pass "UI dump uses only inherited stdout and never a staged/shared/TTY path"
 	else
 		self_test_fail "UI dump invoked an unexpected adb transport or destination"
@@ -1592,14 +1678,27 @@ SH
 		self_test_fail "UI dump diagnostics were missing"
 	fi
 
-	[[ "$(portable_mode "$capture_dir")" == "700" ]] || bad_mode=1
-	for file in "$capture_dir"/*; do
-		[[ ! -f "$file" || "$(portable_mode "$file")" == "600" ]] || bad_mode=1
+	for directory in "$capture_dir" "$exhausted_capture_dir"; do
+		[[ "$(portable_mode "$directory")" == "700" ]] || bad_mode=1
+		for file in "$directory"/*; do
+			[[ ! -f "$file" || "$(portable_mode "$file")" == "600" ]] || bad_mode=1
+		done
 	done
 	if [[ $bad_mode -eq 0 ]]; then
-		self_test_pass "UI dump host directory/files are 0700/0600"
+		self_test_pass "UI dump host directories/files are 0700/0600 after success and exhaustion"
 	else
 		self_test_fail "UI dump host permissions were not 0700/0600"
+	fi
+
+	if [[ "$ADB_BIN" == "$parent_adb_bin" ]] &&
+		[[ "$PYTHON3_BIN" == "$parent_python3_bin" ]] &&
+		[[ "$SERIAL" == "$parent_serial" ]] &&
+		[[ "$UI_DUMP_TIMEOUT_SECONDS" == "$parent_timeout" ]] &&
+		[[ "$UI_DUMP_MAX_ATTEMPTS" == "$parent_max_attempts" ]] &&
+		[[ "$UI_DUMP_RETRY_DELAY_SECONDS" == "$parent_retry_delay" ]]; then
+		self_test_pass "UI capture cases do not leak ADB, serial, Python, or retry globals"
+	else
+		self_test_fail "UI capture cases leaked production globals into the parent self-test"
 	fi
 }
 
