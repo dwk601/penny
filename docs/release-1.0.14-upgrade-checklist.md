@@ -61,12 +61,19 @@ Additional assumptions and limitations:
   placement and the two taps are operator actions because launchers differ;
   the script fails unless exactly one binding is detected, the binding survives
   replacement, Penny is foregrounded, and the operator explicitly attests each
-  route. Route UI gates are page-specific: Overview must have exactly one
-  selected `Overview` nav node and no selected `Transactions` or `Insights`
-  node. Duplicate unselected labels in seeded page content are allowed. Add must
-  expose the fresh expense editor's `Amount paid` and `Save expense` nodes and
-  no edit or income-editor state. Always-present nav/FAB labels are not accepted
-  as proof.
+  route. Before HOME/body tap, the operator must select Transactions or Insights
+  and the captured hierarchy must prove exactly that non-Overview precondition;
+  only a subsequent transition to exactly one selected `Overview` node passes.
+  Duplicate unselected labels in seeded page content are allowed. Add must expose
+  one editor subtree with exact text attributes `Add transaction`, `Close`,
+  `Amount paid`, and `Save expense`. An unrelated Insights-row
+  `content-desc="Edit transaction"` is allowed, while
+  an Edit transaction sheet or income editor does not pass. Always-present
+  nav/FAB labels are not accepted as proof.
+- UI hierarchies can contain financial UI text. The script streams uiautomator
+  XML directly to mode-`0600` host artifacts, removes uiautomator status output,
+  validates a complete hierarchy, retries, and fails closed. It never stages a
+  hierarchy in `/sdcard`, `/data/local/tmp`, or another device file.
 - A SimpleFIN credential is optional for the synthetic rehearsal because
   profile/account/ignored rows are seeded independently. To exercise a real
   credential, pass `--with-simplefin-credential` and connect inside Penny.
@@ -132,17 +139,45 @@ color; API 26 covers the minimum SDK.
 ### Display and window matrix
 
 - [ ] Font scales: exactly `1.0`, `1.5`, and `2.0` (also spot-check `0.85` if
-  available). Record the original scale, set each value through Display settings
-  or the commands below on a disposable test device, and wait for configuration
-  recreation before each pass. Restore `ORIGINAL` when finished. Verify no
-  clipped values/actions, unusable fields, or hidden widget content.
+  available). Record the original value first. Run only one pass command at a
+  time on a disposable test device, wait for configuration recreation, and
+  complete the full UI pass before copying the next command. Verify no clipped
+  values/actions, unusable fields, or hidden widget content.
+
+  Capture the original value once:
 
   ```bash
   ORIGINAL="$(adb -s SERIAL shell settings get system font_scale | tr -d '\r')"
+  ```
+
+  Complete the `1.0` pass:
+
+  ```bash
   adb -s SERIAL shell settings put system font_scale 1.0
+  ```
+
+  Only after that pass is complete, run and complete the `1.5` pass:
+
+  ```bash
   adb -s SERIAL shell settings put system font_scale 1.5
+  ```
+
+  Only after that pass is complete, run and complete the `2.0` pass:
+
+  ```bash
   adb -s SERIAL shell settings put system font_scale 2.0
-  adb -s SERIAL shell settings put system font_scale "$ORIGINAL"
+  ```
+
+  Restore the setting when all passes finish. `settings get` reports an unset
+  value as `null` (and some environments can produce an empty value); restore
+  that state by deleting the setting rather than writing `null`/empty:
+
+  ```bash
+  if [[ -z "$ORIGINAL" || "$ORIGINAL" == "null" ]]; then
+    adb -s SERIAL shell settings delete system font_scale
+  else
+    adb -s SERIAL shell settings put system font_scale "$ORIGINAL"
+  fi
   ```
 
 - [ ] Light theme and dark theme on each API level.
@@ -219,8 +254,10 @@ Restore automatic time/timezone and the original locale when finished.
   the same launcher grid position and size for comparisons.
 - [ ] Verify amount, transaction count, top category/support text, no clipping,
   48dp plus target, contrast, and update after adding/deleting a transaction.
-- [ ] Tap widget body from home: Penny opens/reuses `MainActivity` and selects
-  Overview, including when another tab was active.
+- [ ] Open Penny and select Transactions or Insights; capture/verify that exact
+  non-Overview selection, then press HOME and tap the widget body. Penny must
+  open/reuse `MainActivity` and return the selected tab to Overview. Starting on
+  Overview is not route proof.
 - [ ] Tap widget plus: a fresh Add transaction sheet opens. Repeat while a dirty
   editor exists and verify Keep editing/Discard behavior before accepting the
   second route.
@@ -284,11 +321,17 @@ The script must pass all of these; do not hand-waive a failed gate:
 - [ ] Three representative transaction rows (local expense with exact persisted
   recurrence `Monthly`, local income, SimpleFIN expense), both preference
   files/all existing keys, one SimpleFIN profile, account marker, and
-  ignored-transaction marker. Seed DB/preferences are streamed from host stdin
-  with `adb exec-in` through `run-as` into a mode-`0600` app-private temporary,
-  atomically renamed, then read back with `adb exec-out` and SHA-256-checked
-  against the host source. No seed bytes are staged in `/data/local/tmp`; a
-  write, move, read-back, or hash mismatch fails closed and cleans up.
+  ignored-transaction marker. Seed DB/preferences are streamed as unmodified
+  binary host stdin over non-PTY, status-bearing `adb shell`/shell-v2 through
+  `run-as` into a mode-`0600` app-private temporary. The remote write must finish,
+  then `adb exec-out` independently SHA-256-verifies the temporary before a
+  separate status-bearing atomic rename; the destination is verified afterward.
+  No seed bytes are staged in shared device storage. Transport/temp failures
+  clean only the temporary and never delete or replace an existing destination.
+- [ ] Before atomically replacing `databases/flow_money.db`, the stopped app's
+  existing `flow_money.db-wal` and `flow_money.db-shm` are deleted. They are
+  never deleted after installing the new main DB, preventing stale sidecars from
+  being associated with the replacement.
 - [ ] Profile intentionally paused during rehearsal to avoid an external sync
   mutating deterministic seed data.
 - [ ] Exactly one launcher-bound widget with a captured baseline screenshot.
@@ -301,11 +344,16 @@ The script must pass all of these; do not hand-waive a failed gate:
 - [ ] Widget ID/host/provider binding is byte-for-byte canonical-equivalent
   immediately after replacement and after launch/routes.
 - [ ] Widget body → Overview and plus → Add transaction, with foreground/UI
-  verification, explicit operator attestation, UI dumps, and screenshots. The
-  Overview dump must prove exactly one selected Overview nav node and reject a
-  selected Transactions/Insights node without requiring unselected labels to be
-  unique; the Add dump must prove fresh expense-editor controls, not merely
-  match the persistent FAB.
+  verification, explicit operator attestation, UI dumps, and screenshots. Before
+  HOME/body tap, a hierarchy must prove exactly one selected Transactions or
+  Insights node and no selected Overview; the post-tap hierarchy must prove the
+  transition to exactly one selected Overview and no selected alternate tab.
+  The Add dump must contain one subtree with exact text attributes for the
+  `Add transaction` editor title, `Close`, `Amount paid`, and `Save expense`, not
+  merely match the persistent FAB or borrow labels from unrelated subtrees. An
+  unrelated `content-desc="Edit transaction"` may coexist;
+  an edit sheet still fails. Hierarchies stream directly to private host files
+  and are never staged on a shared device path.
 - [ ] Before/after host SQLite `PRAGMA quick_check` returns exactly `ok`.
 - [ ] Canonical logical rows, both preference files, deterministic sorted
   `files/` type/content manifest, encrypted credential presence/hash, and widget

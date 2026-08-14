@@ -76,11 +76,12 @@ Environment overrides:
 
 Interactive steps:
   The operator must confirm an AVD snapshot, optionally connect SimpleFIN in the
-  app, add exactly one Penny widget through the launcher, and visually attest
-  the widget body (Overview) and plus-button (Add transaction) routes. Generic
-  ADB has no portable launcher widget-allocation API, so the script verifies the
-  binding plus page-specific selected-tab/editor semantics instead of treating
-  always-visible navigation or FAB labels as route proof.
+  app, add exactly one Penny widget through the launcher, switch Penny to a
+  non-Overview tab, and visually attest the widget body (Overview) and plus-button
+  (Add transaction) routes. Generic ADB has no portable launcher widget-allocation
+  API, so the script verifies the non-Overview -> Overview state transition plus
+  page-specific selected-tab/editor semantics instead of treating always-visible
+  navigation or FAB labels as route proof.
 
 Artifacts:
   The output directory is mode 0700 and contains mode-0600 run-as snapshots,
@@ -384,9 +385,11 @@ shell_cmd() {
 
 run_as_sh() {
 	local command="$1"
-	# adb shell joins argv before the device shell parses it. Keep the complete
-	# nested sh -c invocation in one argument so redirections/tests are not lost.
-	shell_cmd "run-as '$PACKAGE' sh -c \"$command\""
+	# Force a non-PTY shell-v2 stream. This preserves stdin bytes and waits for
+	# the remote sh/run-as exit status through adb's status-bearing shell channel.
+	# Keep the complete nested sh -c invocation in one argument so adb's device
+	# shell does not lose redirections or compound-command status.
+	adb_cmd shell -T "run-as '$PACKAGE' sh -c \"$command\""
 }
 
 trim_device_output() {
@@ -434,7 +437,8 @@ Read/write plan (actual mode only):
      using a sorted file type/content manifest rather than tar metadata for files/.
   4. Run exactly: adb -s SERIAL install -r NEW_APK
   5. Fail closed on package, certificate, version, UID, widget, quick_check, or fingerprint mismatch.
-  6. Require visual checks of both widget routes and retain secure before/after run-as snapshots.
+  6. Prove a selected non-Overview tab before HOME, then require the widget body to
+     return to selected Overview; verify the Add editor and retain secure snapshots.
 EOF
 }
 
@@ -665,7 +669,7 @@ capture_snapshot() {
 install_private_file() {
 	local source="$1"
 	local relative="$2"
-	local parent temporary command source_digest device_digest
+	local parent temporary write_command source_digest temporary_digest destination_digest
 	[[ -f "$source" && -r "$source" ]] || die "Private seed source is not readable: $source"
 	[[ "$relative" =~ ^[A-Za-z0-9._/-]+$ && "$relative" != /* && "$relative" != *//* ]] ||
 		die "Unsafe app-private destination path"
@@ -675,29 +679,53 @@ install_private_file() {
 	source_digest="$(sha256_file "$source")" || die "Could not hash private seed source"
 	[[ "$source_digest" =~ ^[0-9A-F]{64}$ ]] || die "Private seed source hash is malformed"
 
-	# Stream bytes directly into app-private storage. Never stage seed data in
-	# /data/local/tmp, where another shell process could read it between push,
-	# chmod, and cleanup. exec-in attaches host stdin; the app-private temporary
-	# is mode 0600 and atomically replaces the destination only after a full read.
+	# Stream unmodified bytes over a non-PTY adb shell-v2 stdin channel. The
+	# status-bearing call does not return until remote cat and chmod complete.
+	# Keep both the existing destination and the app-private temporary out of
+	# shared device storage.
 	parent="${relative%/*}"
 	[[ "$parent" != "$relative" ]] || parent="."
 	temporary="${relative}.penny-upgrade-${$}.part"
-	command="umask 077; mkdir -p '$parent' && rm -f '$temporary' && cat > '$temporary' && chmod 600 '$temporary' && mv -f '$temporary' '$relative'"
-	if ! adb_cmd exec-in "run-as '$PACKAGE' sh -c \"$command\"" <"$source" >/dev/null; then
+	write_command="umask 077; mkdir -p '$parent' && rm -f '$temporary' && cat > '$temporary' && chmod 600 '$temporary'"
+	if ! run_as_sh "$write_command" <"$source" >/dev/null; then
 		run_as_sh "rm -f '$temporary'" >/dev/null 2>&1 || true
-		die "Could not stream run-as file into app-private storage: $relative"
+		die "Could not complete app-private temporary write: $relative"
 	fi
 
-	# Do not trust the transport status alone. Read the installed bytes back via
-	# exec-out and compare hashes without staging them in shared device storage.
-	if ! device_digest="$(adb_cmd exec-out "run-as '$PACKAGE' cat '$relative'" | sha256_stream)"; then
-		run_as_sh "rm -f '$temporary' '$relative'" >/dev/null 2>&1 || true
-		die "Could not verify app-private file after streaming: $relative"
+	# Independently verify the completed temporary before the atomic rename.
+	# Transport or temporary-digest failure must never remove/replace an existing
+	# destination; only the disposable temporary is cleaned.
+	if ! temporary_digest="$(adb_cmd exec-out run-as "$PACKAGE" cat "$temporary" | sha256_stream)"; then
+		run_as_sh "rm -f '$temporary'" >/dev/null 2>&1 || true
+		die "Could not hash app-private temporary after streaming: $relative"
 	fi
-	if [[ "$device_digest" != "$source_digest" ]]; then
-		run_as_sh "rm -f '$temporary' '$relative'" >/dev/null 2>&1 || true
-		die "App-private file read-back did not match the source: $relative"
+	if [[ "$temporary_digest" != "$source_digest" ]]; then
+		run_as_sh "rm -f '$temporary'" >/dev/null 2>&1 || true
+		die "App-private temporary did not match the source: $relative"
 	fi
+
+	if ! run_as_sh "mv -f '$temporary' '$relative'" >/dev/null; then
+		run_as_sh "rm -f '$temporary'" >/dev/null 2>&1 || true
+		die "Could not atomically install app-private file: $relative"
+	fi
+
+	# Verify the destination as a separate post-rename gate. Never delete it on
+	# failure: it may be the only remaining coherent copy and evidence must remain.
+	if ! destination_digest="$(adb_cmd exec-out run-as "$PACKAGE" cat "$relative" | sha256_stream)"; then
+		die "Could not verify installed app-private file: $relative"
+	fi
+	[[ "$destination_digest" == "$source_digest" ]] ||
+		die "Installed app-private file did not match the source: $relative"
+}
+
+install_private_database() {
+	local source="$1"
+	# With the app stopped and the seed collapsed into its main file, remove stale
+	# sidecars before (never after) atomically replacing the database. Otherwise
+	# SQLite could associate an old WAL/SHM with the newly installed main file.
+	run_as_sh "rm -f 'databases/flow_money.db-wal' 'databases/flow_money.db-shm'" >/dev/null ||
+		die "Could not remove stale database sidecars before main database replacement"
+	install_private_file "$source" "databases/flow_money.db"
 }
 
 sqlite_quick_check() {
@@ -798,8 +826,7 @@ SQL
 		die "Collapsed seed database quick_check failed"
 
 	write_seed_preferences "$seed_dir/preferences"
-	install_private_file "$seed_db" "databases/flow_money.db"
-	shell_cmd run-as "$PACKAGE" rm -f "databases/flow_money.db-wal" "databases/flow_money.db-shm" >/dev/null
+	install_private_database "$seed_db"
 	install_private_file "$seed_dir/preferences/flow_money.xml" "shared_prefs/flow_money.xml"
 	install_private_file "$seed_dir/preferences/simplefin_migration_cleanup.xml" \
 		"shared_prefs/simplefin_migration_cleanup.xml"
@@ -1017,37 +1044,65 @@ assert_foreground_activity() {
 		die "Penny MainActivity is not the resumed activity"
 }
 
+sanitize_ui_dump() {
+	local source="$1"
+	local destination="$2"
+	"$PYTHON3_BIN" - "$source" "$destination" <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+source, destination = sys.argv[1:]
+with open(source, "rb") as stream:
+    captured = stream.read()
+
+start = captured.find(b"<?xml")
+end_marker = b"</hierarchy>"
+end = captured.find(end_marker, start if start >= 0 else 0)
+if start < 0 or end < 0 or captured.find(b"<?xml", start + 1) >= 0:
+    raise SystemExit("uiautomator stdout did not contain one complete hierarchy")
+payload = captured[start : end + len(end_marker)]
+root = ET.fromstring(payload)
+if root.tag != "hierarchy":
+    raise SystemExit("uiautomator XML root is not hierarchy")
+
+fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb", closefd=False) as stream:
+        stream.write(payload)
+finally:
+    os.close(fd)
+PY
+}
+
 capture_ui_dump() {
 	local destination="$1"
-	local remote="/sdcard/penny-upgrade-window-${$}.xml"
+	local captured="${destination}.captured.part"
+	local sanitized="${destination}.sanitized.part"
 	local _
+	mkdir -p "$(dirname "$destination")"
+	rm -f "$destination" "$captured" "$sanitized"
 	for _ in 1 2 3; do
-		if shell_cmd uiautomator dump "$remote" >/dev/null 2>&1; then
-			adb_cmd exec-out cat "$remote" >"$destination"
-			shell_cmd rm -f "$remote" >/dev/null 2>&1 || true
+		: >"$captured"
+		chmod 600 "$captured"
+		# Stream the sensitive hierarchy directly to a private host file. No XML
+		# is ever staged in /sdcard, /data/local/tmp, or any other device path.
+		if adb_cmd exec-out uiautomator dump /dev/tty >"$captured" 2>/dev/null &&
+			sanitize_ui_dump "$captured" "$sanitized"; then
+			mv "$sanitized" "$destination"
 			chmod 600 "$destination"
+			rm -f "$captured"
 			[[ -s "$destination" ]] && return 0
 		fi
+		rm -f "$captured" "$sanitized"
 		sleep 1
 	done
-	shell_cmd rm -f "$remote" >/dev/null 2>&1 || true
-	die "Could not capture UI hierarchy"
+	rm -f "$captured" "$sanitized"
+	die "Could not stream and validate UI hierarchy"
 }
 
-ui_node_has_label() {
-	local dump="$1"
-	local label="$2"
-	awk -v label="$label" '
-        BEGIN { RS=">" }
-        /<node[[:space:]]/ {
-            if (index($0, "text=\"" label "\"") ||
-                index($0, "content-desc=\"" label "\"")) found=1
-        }
-        END { exit(found ? 0 : 1) }
-    ' "$dump"
-}
-
-ui_dump_has_exactly_one_selected_label() {
+ui_dump_selected_label_count() {
 	local dump="$1"
 	local label="$2"
 	awk -v label="$label" '
@@ -1057,22 +1112,36 @@ ui_dump_has_exactly_one_selected_label() {
                       index($0, "content-desc=\"" label "\"")
             if (labeled && index($0, "selected=\"true\"")) matches++
         }
-        END { exit(matches == 1 ? 0 : 1) }
+        END { print matches + 0 }
     ' "$dump"
 }
 
+ui_dump_has_exactly_one_selected_label() {
+	[[ "$(ui_dump_selected_label_count "$1" "$2")" == "1" ]]
+}
+
 ui_dump_has_selected_label() {
+	[[ "$(ui_dump_selected_label_count "$1" "$2")" -gt 0 ]]
+}
+
+non_overview_precondition_dump_is_specific() {
 	local dump="$1"
-	local label="$2"
-	awk -v label="$label" '
-        BEGIN { RS=">" }
-        /<node[[:space:]]/ {
-            labeled = index($0, "text=\"" label "\"") ||
-                      index($0, "content-desc=\"" label "\"")
-            if (labeled && index($0, "selected=\"true\"")) found=1
-        }
-        END { exit(found ? 0 : 1) }
-    ' "$dump"
+	if ui_dump_has_selected_label "$dump" "Overview"; then
+		return 1
+	fi
+	if ui_dump_has_exactly_one_selected_label "$dump" "Transactions"; then
+		if ui_dump_has_selected_label "$dump" "Insights"; then
+			return 1
+		fi
+		return 0
+	fi
+	if ui_dump_has_exactly_one_selected_label "$dump" "Insights"; then
+		if ui_dump_has_selected_label "$dump" "Transactions"; then
+			return 1
+		fi
+		return 0
+	fi
+	return 1
 }
 
 overview_route_dump_is_specific() {
@@ -1086,28 +1155,53 @@ overview_route_dump_is_specific() {
 
 add_route_dump_is_specific() {
 	local dump="$1"
-	# "Add transaction" alone is the always-present FAB description. Require
-	# fresh expense-editor-only controls and reject edit/income editor states.
-	ui_node_has_label "$dump" "Add transaction" &&
-		ui_node_has_label "$dump" "Amount paid" &&
-		ui_node_has_label "$dump" "Save expense" &&
-		! ui_node_has_label "$dump" "Edit transaction" &&
-		! ui_node_has_label "$dump" "Income received" &&
-		! ui_node_has_label "$dump" "Save income"
+	# The persistent FAB and Insights rows can expose content-desc values "Add
+	# transaction" and "Edit transaction". Require one UI node subtree with exact
+	# text attributes for the fresh title, close action, and expense-only controls.
+	# An edit sheet cannot borrow an unrelated background Add label because its
+	# candidate subtree also contains the exact Edit transaction title.
+	"$PYTHON3_BIN" - "$dump" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+required = {"Add transaction", "Close", "Amount paid", "Save expense"}
+rejected = {"Edit transaction", "Income received", "Save income"}
+root = ET.parse(sys.argv[1]).getroot()
+for candidate in root.iter("node"):
+    texts = {
+        node.attrib["text"]
+        for node in candidate.iter("node")
+        if node.attrib.get("text", "")
+    }
+    if required <= texts and not rejected.intersection(texts):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 verify_widget_routes() {
 	local route_dir="$OUTPUT_DIR/20-candidate/routes"
 	mkdir -p "$route_dir"
 
+	# Establish a fail-closed state transition: a no-op body click cannot pass
+	# after the operator and hierarchy have proved another tab is selected.
+	launch_app
+	confirm_exact "NON-OVERVIEW-READY" \
+		"In Penny, switch to Transactions or Insights and leave exactly that tab selected. Do not press HOME; the script will verify this non-Overview precondition."
+	assert_foreground_activity
+	capture_ui_dump "$route_dir/non-overview-precondition-window.xml"
+	non_overview_precondition_dump_is_specific "$route_dir/non-overview-precondition-window.xml" ||
+		die "Widget body precondition lacked exactly one selected Transactions/Insights node or still selected Overview"
+	capture_screen "$route_dir/non-overview-precondition.png"
+
 	shell_cmd input keyevent HOME >/dev/null
 	sleep 1
 	confirm_exact "OVERVIEW-OK" \
-		"Tap the Penny widget body (not +). Verify Penny opens with Overview selected."
+		"Tap the Penny widget body (not +). Verify Penny returns from the selected non-Overview tab to Overview."
 	assert_foreground_activity
 	capture_ui_dump "$route_dir/overview-window.xml"
 	overview_route_dump_is_specific "$route_dir/overview-window.xml" ||
-		die "Overview route lacked exactly one selected Overview nav node or another nav destination was selected"
+		die "Widget body did not return the verified non-Overview precondition to exactly one selected Overview nav node"
 	capture_screen "$route_dir/overview-route.png"
 
 	shell_cmd input keyevent HOME >/dev/null
@@ -1117,9 +1211,9 @@ verify_widget_routes() {
 	assert_foreground_activity
 	capture_ui_dump "$route_dir/add-window.xml"
 	add_route_dump_is_specific "$route_dir/add-window.xml" ||
-		die "Add route lacked fresh expense-editor semantics (Amount paid and Save expense)"
+		die "Add route lacked exact Add transaction title/Close/Amount paid/Save expense editor text"
 	capture_screen "$route_dir/add-route.png"
-	log "Both widget routes were operator-attested and page-specific UI/foreground-verified"
+	log "Both widget routes were operator-attested and state-transition/page-specific UI-verified"
 }
 
 install_archived
