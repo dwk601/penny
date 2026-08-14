@@ -11,38 +11,59 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
 
-class SimpleFinSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result {
-        return runSync(SimpleFinSyncRepository(applicationContext))
-    }
+class SimpleFinSyncWorker(
+    context: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result =
+        runSync(SimpleFinSyncRepository(applicationContext)) {
+            PennyWidgetProvider.refreshAll(applicationContext)
+        }
 
     companion object {
         const val PERIODIC_WORK_NAME = "simplefin-sync"
         const val ONE_SHOT_WORK_NAME = "simplefin-sync-now"
 
-        internal suspend fun runSync(repository: SimpleFinSyncRepository): Result {
-            return when (val result = repository.syncIfStale()) {
-                is SimpleFinSyncResult.Success, SimpleFinSyncResult.Throttled -> Result.success()
-                is SimpleFinSyncResult.Failure -> if (result.retryable) Result.retry() else Result.success()
-            }
-        }
+        internal suspend fun runSync(
+            repository: SimpleFinSyncRepository,
+            refreshWidget: suspend () -> Unit = {},
+        ): Result =
+            when (val result = repository.syncIfStale()) {
+                is SimpleFinSyncResult.Success -> {
+                    if (result.inserted > 0 || result.updated > 0) refreshWidget()
+                    Result.success()
+                }
 
-        suspend fun schedule(context: Context, automaticSyncsPerDay: Int) = withContext(Dispatchers.IO) {
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                PERIODIC_WORK_NAME,
-                ExistingPeriodicWorkPolicy.UPDATE,
-                PeriodicWorkRequestBuilder<SimpleFinSyncWorker>(
-                    automaticSyncIntervalMillis(automaticSyncsPerDay),
-                    TimeUnit.MILLISECONDS,
-                )
-                    .setBackoffCriteria(BackoffPolicy.LINEAR, SIMPLEFIN_RETRY_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
-                    .setConstraints(networkConstraints())
-                    .build(),
-            ).result.get()
+                SimpleFinSyncResult.Throttled -> {
+                    Result.success()
+                }
+
+                is SimpleFinSyncResult.Failure -> {
+                    if (result.retryable) Result.retry() else Result.success()
+                }
+            }
+
+        suspend fun schedule(
+            context: Context,
+            automaticSyncsPerDay: Int,
+        ) = withContext(Dispatchers.IO) {
+            WorkManager
+                .getInstance(context)
+                .enqueueUniquePeriodicWork(
+                    PERIODIC_WORK_NAME,
+                    ExistingPeriodicWorkPolicy.UPDATE,
+                    PeriodicWorkRequestBuilder<SimpleFinSyncWorker>(
+                        automaticSyncIntervalMillis(automaticSyncsPerDay),
+                        TimeUnit.MILLISECONDS,
+                    ).setBackoffCriteria(BackoffPolicy.LINEAR, SIMPLEFIN_RETRY_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
+                        .setConstraints(networkConstraints())
+                        .build(),
+                ).result
+                .get()
         }
 
         fun enqueueOneShot(context: Context) {
@@ -56,14 +77,17 @@ class SimpleFinSyncWorker(context: Context, params: WorkerParameters) : Coroutin
             )
         }
 
-        suspend fun cancel(context: Context) = withContext(Dispatchers.IO) {
-            val manager = WorkManager.getInstance(context)
-            manager.cancelUniqueWork(PERIODIC_WORK_NAME).result.get()
-            manager.cancelUniqueWork(ONE_SHOT_WORK_NAME).result.get()
-        }
+        suspend fun cancel(context: Context) =
+            withContext(Dispatchers.IO) {
+                val manager = WorkManager.getInstance(context)
+                manager.cancelUniqueWork(PERIODIC_WORK_NAME).result.get()
+                manager.cancelUniqueWork(ONE_SHOT_WORK_NAME).result.get()
+            }
 
-        private fun networkConstraints() = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
+        private fun networkConstraints() =
+            Constraints
+                .Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build()
     }
 }

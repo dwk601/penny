@@ -1,0 +1,7 @@
+<resources>
+    <color name="widget_surface_inverse">@android:color/system_neutral1_50</color>
+    <color name="widget_on_surface_inverse">@android:color/system_neutral1_900</color>
+    <color name="widget_on_surface_inverse_muted">@android:color/system_neutral1_700</color>
+    <color name="widget_quick_add">@android:color/system_accent1_200</color>
+    <color name="widget_on_quick_add">@android:color/system_accent1_900</color>
+</resources>

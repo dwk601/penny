@@ -6,9 +6,8 @@
     android:background="@drawable/widget_penny_card_background"
     android:orientation="vertical"
     android:paddingLeft="8dp"
-    android:paddingTop="2dp"
     android:paddingRight="8dp"
-    android:paddingBottom="10dp">
+    android:paddingBottom="6dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -21,12 +20,16 @@
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
+            android:autoSizeMaxTextSize="11sp"
+            android:autoSizeMinTextSize="8sp"
+            android:autoSizeStepGranularity="1sp"
+            android:autoSizeTextType="uniform"
             android:ellipsize="end"
             android:gravity="center_vertical"
-            android:singleLine="true"
+            android:includeFontPadding="false"
+            android:maxLines="2"
             android:text="@string/widget_spent_this_month"
-            android:textColor="@color/widget_on_surface_inverse_muted"
-            android:textSize="11sp" />
+            android:textColor="@color/widget_on_surface_inverse_muted" />
 
         <TextView
             android:id="@+id/widget_add_button"
@@ -44,26 +47,34 @@
     <TextView
         android:id="@+id/widget_amount"
         android:layout_width="match_parent"
-        android:layout_height="30dp"
+        android:layout_height="0dp"
+        android:layout_weight="3"
+        android:autoSizeMaxTextSize="27sp"
+        android:autoSizeMinTextSize="12sp"
+        android:autoSizeStepGranularity="1sp"
+        android:autoSizeTextType="uniform"
         android:ellipsize="end"
         android:fontFamily="serif"
         android:gravity="center_vertical"
         android:includeFontPadding="false"
-        android:singleLine="true"
+        android:maxLines="1"
         android:text="@string/widget_amount_fallback"
         android:textColor="@color/widget_on_surface_inverse"
-        android:textSize="27sp"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/widget_count"
         android:layout_width="match_parent"
-        android:layout_height="18dp"
+        android:layout_height="0dp"
+        android:layout_weight="2"
+        android:autoSizeMaxTextSize="11sp"
+        android:autoSizeMinTextSize="8sp"
+        android:autoSizeStepGranularity="1sp"
+        android:autoSizeTextType="uniform"
         android:ellipsize="end"
         android:gravity="center_vertical"
         android:includeFontPadding="false"
-        android:singleLine="true"
+        android:maxLines="2"
         android:text="@string/widget_supporting_metrics_fallback"
-        android:textColor="@color/widget_on_surface_inverse_muted"
-        android:textSize="11sp" />
+        android:textColor="@color/widget_on_surface_inverse_muted" />
 </LinearLayout>

@@ -1,0 +1,7 @@
+<resources>
+    <color name="widget_surface_inverse">#1A1C1A</color>
+    <color name="widget_on_surface_inverse">#E2E3DF</color>
+    <color name="widget_on_surface_inverse_muted">#C4C7C3</color>
+    <color name="widget_quick_add">#9FD8BC</color>
+    <color name="widget_on_quick_add">#003827</color>
+</resources>

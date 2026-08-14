@@ -1,14 +1,17 @@
 package com.dwk.flowmoney
 
 import android.app.PendingIntent
+import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Color
 import android.graphics.Rect
+import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
-import android.widget.RemoteViews
+import android.widget.TextView
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -40,63 +43,157 @@ class PennyWidgetIntentTest {
     @get:Rule val composeRule = createEmptyComposeRule()
 
     @Test
-    fun pennySummaryFitsSmallWidgetAtLargeFontScale() {
+    fun compactWidgetFitsTwoByOneAtTwoHundredPercentFontScale() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val configuration = Configuration(context.resources.configuration).apply { fontScale = 1.3f }
+        val configuration = Configuration(context.resources.configuration).apply { fontScale = 2f }
         val configuredContext = context.createConfigurationContext(configuration)
         val root =
-            RemoteViews(context.packageName, R.layout.widget_penny_summary)
-                .apply(configuredContext, null) as ViewGroup
+            PennyWidgetProvider
+                .viewsForLayout(
+                    configuredContext,
+                    WidgetSummary("This month", "\$123.45", "4 txns", "Food \$80.00"),
+                    R.layout.widget_penny_compact,
+                ).apply(configuredContext, null) as ViewGroup
         val density = configuredContext.resources.displayMetrics.density
-        val size = (110 * density + 0.5f).toInt()
+        val width = (110 * density + 0.5f).toInt()
+        val height = (48 * density + 0.5f).toInt()
         val addSize = (48 * density + 0.5f).toInt()
 
         root.measure(
-            View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
         )
         root.layout(0, 0, root.measuredWidth, root.measuredHeight)
 
-        assertEquals(size, root.measuredWidth)
-        assertEquals(size, root.measuredHeight)
+        assertEquals(width, root.measuredWidth)
+        assertEquals(height, root.measuredHeight)
 
         val month = root.findViewById<View>(R.id.widget_spent_label)
         val amount = root.findViewById<View>(R.id.widget_amount)
-        val support = root.findViewById<View>(R.id.widget_count)
         val add = root.findViewById<View>(R.id.widget_add_button)
-        val monthBounds =
-            Rect(0, 0, month.width, month.height).also {
-                root.offsetDescendantRectToMyCoords(month, it)
-            }
-        val amountBounds =
-            Rect(0, 0, amount.width, amount.height).also {
-                root.offsetDescendantRectToMyCoords(amount, it)
-            }
-        val supportBounds =
-            Rect(0, 0, support.width, support.height).also {
-                root.offsetDescendantRectToMyCoords(support, it)
-            }
-        val addBounds =
-            Rect(0, 0, add.width, add.height).also {
-                root.offsetDescendantRectToMyCoords(add, it)
-            }
+        val monthBounds = descendantBounds(root, month)
+        val amountBounds = descendantBounds(root, amount)
+        val addBounds = descendantBounds(root, add)
 
-        assertTrue(month.visibility == View.VISIBLE && monthBounds.width() > 0 && monthBounds.height() > 0)
-        assertTrue(amount.visibility == View.VISIBLE && amountBounds.width() > 0 && amountBounds.height() > 0)
-        assertTrue(support.visibility == View.VISIBLE && supportBounds.width() > 0 && supportBounds.height() > 0)
-        assertTrue(add.visibility == View.VISIBLE && addBounds.width() > 0 && addBounds.height() > 0)
-        listOf(monthBounds, amountBounds, supportBounds, addBounds).forEach { bounds ->
+        listOf(monthBounds, amountBounds, addBounds).forEach { bounds ->
+            assertTrue(bounds.width() > 0 && bounds.height() > 0)
             assertTrue(bounds.left >= 0 && bounds.top >= 0)
             assertTrue(bounds.right <= root.width && bounds.bottom <= root.height)
         }
         assertEquals(addSize, addBounds.width())
         assertEquals(addSize, addBounds.height())
         assertTrue(monthBounds.right <= addBounds.left)
-        assertTrue(
-            listOf(monthBounds, amountBounds, supportBounds, addBounds).all {
-                it.top >= 0 && it.bottom <= root.height
-            },
+        assertTrue(amountBounds.right <= addBounds.left)
+    }
+
+    @Test
+    fun widgetSizeSelectionUsesBothAxesAndPre31OptionBounds() {
+        assertEquals(R.layout.widget_penny_compact, PennyWidgetProvider.layoutForSize(110, 48))
+        assertEquals(R.layout.widget_penny_compact, PennyWidgetProvider.layoutForSize(220, 48))
+        assertEquals(R.layout.widget_penny_summary, PennyWidgetProvider.layoutForSize(110, 110))
+        assertEquals(R.layout.widget_penny_summary, PennyWidgetProvider.layoutForSize(219, 110))
+        assertEquals(R.layout.widget_penny_wide, PennyWidgetProvider.layoutForSize(220, 110))
+
+        val options =
+            Bundle().apply {
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 220)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 220)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 48)
+                putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 110)
+            }
+        assertEquals(
+            R.layout.widget_penny_wide,
+            PennyWidgetProvider.layoutForOptions(options, Configuration.ORIENTATION_PORTRAIT),
         )
+        assertEquals(
+            R.layout.widget_penny_compact,
+            PennyWidgetProvider.layoutForOptions(options, Configuration.ORIENTATION_LANDSCAPE),
+        )
+    }
+
+    @Test
+    fun everyWidgetVariantReappliesTextAndClickTargets() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val summary =
+            WidgetSummary(
+                label = "This month",
+                amount = "\$123.45",
+                count = "4 txns",
+                topCategory = "Food \$80.00",
+                topCategories = listOf("Food \$80.00", "Travel \$43.45"),
+            )
+
+        listOf(
+            R.layout.widget_penny_compact,
+            R.layout.widget_penny_summary,
+            R.layout.widget_penny_wide,
+        ).forEach { layoutId ->
+            val root =
+                PennyWidgetProvider
+                    .viewsForLayout(context, summary, layoutId)
+                    .apply(context, null) as ViewGroup
+
+            assertEquals(summary.label, root.findViewById<TextView>(R.id.widget_spent_label).text.toString())
+            assertEquals(summary.amount, root.findViewById<TextView>(R.id.widget_amount).text.toString())
+            assertEquals("+", root.findViewById<TextView>(R.id.widget_add_button).text.toString())
+            assertTrue(root.hasOnClickListeners())
+            assertTrue(root.findViewById<View>(R.id.widget_add_button).hasOnClickListeners())
+
+            when (layoutId) {
+                R.layout.widget_penny_summary -> {
+                    assertEquals(
+                        "4 txns · Food \$80.00",
+                        root.findViewById<TextView>(R.id.widget_count).text.toString(),
+                    )
+                }
+
+                R.layout.widget_penny_wide -> {
+                    assertEquals("4 txns", root.findViewById<TextView>(R.id.widget_count).text.toString())
+                    assertEquals(
+                        "Food \$80.00\nTravel \$43.45",
+                        root.findViewById<TextView>(R.id.widget_categories).text.toString(),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun refreshBroadcastsExcludeAppWidgetUpdateFromCustomProcessing() {
+        assertTrue(PennyWidgetProvider.isRefreshBroadcast(Intent.ACTION_DATE_CHANGED))
+        assertTrue(PennyWidgetProvider.isRefreshBroadcast(Intent.ACTION_TIME_CHANGED))
+        assertTrue(PennyWidgetProvider.isRefreshBroadcast(Intent.ACTION_TIMEZONE_CHANGED))
+        assertTrue(PennyWidgetProvider.isRefreshBroadcast(Intent.ACTION_LOCALE_CHANGED))
+        assertFalse(PennyWidgetProvider.isRefreshBroadcast(AppWidgetManager.ACTION_APPWIDGET_UPDATE))
+    }
+
+    @Test
+    fun widgetDayNightColorsMeetWcagTextContrast() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val surfaces = mutableListOf<Int>()
+        listOf(Configuration.UI_MODE_NIGHT_NO, Configuration.UI_MODE_NIGHT_YES).forEach { nightMode ->
+            val configuration =
+                Configuration(context.resources.configuration).apply {
+                    uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or nightMode
+                }
+            val configuredContext = context.createConfigurationContext(configuration)
+            val surface = configuredContext.getColor(R.color.widget_surface_inverse)
+            val quickAdd = configuredContext.getColor(R.color.widget_quick_add)
+            surfaces += surface
+            assertContrastAtLeast4Point5(
+                configuredContext.getColor(R.color.widget_on_surface_inverse),
+                surface,
+            )
+            assertContrastAtLeast4Point5(
+                configuredContext.getColor(R.color.widget_on_surface_inverse_muted),
+                surface,
+            )
+            assertContrastAtLeast4Point5(
+                configuredContext.getColor(R.color.widget_on_quick_add),
+                quickAdd,
+            )
+        }
+        assertFalse(surfaces[0] == surfaces[1])
     }
 
     @Test
@@ -243,5 +340,33 @@ class PennyWidgetIntentTest {
         composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("amount_display"))
         composeRule.onNodeWithTag("amount_display").assertTextContains("-$0.00")
         scenario.onActivity { it.finishAndRemoveTask() }
+    }
+
+    private fun descendantBounds(
+        root: ViewGroup,
+        child: View,
+    ): Rect =
+        Rect(0, 0, child.width, child.height).also {
+            root.offsetDescendantRectToMyCoords(child, it)
+        }
+
+    private fun assertContrastAtLeast4Point5(
+        foreground: Int,
+        background: Int,
+    ) {
+        val lighter = maxOf(relativeLuminance(foreground), relativeLuminance(background))
+        val darker = minOf(relativeLuminance(foreground), relativeLuminance(background))
+        val contrast = (lighter + 0.05) / (darker + 0.05)
+        assertTrue("Expected contrast >= 4.5:1, was $contrast:1", contrast >= 4.5)
+    }
+
+    private fun relativeLuminance(color: Int): Double =
+        0.2126 * linearized(Color.red(color)) +
+            0.7152 * linearized(Color.green(color)) +
+            0.0722 * linearized(Color.blue(color))
+
+    private fun linearized(component: Int): Double {
+        val value = component / 255.0
+        return if (value <= 0.04045) value / 12.92 else Math.pow((value + 0.055) / 1.055, 2.4)
     }
 }
