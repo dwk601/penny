@@ -261,10 +261,20 @@ Restore automatic time/timezone and the original locale when finished.
   `4x2`. Also drag the horizontal and vertical axes independently and then both
   axes together across the layout boundaries; do not treat placement at only
   the default `2x2` size as a pass.
-- [ ] At every API 31+ size, verify the `This month` label, correct amount, and
-  distinct 48dp Add target remain visible, readable, and unclipped. At `2x2`,
-  verify the transaction total plus top-category supporting text; at `4x2`,
-  verify the transaction total and top-categories list. Confirm compact `2x1`
+- [ ] At every API 31+ size, verify the `This month` label, correct
+  size-appropriate amount, and distinct 48dp Add target remain visible,
+  readable, and unclipped. Test at least one known month totaling below
+  `$1,000` and one known month totaling at or above `$1,000`, calculating the
+  expected display from the exact cents. Compact `2x1` must show exact dollars
+  and cents below `$1,000`; at or above `$1,000`, it intentionally shows a
+  deterministic abbreviated magnitude (`K`/`M`/`B`/`T`/`Q`): round half up
+  to one decimal below 10 magnitude units or to a whole number otherwise,
+  remove a trailing zero, and promote a rounded `1000` to the next suffix.
+  Compare the displayed value with that expected rounding, and use TalkBack to
+  confirm the compact widget exposes the exact, unabridged total. At `2x2`,
+  verify the exact dollars-and-cents amount plus transaction total and
+  top-category supporting text; at `4x2`, verify the exact dollars-and-cents
+  amount, transaction total, and top-categories list. Confirm compact `2x1`
   intentionally omits supporting details rather than clipping them. Verify
   contrast and updates after adding/deleting a transaction, and confirm the
   widget exposes only aggregate spending/category information—not merchant,
@@ -285,9 +295,12 @@ Restore automatic time/timezone and the original locale when finished.
   stretched or stale layout in both orientations.
 - [ ] Repeat the API 26 resize/options and portrait/landscape checks in day/light
   and night/dark and at font scale `2.0` (dynamic color is not applicable).
-  Apply the same label, amount, 48dp Add target, size-appropriate transaction
-  total/top-category, privacy, clipping, contrast, and add/delete-refresh gates,
-  and retain named screenshots for every canonical size and orientation.
+  Repeat both the below-`$1,000` and at-or-above-`$1,000` known-month cases and
+  apply the same gates for compact exact/abbreviated visual amounts, expected
+  rounding, compact TalkBack exact totals, standard/wide exact visual amounts,
+  the label, 48dp Add target, size-appropriate transaction total/top-category,
+  privacy, clipping, contrast, and add/delete refresh. Retain named screenshots
+  for every canonical size and orientation.
 - [ ] Keep the same launcher grid position and the same app-widget ID/host/provider
   binding for corresponding baseline/final comparisons on both API families.
   Responsive evidence must change size, so baseline and final screenshots are
