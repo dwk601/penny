@@ -7,14 +7,16 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
-import java.time.Instant
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
@@ -25,8 +27,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
-import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.ViewModelStore
+import java.time.Instant
 
 class Phase2AsyncEdgeTest {
     @get:Rule val composeRule = createComposeRule()
@@ -73,16 +74,23 @@ class Phase2AsyncEdgeTest {
         composeRule.onNodeWithTag("save_transaction_button").assertIsEnabled().performClick()
         composeRule.waitUntil(5_000) { gateway.rows.value.size == 1 }
         assertEquals(2, gateway.upserts.size)
-        assertEquals(1, gateway.upserts.map { it.id }.distinct().size)
+        assertEquals(
+            1,
+            gateway.upserts
+                .map { it.id }
+                .distinct()
+                .size,
+        )
         assertEquals(gateway.upserts.last(), gateway.rows.value.single())
     }
 
     @Test
     fun deleteFailureClearsBusyAndKeepsEditorDraftOpen() {
         val original = transaction("delete-failure", "Failure Cafe")
-        val gateway = FakeGateway(listOf(original)).apply {
-            onDelete = { throw IllegalStateException("database unavailable") }
-        }
+        val gateway =
+            FakeGateway(listOf(original)).apply {
+                onDelete = { throw IllegalStateException("database unavailable") }
+            }
         setApp(gateway)
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
@@ -100,12 +108,13 @@ class Phase2AsyncEdgeTest {
     fun deleteCancellationIsNotReportedAsFailure() {
         val original = transaction("delete-cancelled", "Cancelled Cafe")
         val deleteStarted = CompletableDeferred<Unit>()
-        val gateway = FakeGateway(listOf(original)).apply {
-            onDelete = {
-                deleteStarted.complete(Unit)
-                awaitCancellation()
+        val gateway =
+            FakeGateway(listOf(original)).apply {
+                onDelete = {
+                    deleteStarted.complete(Unit)
+                    awaitCancellation()
+                }
             }
-        }
         val restoration = StateRestorationTester(composeRule)
         setApp(gateway, restoration)
 
@@ -127,20 +136,25 @@ class Phase2AsyncEdgeTest {
         val original = transaction("duplicate-delete", "One Delete Cafe")
         val deleteStarted = CompletableDeferred<Unit>()
         val releaseDelete = CompletableDeferred<Unit>()
-        val gateway = FakeGateway(listOf(original)).apply {
-            onDelete = { id ->
-                deleteCalls++
-                deleteStarted.complete(Unit)
-                releaseDelete.await()
-                rows.value = rows.value.filterNot { it.id == id }
+        val gateway =
+            FakeGateway(listOf(original)).apply {
+                onDelete = { id ->
+                    deleteCalls++
+                    deleteStarted.complete(Unit)
+                    releaseDelete.await()
+                    rows.value = rows.value.filterNot { it.id == id }
+                }
             }
-        }
         setApp(gateway)
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
-        val click = composeRule.onNodeWithTag("confirm_delete_button")
-            .fetchSemanticsNode().config[SemanticsActions.OnClick].action!!
+        val click =
+            composeRule
+                .onNodeWithTag("confirm_delete_button")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
         composeRule.runOnIdle {
             click()
             click()
@@ -159,12 +173,17 @@ class Phase2AsyncEdgeTest {
         assertEquals(original, gateway.rows.value.single())
     }
 
-    private fun setApp(gateway: FakeGateway, restoration: StateRestorationTester? = null) {
+    private fun setApp(
+        gateway: FakeGateway,
+        restoration: StateRestorationTester? = null,
+    ) {
+        val expectedTransactionIds = gateway.rows.value.map { it.id }
         val simpleFinRepository = SimpleFinSyncRepository(context)
-        val viewModel = ViewModelProvider(
-            store,
-            MainViewModel.Factory(gateway, simpleFinRepository, MutableStateFlow(emptyList())),
-        )[MainViewModel::class.java]
+        val viewModel =
+            ViewModelProvider(
+                store,
+                MainViewModel.Factory(gateway, simpleFinRepository, MutableStateFlow(emptyList())),
+            )[MainViewModel::class.java]
         viewModel.reportInitializationComplete()
         if (restoration == null) {
             composeRule.setContent { FlowMoneyApp(viewModel) }
@@ -172,11 +191,19 @@ class Phase2AsyncEdgeTest {
             restoration.setContent { FlowMoneyApp(viewModel) }
         }
         composeRule.waitUntil(5_000) {
-            composeRule.onAllNodesWithText("Penny").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Penny").fetchSemanticsNodes().isNotEmpty() &&
+                expectedTransactionIds.all { id ->
+                    composeRule
+                        .onAllNodesWithTag("transaction_content_$id")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
         }
     }
 
-    private class FakeGateway(initial: List<Transaction> = emptyList()) : TransactionGateway {
+    private class FakeGateway(
+        initial: List<Transaction> = emptyList(),
+    ) : TransactionGateway {
         val rows = MutableStateFlow(initial)
         override val transactions: Flow<List<Transaction>> = rows
         val upserts = mutableListOf<Transaction>()
@@ -191,16 +218,23 @@ class Phase2AsyncEdgeTest {
         }
 
         override suspend fun load() = rows.value
+
         override suspend fun upsert(transaction: Transaction) = onUpsert(transaction)
+
         override suspend fun importTransactions(transactions: List<Transaction>): Int {
             rows.value = transactions
             return transactions.size
         }
+
         override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>) = importTransactions(transactions)
+
         override suspend fun delete(id: String) = onDelete(id)
     }
 
-    private fun transaction(id: String, merchant: String) = Transaction(
+    private fun transaction(
+        id: String,
+        merchant: String,
+    ) = Transaction(
         id = id,
         occurredAtEpochMillis = Instant.now().toEpochMilli(),
         merchant = merchant,
