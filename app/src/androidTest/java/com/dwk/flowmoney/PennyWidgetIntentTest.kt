@@ -298,6 +298,78 @@ class PennyWidgetIntentTest {
     }
 
     @Test
+    fun restoredLaunchIntentDoesNotReplayQuickAddAndLiveTapStillRoutes() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+        context
+            .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putBoolean("room_migrated", true)
+            .commit()
+        val scenario = ActivityScenario.launch<MainActivity>(PennyWidgetProvider.addTransactionIntent(context))
+
+        try {
+            composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+            composeRule.onNodeWithTag("amount_key_1").performClick()
+            composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextInput("Restored widget draft")
+
+            // Process restoration can recreate the framework's original launch intent, including its route extra.
+            scenario.onActivity { activity ->
+                activity.intent.putExtra(PennyWidgetProvider.EXTRA_OPEN_ADD_TRANSACTION, true)
+            }
+            scenario.recreate()
+
+            composeRule.onNodeWithTag("merchant_field").assertTextContains("Restored widget draft")
+            composeRule.onNodeWithText("Discard changes?").assertDoesNotExist()
+
+            scenario.onActivity { activity ->
+                activity.onNewIntent(PennyWidgetProvider.addTransactionIntent(activity))
+            }
+            composeRule.onNodeWithText("Discard changes?").assertIsDisplayed()
+            composeRule.onNodeWithText("Keep editing").performClick()
+            composeRule.onNodeWithTag("merchant_field").assertTextContains("Restored widget draft")
+        } finally {
+            scenario.close()
+            FlowMoneyDatabase.resetForTest()
+        }
+    }
+
+    @Test
+    fun restoredLaunchIntentDoesNotReplayOverviewAndLiveTapStillRoutes() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+        context
+            .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putBoolean("room_migrated", true)
+            .commit()
+        val scenario = ActivityScenario.launch<MainActivity>(PennyWidgetProvider.overviewIntent(context))
+
+        try {
+            composeRule.onNodeWithTag("tab_transactions").performClick().assertIsSelected()
+
+            // Mirror a process-restored launch intent rather than the in-process object whose extra was removed.
+            scenario.onActivity { activity ->
+                activity.intent.putExtra(EXTRA_OPEN_OVERVIEW, true)
+            }
+            scenario.recreate()
+
+            composeRule.onNodeWithTag("tab_transactions").assertIsSelected()
+            scenario.onActivity { activity ->
+                activity.onNewIntent(PennyWidgetProvider.overviewIntent(activity))
+            }
+            composeRule.onNodeWithTag("tab_overview").assertIsSelected()
+        } finally {
+            scenario.close()
+            FlowMoneyDatabase.resetForTest()
+        }
+    }
+
+    @Test
     fun onNewIntentRoutesExistingActivityToDistinctDestinations() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         FlowMoneyDatabase.resetForTest()

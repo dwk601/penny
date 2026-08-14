@@ -169,8 +169,10 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
         )
-        requestAddSheetFrom(intent)
-        requestOverviewFrom(intent)
+        if (savedInstanceState == null) {
+            requestAddSheetFrom(intent)
+            requestOverviewFrom(intent)
+        }
         val db = FlowMoneyDatabase.get(applicationContext)
         val repository = TransactionRepository(db.transactionDao())
         val simpleFinRepository = SimpleFinSyncRepository(applicationContext)
@@ -3157,14 +3159,21 @@ internal fun TransactionEditor(
     var locationStatus by rememberSaveable { mutableStateOf<String?>(null) }
     var locationSuggestion by rememberSaveable { mutableStateOf<String?>(null) }
     var amountInput by rememberSaveable(transaction?.id) { mutableStateOf(draft.amount) }
-    var moreDetailsExpanded by rememberSaveable(transaction?.id ?: draft.id ?: "new") {
+    val editorStateKey = transaction?.id ?: draft.id ?: "new"
+    var moreDetailsExpanded by rememberSaveable(editorStateKey) {
         mutableStateOf(draft.note.isNotBlank() || draft.recurringIntervalName.isNotBlank())
     }
+    var previousNote by remember(editorStateKey) { mutableStateOf(draft.note) }
     val latestDraft by rememberUpdatedState(draft)
     val latestOnDraftChange by rememberUpdatedState(onDraftChange)
 
     LaunchedEffect(draft.amount) {
         amountInput = draft.amount
+    }
+
+    LaunchedEffect(draft.note) {
+        if (previousNote.isBlank() && draft.note.isNotBlank()) moreDetailsExpanded = true
+        previousNote = draft.note
     }
 
     val merchantSuggestions =

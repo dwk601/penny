@@ -254,6 +254,54 @@ class Phase4UiTest {
     }
 
     @Test
+    fun nearbySuggestionAddressExpandsMoreDetailsAndStaysExpanded() {
+        val draftState =
+            mutableStateOf(
+                newEditorDraft().copy(recurringIntervalName = RecurrenceInterval.Monthly.name),
+            )
+        val restoration = StateRestorationTester(composeRule)
+        restoration.setContent {
+            MaterialTheme {
+                TransactionEditor(
+                    transaction = null,
+                    draft = draftState.value,
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = { draftState.value = it },
+                    onSave = {},
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("more_details_toggle"))
+        composeRule.onNodeWithText("Hide details").assertIsDisplayed()
+        composeRule.onNodeWithTag("more_details_toggle").performClick()
+        composeRule.onNodeWithText("More details").assertIsDisplayed()
+
+        composeRule.runOnIdle {
+            val currentDraft = draftState.value
+            draftState.value =
+                currentDraft.copy(
+                    merchant = currentDraft.merchant.ifBlank { "Corner Cafe" },
+                    note = currentDraft.note.ifBlank { "123 Main Street" },
+                )
+        }
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("note_field"))
+        composeRule.onNodeWithTag("note_field").assertIsDisplayed().assertTextContains("123 Main Street")
+        composeRule.onNodeWithText("Hide details").assertIsDisplayed()
+
+        restoration.emulateSavedInstanceStateRestore()
+        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("note_field"))
+        composeRule.onNodeWithTag("note_field").assertIsDisplayed().assertTextContains("123 Main Street")
+        composeRule.runOnIdle {
+            draftState.value = draftState.value.copy(merchant = "Corner Cafe Updated")
+        }
+        composeRule.onNodeWithText("Hide details").assertIsDisplayed()
+    }
+
+    @Test
     fun moreDetailsRestoresAndAdvancedRecordsAutoExpand() {
         val restoration = StateRestorationTester(composeRule)
         restoration.setContent {
