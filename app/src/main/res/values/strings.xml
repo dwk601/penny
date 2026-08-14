@@ -7,10 +7,10 @@
     <string name="widget_spent_this_month">This month</string>
     <string name="widget_no_spend">No spend</string>
     <string name="widget_unavailable">Unavailable</string>
+    <string name="widget_unavailable_compact">—</string>
     <string name="widget_open_app">Open app</string>
     <string name="widget_top_category">%1$s %2$s</string>
     <string name="widget_supporting_metrics">%1$s · %2$s</string>
-    <string name="widget_supporting_metrics_fallback">0 txns · No spend</string>
     <plurals name="widget_transaction_count">
         <item quantity="one">%1$d txn</item>
         <item quantity="other">%1$d txns</item>

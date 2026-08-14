@@ -109,7 +109,7 @@
             android:includeFontPadding="false"
             android:maxLines="3"
             android:paddingLeft="4dp"
-            android:text="@string/widget_no_spend"
+            android:text="@string/widget_unavailable"
             android:textColor="@color/widget_on_surface_inverse_muted" />
     </LinearLayout>
 </LinearLayout>

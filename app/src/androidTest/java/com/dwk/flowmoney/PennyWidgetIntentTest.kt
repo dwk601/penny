@@ -54,6 +54,12 @@ class PennyWidgetIntentTest {
     fun everyWidgetLayoutFitsAtSupportedFontScales() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val categoryRows = listOf("Food \$80.00", "Travel \$43.45", "Bills \$12.34")
+        val fallback =
+            runBlocking {
+                PennyWidgetProvider.summaryOrFallback(context) { _ ->
+                    throw IOException("Room read failed")
+                }
+            }
         val summaries =
             listOf(
                 WidgetSummary(
@@ -88,6 +94,7 @@ class PennyWidgetIntentTest {
                     topCategory = categoryRows.first(),
                     topCategories = categoryRows,
                 ),
+                fallback,
             )
         val cases =
             listOf(
@@ -111,7 +118,6 @@ class PennyWidgetIntentTest {
                     requiredText =
                         mapOf(
                             R.id.widget_spent_label to "This month",
-                            R.id.widget_count to "4 txns · Food \$80.00",
                             R.id.widget_add_button to "+",
                         ),
                 ),
@@ -123,8 +129,6 @@ class PennyWidgetIntentTest {
                     requiredText =
                         mapOf(
                             R.id.widget_spent_label to "This month",
-                            R.id.widget_count to "4 txns",
-                            R.id.widget_categories to categoryRows.joinToString("\n"),
                             R.id.widget_add_button to "+",
                         ),
                 ),
@@ -146,7 +150,34 @@ class PennyWidgetIntentTest {
                     val description = "${case.name}, ${summary.amount}, at fontScale $fontScale"
                     val expectedAmount =
                         if (case.layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount
-                    val requiredText = case.requiredText + (R.id.widget_amount to expectedAmount)
+                    val supportingText =
+                        when (case.layoutId) {
+                            R.layout.widget_penny_summary -> {
+                                mapOf(
+                                    R.id.widget_count to
+                                        configuredContext.getString(
+                                            R.string.widget_supporting_metrics,
+                                            summary.count,
+                                            summary.topCategory,
+                                        ),
+                                )
+                            }
+
+                            R.layout.widget_penny_wide -> {
+                                mapOf(
+                                    R.id.widget_count to summary.count,
+                                    R.id.widget_categories to summary.topCategories.joinToString("\n"),
+                                )
+                            }
+
+                            else -> {
+                                emptyMap()
+                            }
+                        }
+                    val requiredText =
+                        case.requiredText +
+                            (R.id.widget_amount to expectedAmount) +
+                            supportingText
 
                     root.measure(
                         View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
@@ -202,7 +233,7 @@ class PennyWidgetIntentTest {
                         if (minimumSp != null) {
                             assertUniformTextMinimum(textDescription, textView, configuredContext, minimumSp)
                         }
-                        if (textView.id == R.id.widget_categories) {
+                        if (textView.id == R.id.widget_categories && summary.topCategories.size == 3) {
                             assertEquals("$textDescription rows", 3, textView.layout.lineCount)
                         }
                     }
@@ -220,6 +251,10 @@ class PennyWidgetIntentTest {
                             )
                         }
                     }
+
+                    val amount = root.findViewById<TextView>(R.id.widget_amount)
+                    assertNoEllipsis("$description amount", amount)
+                    assertEquals("$description full TalkBack amount", summary.amount, amount.contentDescription.toString())
 
                     val addButton = root.findViewById<TextView>(R.id.widget_add_button)
                     val addBounds = descendantBounds(root, addButton)
@@ -532,14 +567,18 @@ class PennyWidgetIntentTest {
         runBlocking {
             val context = ApplicationProvider.getApplicationContext<Context>()
             val unavailable = context.getString(R.string.widget_unavailable)
+            val compactUnavailable = context.getString(R.string.widget_unavailable_compact)
+            val openApp = context.getString(R.string.widget_open_app)
             val fallback =
                 PennyWidgetProvider.summaryOrFallback(context) { _ ->
                     throw IOException("Room read failed")
                 }
 
             assertEquals(unavailable, fallback.amount)
-            assertEquals(unavailable, fallback.compactAmount)
+            assertEquals(compactUnavailable, fallback.compactAmount)
+            assertEquals(openApp, fallback.count)
             assertEquals(unavailable, fallback.topCategory)
+            assertEquals(listOf(unavailable), fallback.topCategories)
             assertFalse(fallback.toString().contains("\$0.00"))
 
             listOf(
@@ -547,23 +586,74 @@ class PennyWidgetIntentTest {
                 R.layout.widget_penny_summary,
                 R.layout.widget_penny_wide,
             ).forEach { layoutId ->
+                val layoutName = context.resources.getResourceEntryName(layoutId)
+                val expectedAmount =
+                    if (layoutId == R.layout.widget_penny_compact) compactUnavailable else unavailable
                 val defaultRoot = RemoteViews(context.packageName, layoutId).apply(context, null) as ViewGroup
-                assertEquals(
-                    "layout ${context.resources.getResourceEntryName(layoutId)} default amount",
-                    unavailable,
-                    defaultRoot.findViewById<TextView>(R.id.widget_amount).text.toString(),
-                )
+                val defaultAmount = defaultRoot.findViewById<TextView>(R.id.widget_amount)
+                assertEquals("layout $layoutName default amount", expectedAmount, defaultAmount.text.toString())
+
+                when (layoutId) {
+                    R.layout.widget_penny_compact -> {
+                        assertEquals(
+                            "layout $layoutName default TalkBack amount",
+                            unavailable,
+                            defaultAmount.contentDescription.toString(),
+                        )
+                        assertTrue(defaultRoot.findViewById<View>(R.id.widget_count) == null)
+                        assertTrue(defaultRoot.findViewById<View>(R.id.widget_categories) == null)
+                    }
+
+                    R.layout.widget_penny_summary -> {
+                        assertEquals(
+                            "layout $layoutName default supporting text",
+                            openApp,
+                            defaultRoot.findViewById<TextView>(R.id.widget_count).text.toString(),
+                        )
+                        assertTrue(defaultRoot.findViewById<View>(R.id.widget_categories) == null)
+                    }
+
+                    R.layout.widget_penny_wide -> {
+                        assertEquals(
+                            "layout $layoutName default count",
+                            openApp,
+                            defaultRoot.findViewById<TextView>(R.id.widget_count).text.toString(),
+                        )
+                        assertEquals(
+                            "layout $layoutName default categories",
+                            unavailable,
+                            defaultRoot.findViewById<TextView>(R.id.widget_categories).text.toString(),
+                        )
+                    }
+                }
 
                 val root =
                     PennyWidgetProvider
                         .viewsForLayout(context, fallback, layoutId)
                         .apply(context, null) as ViewGroup
                 val amount = root.findViewById<TextView>(R.id.widget_amount)
-                assertEquals(unavailable, amount.text.toString())
+                assertEquals(expectedAmount, amount.text.toString())
                 assertEquals("fallback TalkBack amount", unavailable, amount.contentDescription.toString())
-                if (layoutId == R.layout.widget_penny_compact) {
-                    assertTrue(root.findViewById<View>(R.id.widget_count) == null)
-                    assertTrue(root.findViewById<View>(R.id.widget_categories) == null)
+                when (layoutId) {
+                    R.layout.widget_penny_compact -> {
+                        assertTrue(root.findViewById<View>(R.id.widget_count) == null)
+                        assertTrue(root.findViewById<View>(R.id.widget_categories) == null)
+                    }
+
+                    R.layout.widget_penny_summary -> {
+                        assertEquals(
+                            "$openApp · $unavailable",
+                            root.findViewById<TextView>(R.id.widget_count).text.toString(),
+                        )
+                    }
+
+                    R.layout.widget_penny_wide -> {
+                        assertEquals(openApp, root.findViewById<TextView>(R.id.widget_count).text.toString())
+                        assertEquals(
+                            unavailable,
+                            root.findViewById<TextView>(R.id.widget_categories).text.toString(),
+                        )
+                    }
                 }
             }
         }
@@ -595,6 +685,22 @@ class PennyWidgetIntentTest {
                 val amount = root.findViewById<TextView>(R.id.widget_amount)
                 assertEquals("\$0.00", amount.text.toString())
                 assertEquals("\$0.00", amount.contentDescription.toString())
+                when (layoutId) {
+                    R.layout.widget_penny_summary -> {
+                        assertEquals(
+                            "0 txns · No spend",
+                            root.findViewById<TextView>(R.id.widget_count).text.toString(),
+                        )
+                    }
+
+                    R.layout.widget_penny_wide -> {
+                        assertEquals("0 txns", root.findViewById<TextView>(R.id.widget_count).text.toString())
+                        assertEquals(
+                            "No spend",
+                            root.findViewById<TextView>(R.id.widget_categories).text.toString(),
+                        )
+                    }
+                }
             }
         }
 

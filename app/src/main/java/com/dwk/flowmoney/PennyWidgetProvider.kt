@@ -136,7 +136,7 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                     amount = unavailable,
                     count = context.getString(R.string.widget_open_app),
                     topCategory = unavailable,
-                    compactAmount = unavailable,
+                    compactAmount = context.getString(R.string.widget_unavailable_compact),
                 )
             }
 
