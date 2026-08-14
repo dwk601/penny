@@ -62,13 +62,7 @@ open class PennyWidgetProvider : AppWidgetProvider() {
     internal open fun launchBroadcastUpdate(update: suspend () -> Unit) {
         val pendingResult = goAsync()
         Dispatchers.IO.dispatch(EmptyCoroutineContext) {
-            try {
-                runBlocking { update() }
-            } catch (_: Exception) {
-                // A later periodic or system-triggered update will retry this local-only refresh.
-            } finally {
-                pendingResult.finish()
-            }
+            runWidgetBroadcastUpdate(update) { pendingResult.finish() }
         }
     }
 
@@ -318,6 +312,21 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                         Intent.FLAG_ACTIVITY_CLEAR_TOP or
                         Intent.FLAG_ACTIVITY_SINGLE_TOP,
                 )
+    }
+}
+
+internal fun runWidgetBroadcastUpdate(
+    update: suspend () -> Unit,
+    finish: () -> Unit,
+) {
+    try {
+        runBlocking { update() }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        // A later periodic or system-triggered update will retry this local-only refresh.
+    } finally {
+        finish()
     }
 }
 

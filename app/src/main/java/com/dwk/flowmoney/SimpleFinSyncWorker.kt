@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
@@ -34,7 +35,15 @@ class SimpleFinSyncWorker(
         ): Result =
             when (val result = repository.syncIfStale()) {
                 is SimpleFinSyncResult.Success -> {
-                    if (result.inserted > 0 || result.updated > 0) refreshWidget()
+                    if (result.inserted > 0 || result.updated > 0) {
+                        try {
+                            refreshWidget()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Throwable) {
+                            // The sync is already committed; a later widget refresh can recover.
+                        }
+                    }
                     Result.success()
                 }
 

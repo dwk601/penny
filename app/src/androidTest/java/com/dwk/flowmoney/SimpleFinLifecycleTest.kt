@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -311,6 +312,56 @@ class SimpleFinLifecycleTest {
                 fake.accounts = { _, _, _ -> throw SimpleFinException("permanent") }
                 SimpleFinSyncWorker.runSync(repository, refreshWidget)
                 assertEquals(2, refreshes)
+            }
+        }
+
+    @Test
+    fun committedWorkerSyncSucceedsWhenWidgetRefreshThrows() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 5_600_000_000L
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
+                fake.credential = "current" to OLD_URL
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(listOf(account("checking", transactionId = "committed-row")))
+                }
+
+                val result =
+                    SimpleFinSyncWorker.runSync(repository) {
+                        throw IllegalStateException("widget refresh failed")
+                    }
+
+                assertEquals(
+                    androidx.work.ListenableWorker.Result
+                        .success()
+                        .javaClass,
+                    result.javaClass,
+                )
+                assertEquals(1, db.transactionDao().getAll().size)
+                assertEquals(fake.currentTime, db.simpleFinDao().getProfile()!!.lastSuccessfulSyncAtEpochMillis)
+            }
+        }
+
+    @Test
+    fun committedWorkerSyncRethrowsWidgetRefreshCancellation() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 5_700_000_000L
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
+                fake.credential = "current" to OLD_URL
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(listOf(account("checking", transactionId = "cancelled-refresh-row")))
+                }
+                val cancellation = CancellationException("widget refresh cancelled")
+
+                val thrown =
+                    runCatching {
+                        SimpleFinSyncWorker.runSync(repository) { throw cancellation }
+                    }.exceptionOrNull()
+
+                assertTrue(thrown === cancellation)
+                assertEquals(1, db.transactionDao().getAll().size)
+                assertEquals(fake.currentTime, db.simpleFinDao().getProfile()!!.lastSuccessfulSyncAtEpochMillis)
             }
         }
 

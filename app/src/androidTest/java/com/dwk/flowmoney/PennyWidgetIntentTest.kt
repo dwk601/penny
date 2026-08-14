@@ -32,6 +32,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -257,6 +258,7 @@ class PennyWidgetIntentTest {
         )
         assertEquals(refreshActions.size, provider.refreshDispatchCount)
         assertEquals(1, provider.frameworkUpdateCount)
+        assertArrayEquals(intArrayOf(42), provider.frameworkUpdateWidgetIds)
     }
 
     @Test
@@ -520,6 +522,8 @@ class PennyWidgetIntentTest {
             private set
         var frameworkUpdateCount = 0
             private set
+        var frameworkUpdateWidgetIds = intArrayOf()
+            private set
 
         override fun launchBroadcastUpdate(update: suspend () -> Unit) {
             refreshDispatchCount += 1
@@ -531,6 +535,7 @@ class PennyWidgetIntentTest {
             appWidgetIds: IntArray,
         ) {
             frameworkUpdateCount += 1
+            frameworkUpdateWidgetIds = appWidgetIds.copyOf()
         }
     }
 
