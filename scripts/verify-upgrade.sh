@@ -28,8 +28,12 @@ NEW_VERSION_CODE="$NEW_VERSION_CODE_DEFAULT"
 DB_USER_VERSION="$DB_USER_VERSION_DEFAULT"
 WITH_SIMPLEFIN_CREDENTIAL=0
 DRY_RUN=0
+SELF_TEST=0
 COMPLETED=0
 DEVICE_MUTATED=0
+UI_DUMP_TIMEOUT_SECONDS=15
+UI_DUMP_MAX_ATTEMPTS=3
+UI_DUMP_RETRY_DELAY_SECONDS=1
 
 ADB_BIN=""
 APKANALYZER_BIN=""
@@ -38,6 +42,12 @@ SQLITE3_BIN=""
 PYTHON3_BIN=""
 SHA256_BIN=""
 SHA256_STYLE=""
+EMULATOR_AVD_NAME=""
+EMULATOR_HARDWARE=""
+EMULATOR_BOOT_HARDWARE=""
+EMULATOR_KERNEL_QEMU=""
+EMULATOR_BOOT_QEMU=""
+EMULATOR_CHARACTERISTICS=""
 
 usage() {
 	cat <<'USAGE'
@@ -69,6 +79,8 @@ Options:
                              access URL is accepted by or printed from this script.
   --dry-run                  Read-only tool/device/APK preflight. With no other
                              arguments, print the resolved tools and plan only.
+  --self-test                Run isolated mock regression tests without touching
+                             an adb device, APK, or rehearsal output.
   -h, --help                 Show this help without touching a device.
 
 Environment overrides:
@@ -164,6 +176,10 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=1
 		shift
 		;;
+	--self-test)
+		SELF_TEST=1
+		shift
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -195,10 +211,15 @@ sdk_roots() {
 command_or_path() {
 	local requested="$1"
 	if [[ "$requested" == */* ]]; then
-		[[ -x "$requested" ]] && printf '%s\n' "$requested"
+		if [[ -x "$requested" ]]; then
+			printf '%s\n' "$requested"
+		fi
 	else
 		command -v "$requested" 2>/dev/null || true
 	fi
+	# Missing/non-executable candidates are represented by successful empty
+	# output so assignment under set -e reaches resolve_tools' curated error.
+	return 0
 }
 
 version_key() {
@@ -221,7 +242,10 @@ latest_build_tool() {
 			fi
 		done < <(find "$sdk/build-tools" -mindepth 2 -maxdepth 2 -type f -name "$tool" -print 2>/dev/null)
 	done < <(sdk_roots | awk 'NF && !seen[$0]++')
-	[[ -n "$best" ]] && printf '%s\n' "$best"
+	if [[ -n "$best" ]]; then
+		printf '%s\n' "$best"
+	fi
+	return 0
 }
 
 find_apkanalyzer() {
@@ -248,6 +272,7 @@ find_apkanalyzer() {
 			}
 		fi
 	done < <(sdk_roots | awk 'NF && !seen[$0]++')
+	return 0
 }
 
 find_adb() {
@@ -264,6 +289,7 @@ find_adb() {
 			return
 		}
 	done < <(sdk_roots | awk 'NF && !seen[$0]++')
+	return 0
 }
 
 resolve_tools() {
@@ -398,23 +424,72 @@ trim_device_output() {
 
 preflight_emulator() {
 	[[ -n "$SERIAL" ]] || die "--serial is required; implicit adb device selection is forbidden"
-	[[ "$SERIAL" == emulator-* ]] || die "Serial $SERIAL is not an Android Emulator serial (expected emulator-*)"
+	[[ "$SERIAL" =~ ^emulator-[0-9]+$ ]] ||
+		die "Serial $SERIAL is not an Android Emulator serial (expected emulator-NUMBER)"
 
-	local state kernel_qemu boot_qemu characteristics current_user
+	local state kernel_qemu boot_qemu characteristics hardware boot_hardware
+	local current_user avd_identity avd_name console_status identity_line_count
 	state="$(adb_cmd get-state 2>/dev/null | trim_device_output || true)"
 	[[ "$state" == "device" ]] || die "Emulator $SERIAL is not online (state: ${state:-missing})"
-	kernel_qemu="$(shell_cmd getprop ro.kernel.qemu | trim_device_output)"
-	boot_qemu="$(shell_cmd getprop ro.boot.qemu | trim_device_output)"
-	characteristics="$(shell_cmd getprop ro.build.characteristics | trim_device_output)"
-	current_user="$(shell_cmd am get-current-user | trim_device_output)"
 
-	[[ "$kernel_qemu" == "1" ]] || die "ro.kernel.qemu is not 1; refusing possible physical device"
+	if ! kernel_qemu="$(shell_cmd getprop ro.kernel.qemu | trim_device_output)"; then
+		die "Could not read ro.kernel.qemu from $SERIAL"
+	fi
+	[[ -z "$kernel_qemu" || "$kernel_qemu" == "1" ]] ||
+		die "ro.kernel.qemu is present but not 1; refusing possible physical device"
+
+	if ! boot_qemu="$(shell_cmd getprop ro.boot.qemu | trim_device_output)"; then
+		die "Could not read ro.boot.qemu from $SERIAL"
+	fi
 	[[ "$boot_qemu" == "1" ]] || die "ro.boot.qemu is not 1; refusing possible physical device"
-	[[ ",$characteristics," == *,emulator,* || "$characteristics" == *emulator* ]] ||
-		die "ro.build.characteristics does not identify an emulator"
+
+	if ! characteristics="$(shell_cmd getprop ro.build.characteristics | trim_device_output)"; then
+		die "Could not read ro.build.characteristics from $SERIAL"
+	fi
+	case ",${characteristics//[[:space:]]/}," in
+	*,emulator,*) ;;
+	*) die "ro.build.characteristics lacks an exact emulator characteristic" ;;
+	esac
+
+	if ! hardware="$(shell_cmd getprop ro.hardware | trim_device_output)"; then
+		die "Could not read ro.hardware from $SERIAL"
+	fi
+	case "$hardware" in
+	ranchu | goldfish) ;;
+	*) die "ro.hardware is not a recognized ranchu/goldfish emulator family: ${hardware:-missing}" ;;
+	esac
+
+	if ! boot_hardware="$(shell_cmd getprop ro.boot.hardware | trim_device_output)"; then
+		die "Could not read ro.boot.hardware from $SERIAL"
+	fi
+	case "$boot_hardware" in
+	"" | ranchu | goldfish) ;;
+	*) die "ro.boot.hardware is not a recognized ranchu/goldfish emulator family: $boot_hardware" ;;
+	esac
+
+	if ! avd_identity="$(adb_cmd emu avd name 2>&1)"; then
+		die "Emulator console AVD identity query failed for $SERIAL"
+	fi
+	avd_identity="${avd_identity//$'\r'/}"
+	identity_line_count="$(printf '%s\n' "$avd_identity" | awk 'END {print NR}')"
+	avd_name="$(printf '%s\n' "$avd_identity" | sed -n '1p')"
+	console_status="$(printf '%s\n' "$avd_identity" | sed -n '2p')"
+	[[ "$identity_line_count" == "2" && "$console_status" == "OK" &&
+		"$avd_name" =~ ^[A-Za-z0-9._-]+$ && "$avd_name" != "OK" && "$avd_name" != "KO" ]] ||
+		die "Emulator console returned a malformed AVD identity for $SERIAL"
+
+	if ! current_user="$(shell_cmd am get-current-user | trim_device_output)"; then
+		die "Could not determine the current Android user on $SERIAL"
+	fi
 	[[ "$current_user" == "0" ]] || die "Current Android user is $current_user; this rehearsal requires user 0"
 
-	log "Positively identified online emulator $SERIAL (QEMU user 0)"
+	EMULATOR_AVD_NAME="$avd_name"
+	EMULATOR_HARDWARE="$hardware"
+	EMULATOR_BOOT_HARDWARE="$boot_hardware"
+	EMULATOR_KERNEL_QEMU="$kernel_qemu"
+	EMULATOR_BOOT_QEMU="$boot_qemu"
+	EMULATOR_CHARACTERISTICS="$characteristics"
+	log "Positively identified emulator $SERIAL (AVD $avd_name, $hardware, QEMU user 0, ro.kernel.qemu=${kernel_qemu:-absent})"
 }
 
 package_installed() {
@@ -442,35 +517,6 @@ Read/write plan (actual mode only):
 EOF
 }
 
-resolve_tools
-
-if [[ $DRY_RUN -eq 1 && -z "$SERIAL" && -z "$OLD_APK" && -z "$NEW_APK" ]]; then
-	print_tools_and_plan
-	log "Dry run complete; no device command was issued and no files were created."
-	COMPLETED=1
-	exit 0
-fi
-
-[[ -n "$SERIAL" ]] || die "--serial is required"
-[[ -n "$OLD_APK" ]] || die "--old-apk is required"
-[[ -n "$NEW_APK" ]] || die "--new-apk is required"
-preflight_emulator
-preflight_apks
-
-if package_installed; then
-	die "$PACKAGE is already installed on $SERIAL. Restore a fresh AVD snapshot; do not uninstall or clear data."
-fi
-
-print_tools_and_plan
-
-if [[ $DRY_RUN -eq 1 ]]; then
-	log "Read-only dry run passed. No install, launch, write, screenshot, or snapshot was performed."
-	COMPLETED=1
-	exit 0
-fi
-
-[[ -t 0 && -t 1 ]] || die "Actual rehearsal requires an interactive terminal for safety and launcher checks"
-
 confirm_exact() {
 	local expected="$1"
 	local prompt="$2"
@@ -480,17 +526,46 @@ confirm_exact() {
 	[[ "$answer" == "$expected" ]] || die "Confirmation did not match $expected"
 }
 
-confirm_exact "AVD-SNAPSHOT-READY" \
-	"Confirm this is a disposable fresh AVD, $PACKAGE is absent, and an AVD snapshot exists."
+prepare_rehearsal() {
+	resolve_tools
 
-if [[ -z "$OUTPUT_DIR" ]]; then
-	OUTPUT_DIR="$REPO_ROOT/captures/upgrade-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)"
-fi
-[[ ! -e "$OUTPUT_DIR" ]] || die "Output path already exists: $OUTPUT_DIR"
-mkdir -p "$OUTPUT_DIR"
-chmod 700 "$OUTPUT_DIR"
+	if [[ $DRY_RUN -eq 1 && -z "$SERIAL" && -z "$OLD_APK" && -z "$NEW_APK" ]]; then
+		print_tools_and_plan
+		log "Dry run complete; no device command was issued and no files were created."
+		COMPLETED=1
+		exit 0
+	fi
 
-cat >"$OUTPUT_DIR/apk-preflight.txt" <<EOF
+	[[ -n "$SERIAL" ]] || die "--serial is required"
+	[[ -n "$OLD_APK" ]] || die "--old-apk is required"
+	[[ -n "$NEW_APK" ]] || die "--new-apk is required"
+	preflight_emulator
+	preflight_apks
+
+	if package_installed; then
+		die "$PACKAGE is already installed on $SERIAL. Restore a fresh AVD snapshot; do not uninstall or clear data."
+	fi
+
+	print_tools_and_plan
+
+	if [[ $DRY_RUN -eq 1 ]]; then
+		log "Read-only dry run passed. No install, launch, write, screenshot, or snapshot was performed."
+		COMPLETED=1
+		exit 0
+	fi
+
+	[[ -t 0 && -t 1 ]] || die "Actual rehearsal requires an interactive terminal for safety and launcher checks"
+	confirm_exact "AVD-SNAPSHOT-READY" \
+		"Confirm this is a disposable fresh AVD, $PACKAGE is absent, and an AVD snapshot exists."
+
+	if [[ -z "$OUTPUT_DIR" ]]; then
+		OUTPUT_DIR="$REPO_ROOT/captures/upgrade-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)"
+	fi
+	[[ ! -e "$OUTPUT_DIR" ]] || die "Output path already exists: $OUTPUT_DIR"
+	mkdir -p "$OUTPUT_DIR"
+	chmod 700 "$OUTPUT_DIR"
+
+	cat >"$OUTPUT_DIR/apk-preflight.txt" <<EOF
 package=$PACKAGE
 archived_apk=$OLD_APK
 archived_sha256=$(sha256_file "$OLD_APK")
@@ -502,10 +577,15 @@ candidate_version_name=$NEW_VERSION_NAME
 candidate_version_code=$NEW_VERSION_CODE
 signing_certificate_sha256=$OLD_CERT
 serial=$SERIAL
-ro_kernel_qemu=$(shell_cmd getprop ro.kernel.qemu | trim_device_output)
-ro_boot_qemu=$(shell_cmd getprop ro.boot.qemu | trim_device_output)
+avd_name=$EMULATOR_AVD_NAME
+ro_kernel_qemu=${EMULATOR_KERNEL_QEMU:-absent}
+ro_boot_qemu=$EMULATOR_BOOT_QEMU
+ro_build_characteristics=$EMULATOR_CHARACTERISTICS
+ro_hardware=$EMULATOR_HARDWARE
+ro_boot_hardware=${EMULATOR_BOOT_HARDWARE:-absent}
 EOF
-chmod 600 "$OUTPUT_DIR/apk-preflight.txt"
+	chmod 600 "$OUTPUT_DIR/apk-preflight.txt"
+}
 
 install_archived() {
 	local output
@@ -1059,9 +1139,18 @@ with open(source, "rb") as stream:
 start = captured.find(b"<?xml")
 end_marker = b"</hierarchy>"
 end = captured.find(end_marker, start if start >= 0 else 0)
-if start < 0 or end < 0 or captured.find(b"<?xml", start + 1) >= 0:
-    raise SystemExit("uiautomator stdout did not contain one complete hierarchy")
+if (
+    start < 0
+    or end < 0
+    or captured.count(b"<?xml") != 1
+    or captured.count(b"<hierarchy") != 1
+    or captured.count(end_marker) != 1
+):
+    raise SystemExit("uiautomator stdout did not contain exactly one complete hierarchy")
+# A PTY-capable fallback is not currently needed, but normalize CR from adb
+# transports and discard any status/prompt noise surrounding the XML.
 payload = captured[start : end + len(end_marker)]
+payload = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 root = ET.fromstring(payload)
 if root.tag != "hierarchy":
     raise SystemExit("uiautomator XML root is not hierarchy")
@@ -1076,30 +1165,102 @@ finally:
 PY
 }
 
+run_bounded_capture() {
+	local timeout_seconds="$1"
+	local stdout_path="$2"
+	local stderr_path="$3"
+	shift 3
+	"$PYTHON3_BIN" - "$timeout_seconds" "$stdout_path" "$stderr_path" "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+timeout = int(sys.argv[1])
+stdout_path, stderr_path = sys.argv[2:4]
+command = sys.argv[4:]
+
+def secure_open(path):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "wb")
+
+with secure_open(stdout_path) as stdout, secure_open(stderr_path) as stderr:
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        stderr.write(f"host timeout after {timeout} seconds\n".encode("ascii"))
+        raise SystemExit(124)
+raise SystemExit(completed.returncode if completed.returncode >= 0 else 128 - completed.returncode)
+PY
+}
+
 capture_ui_dump() {
 	local destination="$1"
-	local captured="${destination}.captured.part"
-	local sanitized="${destination}.sanitized.part"
-	local _
-	mkdir -p "$(dirname "$destination")"
-	rm -f "$destination" "$captured" "$sanitized"
-	for _ in 1 2 3; do
-		: >"$captured"
-		chmod 600 "$captured"
-		# Stream the sensitive hierarchy directly to a private host file. No XML
-		# is ever staged in /sdcard, /data/local/tmp, or any other device path.
-		if adb_cmd exec-out uiautomator dump /dev/tty >"$captured" 2>/dev/null &&
-			sanitize_ui_dump "$captured" "$sanitized"; then
-			mv "$sanitized" "$destination"
-			chmod 600 "$destination"
-			rm -f "$captured"
-			[[ -s "$destination" ]] && return 0
+	local parent sanitized attempt transcript transport runner validation metadata status
+	parent="$(dirname "$destination")"
+	sanitized="${destination}.sanitized.part"
+	mkdir -p "$parent"
+	chmod 700 "$parent"
+	rm -f "$destination" "$sanitized"
+
+	attempt=1
+	while ((attempt <= UI_DUMP_MAX_ATTEMPTS)); do
+		transcript="${destination}.uiautomator-attempt-${attempt}.stdout.log"
+		transport="${destination}.uiautomator-attempt-${attempt}.stderr.log"
+		runner="${destination}.uiautomator-attempt-${attempt}.host-runner.stderr.log"
+		validation="${destination}.uiautomator-attempt-${attempt}.validation.log"
+		metadata="${destination}.uiautomator-attempt-${attempt}.status"
+		: >"$transcript"
+		: >"$transport"
+		: >"$runner"
+		: >"$validation"
+		: >"$metadata"
+		chmod 600 "$transcript" "$transport" "$runner" "$validation" "$metadata"
+
+		# API 35 smoke testing proved that uiautomator can write directly to its
+		# inherited stdout descriptor. This needs neither a controlling TTY nor a
+		# device-side file, so sensitive hierarchy bytes go only to 0600 host logs.
+		if run_bounded_capture "$UI_DUMP_TIMEOUT_SECONDS" "$transcript" "$transport" \
+			"$ADB_BIN" -s "$SERIAL" exec-out uiautomator dump /proc/self/fd/1 2>"$runner"; then
+			status=0
+		else
+			status=$?
 		fi
-		rm -f "$captured" "$sanitized"
-		sleep 1
+		cat >"$metadata" <<EOF
+attempt=$attempt
+transport=adb-exec-out
+remote_destination=/proc/self/fd/1
+exit_status=$status
+timeout_seconds=$UI_DUMP_TIMEOUT_SECONDS
+EOF
+		chmod 600 "$transcript" "$transport" "$runner" "$validation" "$metadata"
+
+		if [[ $status -eq 0 ]]; then
+			if sanitize_ui_dump "$transcript" "$sanitized" 2>"$validation"; then
+				mv "$sanitized" "$destination"
+				chmod 600 "$destination"
+				[[ -s "$destination" ]] && return 0
+			fi
+		else
+			printf 'validation skipped because adb transport exited %s\n' "$status" >"$validation"
+			chmod 600 "$validation"
+		fi
+
+		rm -f "$sanitized"
+		if ((attempt < UI_DUMP_MAX_ATTEMPTS)); then
+			sleep "$UI_DUMP_RETRY_DELAY_SECONDS"
+		fi
+		attempt=$((attempt + 1))
 	done
-	rm -f "$captured" "$sanitized"
-	die "Could not stream and validate UI hierarchy"
+	rm -f "$sanitized"
+	die "Could not stream and validate UI hierarchy; retained secure per-attempt diagnostics beside $destination"
 }
 
 ui_dump_selected_label_count() {
@@ -1207,7 +1368,7 @@ verify_widget_routes() {
 	shell_cmd input keyevent HOME >/dev/null
 	sleep 1
 	confirm_exact "ADD-OK" \
-		"Tap the Penny widget + button. Verify a fresh expense Add transaction editor opens."
+		"Tap the Penny widget + button. Verify a fresh expense Add transaction editor opens. Do not scroll the editor before typing ADD-OK; the hierarchy check must see Amount paid."
 	assert_foreground_activity
 	capture_ui_dump "$route_dir/add-window.xml"
 	add_route_dump_is_specific "$route_dir/add-window.xml" ||
@@ -1216,6 +1377,296 @@ verify_widget_routes() {
 	log "Both widget routes were operator-attested and state-transition/page-specific UI-verified"
 }
 
+SELF_TEST_FAILURE_COUNT=0
+
+self_test_pass() {
+	log "SELF-TEST PASS: $1"
+}
+
+self_test_fail() {
+	warn "SELF-TEST FAIL: $1"
+	SELF_TEST_FAILURE_COUNT=$((SELF_TEST_FAILURE_COUNT + 1))
+}
+
+make_mock_executable() {
+	local destination="$1"
+	cat >"$destination" <<'SH'
+#!/bin/sh
+exit 0
+SH
+	chmod 700 "$destination"
+}
+
+missing_tool_message() {
+	case "$1" in
+	ADB) printf '%s\n' "adb not found; set ADB or install Android platform-tools" ;;
+	APKANALYZER) printf '%s\n' "apkanalyzer not found; set APKANALYZER or install Android command-line tools" ;;
+	APKSIGNER) printf '%s\n' "apksigner not found; set APKSIGNER or install Android build-tools" ;;
+	SQLITE3) printf '%s\n' "sqlite3 not found; set SQLITE3 or install the host sqlite3 CLI" ;;
+	PYTHON3) printf '%s\n' "python3 not found; set PYTHON3 or install Python 3 for safe tar canonicalization" ;;
+	*) return 1 ;;
+	esac
+}
+
+self_test_missing_tool_case() {
+	local test_root="$1"
+	local target="$2"
+	local mode="$3"
+	local output="$test_root/tool-${target}-${mode}.log"
+	local expected status
+	expected="$(missing_tool_message "$target")"
+
+	if (
+		# Intentionally isolate command lookup to exercise missing fallbacks.
+		# shellcheck disable=SC2123
+		PATH="$test_root/path"
+		local empty_sdk="$test_root/empty-sdk"
+		sdk_roots() { printf '%s\n' "$empty_sdk"; }
+		ADB="$test_root/tools/adb"
+		APKANALYZER="$test_root/tools/apkanalyzer"
+		APKSIGNER="$test_root/tools/apksigner"
+		SQLITE3="$test_root/tools/sqlite3"
+		PYTHON3="$test_root/tools/python3"
+		case "$mode" in
+		override) printf -v "$target" '%s' "$test_root/missing/$target" ;;
+		non-executable) printf -v "$target" '%s' "$test_root/non-executable/$target" ;;
+		fallback) unset "$target" ;;
+		esac
+		resolve_tools
+	) >"$output" 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	chmod 600 "$output"
+
+	if [[ $status -ne 0 ]] && grep -Fq "ERROR: $expected" "$output"; then
+		self_test_pass "$target $mode candidate reaches curated diagnostic"
+	else
+		self_test_fail "$target $mode candidate did not produce: $expected"
+	fi
+}
+
+self_test_preflight_case() {
+	local test_root="$1"
+	local name="$2"
+	local expectation="$3"
+	local expected_message="$4"
+	local mock_serial="$5"
+	local mock_state="$6"
+	local mock_kernel="$7"
+	local mock_boot_qemu="$8"
+	local mock_characteristics="$9"
+	shift 9
+	local mock_hardware="$1"
+	local mock_boot_hardware="$2"
+	local mock_avd_output="$3"
+	local mock_avd_status="$4"
+	local mock_user="$5"
+	local output="$test_root/preflight-${name}.log"
+	local status
+
+	if (
+		SERIAL="$mock_serial"
+		adb_cmd() {
+			case "$*" in
+			get-state) printf '%s\n' "$mock_state" ;;
+			"shell getprop ro.kernel.qemu") printf '%s\n' "$mock_kernel" ;;
+			"shell getprop ro.boot.qemu") printf '%s\n' "$mock_boot_qemu" ;;
+			"shell getprop ro.build.characteristics") printf '%s\n' "$mock_characteristics" ;;
+			"shell getprop ro.hardware") printf '%s\n' "$mock_hardware" ;;
+			"shell getprop ro.boot.hardware") printf '%s\n' "$mock_boot_hardware" ;;
+			"emu avd name") printf '%s' "$mock_avd_output"; return "$mock_avd_status" ;;
+			"shell am get-current-user") printf '%s\n' "$mock_user" ;;
+			*) return 97 ;;
+			esac
+		}
+		preflight_emulator
+	) >"$output" 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	chmod 600 "$output"
+
+	if [[ "$expectation" == "pass" ]]; then
+		if [[ $status -eq 0 ]] && grep -Fq "Positively identified emulator" "$output"; then
+			self_test_pass "emulator preflight accepts $name"
+		else
+			self_test_fail "emulator preflight rejected $name"
+		fi
+	elif [[ $status -ne 0 ]] && grep -Fq "ERROR: $expected_message" "$output"; then
+		self_test_pass "emulator preflight rejects $name"
+	else
+		self_test_fail "emulator preflight did not reject $name with: $expected_message"
+	fi
+}
+
+portable_mode() {
+	local path="$1"
+	stat -f '%Lp' "$path" 2>/dev/null || stat -c '%a' "$path"
+}
+
+self_test_ui_capture() {
+	local test_root="$1"
+	local mock_adb="$test_root/mock-adb"
+	local counter="$test_root/mock-adb.counter"
+	local args_log="$test_root/mock-adb.args"
+	local capture_dir="$test_root/ui-capture"
+	local destination="$capture_dir/window.xml"
+	local duplicate_source="$test_root/duplicate-hierarchy.stdout"
+	local duplicate_destination="$test_root/duplicate-hierarchy.xml"
+	local duplicate_diagnostic="$test_root/duplicate-hierarchy.validation.log"
+	local file bad_mode=0
+
+	printf '0\n' >"$counter"
+	: >"$args_log"
+	chmod 600 "$counter" "$args_log"
+	cat >"$mock_adb" <<'SH'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$MOCK_ADB_ARGS"
+count="$(cat "$MOCK_ADB_COUNTER")"
+count=$((count + 1))
+printf '%s\n' "$count" >"$MOCK_ADB_COUNTER"
+case "$count" in
+1)
+	exec sleep 2
+	;;
+2)
+	printf 'mock transport warning\n' >&2
+	printf 'status without XML\r\n'
+	;;
+*)
+	printf 'shell status noise\r\n<?xml version="1.0" encoding="UTF-8"?>\r\n<hierarchy rotation="0"><node text="Amount paid" /></hierarchy>\r\nUI hierarchy status\r\nmock-prompt$ '
+	;;
+esac
+SH
+	chmod 700 "$mock_adb"
+
+	ADB_BIN="$mock_adb"
+	PYTHON3_BIN="$(command -v python3)"
+	SERIAL="emulator-5554"
+	UI_DUMP_TIMEOUT_SECONDS=1
+	UI_DUMP_MAX_ATTEMPTS=3
+	UI_DUMP_RETRY_DELAY_SECONDS=0
+	export MOCK_ADB_COUNTER="$counter" MOCK_ADB_ARGS="$args_log"
+
+	if capture_ui_dump "$destination" &&
+		grep -Fq '<hierarchy rotation="0">' "$destination" &&
+		! grep -Fq 'shell status noise' "$destination" &&
+		! grep -Fq $'\r' "$destination"; then
+		self_test_pass "UI dump retries timeout/malformed output and sanitizes one CR-delimited hierarchy"
+	else
+		self_test_fail "UI dump mock did not produce one sanitized hierarchy"
+	fi
+
+	printf '%s\n%s\n' \
+		'<?xml version="1.0"?><hierarchy></hierarchy>' \
+		'<?xml version="1.0"?><hierarchy></hierarchy>' >"$duplicate_source"
+	chmod 600 "$duplicate_source"
+	if sanitize_ui_dump "$duplicate_source" "$duplicate_destination" 2>"$duplicate_diagnostic"; then
+		self_test_fail "UI dump sanitizer accepted duplicate hierarchies"
+	elif grep -Fq 'exactly one complete hierarchy' "$duplicate_diagnostic" &&
+		[[ ! -e "$duplicate_destination" ]]; then
+		chmod 600 "$duplicate_diagnostic"
+		self_test_pass "UI dump sanitizer rejects duplicate hierarchies"
+	else
+		self_test_fail "UI dump sanitizer rejected duplicates without its curated diagnostic"
+	fi
+
+	if grep -Fq 'exec-out uiautomator dump /proc/self/fd/1' "$args_log" &&
+		[[ "$(wc -l <"$args_log" | tr -d ' ')" == "3" ]] &&
+		! grep -Eq '/sdcard|/data/local/tmp|/dev/tty' "$args_log"; then
+		self_test_pass "UI dump uses only inherited stdout and never a staged/shared/TTY path"
+	else
+		self_test_fail "UI dump invoked an unexpected adb transport or destination"
+	fi
+
+	if grep -Fq 'exit_status=124' "$destination.uiautomator-attempt-1.status" &&
+		grep -Fq 'host timeout after 1 seconds' "$destination.uiautomator-attempt-1.stderr.log" &&
+		grep -Fq 'exactly one complete hierarchy' "$destination.uiautomator-attempt-2.validation.log" &&
+		grep -Fq 'mock transport warning' "$destination.uiautomator-attempt-2.stderr.log"; then
+		self_test_pass "UI dump preserves timeout, transport, status, and validation diagnostics"
+	else
+		self_test_fail "UI dump diagnostics were missing"
+	fi
+
+	[[ "$(portable_mode "$capture_dir")" == "700" ]] || bad_mode=1
+	for file in "$capture_dir"/*; do
+		[[ ! -f "$file" || "$(portable_mode "$file")" == "600" ]] || bad_mode=1
+	done
+	if [[ $bad_mode -eq 0 ]]; then
+		self_test_pass "UI dump host directory/files are 0700/0600"
+	else
+		self_test_fail "UI dump host permissions were not 0700/0600"
+	fi
+}
+
+run_self_tests() {
+	local test_root helper_output target mode
+	test_root="$(mktemp -d "${TMPDIR:-/tmp}/penny-upgrade-self-test.XXXXXX")"
+	chmod 700 "$test_root"
+	mkdir -p "$test_root/tools" "$test_root/path" "$test_root/empty-sdk" "$test_root/non-executable"
+	chmod 700 "$test_root/tools" "$test_root/path" "$test_root/empty-sdk" "$test_root/non-executable"
+	ln -s "$(command -v awk)" "$test_root/path/awk"
+	if command -v sha256sum >/dev/null 2>&1; then
+		ln -s "$(command -v sha256sum)" "$test_root/path/sha256sum"
+	else
+		ln -s "$(command -v shasum)" "$test_root/path/shasum"
+	fi
+	for target in adb apkanalyzer apksigner sqlite3 python3; do
+		make_mock_executable "$test_root/tools/$target"
+	done
+	for target in ADB APKANALYZER APKSIGNER SQLITE3 PYTHON3; do
+		printf 'not executable\n' >"$test_root/non-executable/$target"
+		chmod 600 "$test_root/non-executable/$target"
+	done
+
+	if helper_output="$(command_or_path "$test_root/missing/not-executable")" && [[ -z "$helper_output" ]]; then
+		self_test_pass "command_or_path returns successful empty output for a missing path"
+	else
+		self_test_fail "command_or_path failed instead of returning empty output"
+	fi
+	if helper_output="$(latest_build_tool penny-self-test-tool-does-not-exist)" && [[ -z "$helper_output" ]]; then
+		self_test_pass "latest_build_tool returns successful empty output when no executable exists"
+	else
+		self_test_fail "latest_build_tool failed instead of returning empty output"
+	fi
+
+	for target in ADB APKANALYZER APKSIGNER SQLITE3 PYTHON3; do
+		for mode in override fallback non-executable; do
+			self_test_missing_tool_case "$test_root" "$target" "$mode"
+		done
+	done
+
+	self_test_preflight_case "$test_root" modern pass "" emulator-5554 device "" 1 emulator ranchu ranchu $'FlowMoney_API_35\r\nOK\r\n' 0 0
+	self_test_preflight_case "$test_root" legacy pass "" emulator-5556 device 1 1 emulator goldfish "" $'Legacy_API_26\nOK\n' 0 0
+	self_test_preflight_case "$test_root" physical-serial reject "Serial physical-123 is not an Android Emulator serial" physical-123 device 1 1 emulator ranchu ranchu $'Spoof\nOK\n' 0 0
+	self_test_preflight_case "$test_root" kernel-spoof reject "ro.kernel.qemu is present but not 1" emulator-5554 device 0 1 emulator ranchu ranchu $'Spoof\nOK\n' 0 0
+	self_test_preflight_case "$test_root" boot-qemu-spoof reject "ro.boot.qemu is not 1" emulator-5554 device "" 0 emulator ranchu ranchu $'Spoof\nOK\n' 0 0
+	self_test_preflight_case "$test_root" characteristics-spoof reject "ro.build.characteristics lacks an exact emulator characteristic" emulator-5554 device "" 1 phone,emulatorish ranchu ranchu $'Spoof\nOK\n' 0 0
+	self_test_preflight_case "$test_root" hardware-spoof reject "ro.hardware is not a recognized ranchu/goldfish emulator family" emulator-5554 device "" 1 emulator qcom qcom $'Spoof\nOK\n' 0 0
+	self_test_preflight_case "$test_root" boot-hardware-spoof reject "ro.boot.hardware is not a recognized ranchu/goldfish emulator family" emulator-5554 device "" 1 emulator ranchu qcom $'Spoof\nOK\n' 0 0
+	self_test_preflight_case "$test_root" console-spoof reject "Emulator console AVD identity query failed" emulator-5554 device "" 1 emulator ranchu ranchu $'Spoof\nOK\n' 1 0
+	self_test_preflight_case "$test_root" malformed-avd reject "Emulator console returned a malformed AVD identity" emulator-5554 device "" 1 emulator ranchu ranchu $'Spoof\nKO\n' 0 0
+	self_test_preflight_case "$test_root" secondary-user reject "Current Android user is 10" emulator-5554 device "" 1 emulator ranchu ranchu $'FlowMoney_API_35\nOK\n' 0 10
+
+	self_test_ui_capture "$test_root"
+	rm -rf "$test_root"
+	if [[ $SELF_TEST_FAILURE_COUNT -ne 0 ]]; then
+		die "$SELF_TEST_FAILURE_COUNT mock self-test(s) failed"
+	fi
+	log "All mock self-tests passed"
+}
+
+if [[ $SELF_TEST -eq 1 ]]; then
+	run_self_tests
+	COMPLETED=1
+	exit 0
+fi
+
+prepare_rehearsal
 install_archived
 verify_installed_apk "$OLD_APK" "$OLD_VERSION_NAME" "$OLD_VERSION_CODE" \
 	"$OUTPUT_DIR/00-archived-installed-apk" "$OLD_CERT"

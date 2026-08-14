@@ -55,8 +55,11 @@ Additional assumptions and limitations:
   searches Android SDK locations, including `local.properties`, command-line
   tools, platform-tools, and the newest found build-tools directory.
 - Use a standard Android Emulator/AVD running as Android user 0. The script
-  requires an explicit `emulator-*` serial plus positive QEMU properties and
-  rejects physical devices.
+  requires an explicit `emulator-NUMBER` serial, `ro.boot.qemu=1`, an exact
+  `emulator` build characteristic, recognized ranchu/goldfish hardware, and a
+  successful emulator-console AVD identity. If `ro.kernel.qemu` is present it
+  must equal `1`; modern images may omit it. Physical and spoof-like devices
+  fail closed.
 - Generic ADB has no portable widget-host allocation/binding command. Widget
   placement and the two taps are operator actions because launchers differ;
   the script fails unless exactly one binding is detected, the binding survives
@@ -70,10 +73,14 @@ Additional assumptions and limitations:
   `content-desc="Edit transaction"` is allowed, while
   an Edit transaction sheet or income editor does not pass. Always-present
   nav/FAB labels are not accepted as proof.
-- UI hierarchies can contain financial UI text. The script streams uiautomator
-  XML directly to mode-`0600` host artifacts, removes uiautomator status output,
-  validates a complete hierarchy, retries, and fails closed. It never stages a
-  hierarchy in `/sdcard`, `/data/local/tmp`, or another device file.
+- UI hierarchies can contain financial UI text. The script has uiautomator
+  write to its inherited stdout descriptor and streams XML directly to
+  mode-`0600` host artifacts without requiring a TTY. Each attempt is bounded;
+  transport stderr, raw/status output, exit status, and validation diagnostics
+  are retained securely. The sanitizer removes surrounding status/prompt noise
+  and CR characters and validates exactly one complete hierarchy before use.
+  It never stages a hierarchy in `/sdcard`, `/data/local/tmp`, or another
+  device file.
 - A SimpleFIN credential is optional for the synthetic rehearsal because
   profile/account/ignored rows are seeded independently. To exercise a real
   credential, pass `--with-simplefin-credential` and connect inside Penny.
@@ -273,9 +280,13 @@ Restore automatic time/timezone and the original locale when finished.
 - [ ] Boot completely, unlock, select Android user 0, and make an AVD snapshot.
 - [ ] Confirm the archived APK is truly v1.0.13/113 and the candidate is
   v1.0.14/114. Confirm one matching signer certificate SHA-256.
-- [ ] Verify help and read-only resolution without touching a device:
+- [ ] Verify syntax, isolated mock regressions, help, and read-only resolution
+  without touching a device:
 
   ```bash
+  bash -n scripts/verify-upgrade.sh
+  shellcheck scripts/verify-upgrade.sh
+  scripts/verify-upgrade.sh --self-test
   scripts/verify-upgrade.sh --help
   scripts/verify-upgrade.sh --dry-run
   ```
@@ -350,8 +361,10 @@ The script must pass all of these; do not hand-waive a failed gate:
   transition to exactly one selected Overview and no selected alternate tab.
   The Add dump must contain one subtree with exact text attributes for the
   `Add transaction` editor title, `Close`, `Amount paid`, and `Save expense`, not
-  merely match the persistent FAB or borrow labels from unrelated subtrees. An
-  unrelated `content-desc="Edit transaction"` may coexist;
+  merely match the persistent FAB or borrow labels from unrelated subtrees.
+  After tapping plus, **do not scroll the Add editor before typing `ADD-OK`**:
+  the route hierarchy check depends on visible `Amount paid`. An unrelated
+  `content-desc="Edit transaction"` may coexist;
   an edit sheet still fails. Hierarchies stream directly to private host files
   and are never staged on a shared device path.
 - [ ] Before/after host SQLite `PRAGMA quick_check` returns exactly `ok`.
