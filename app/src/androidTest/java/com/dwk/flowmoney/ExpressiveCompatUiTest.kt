@@ -1,5 +1,6 @@
 package com.dwk.flowmoney
 
+import android.view.KeyEvent
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
@@ -23,7 +24,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
-import androidx.test.uiautomator.UiDevice
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -185,7 +185,9 @@ class ExpressiveCompatUiTest {
         }
 
         composeRule.onNodeWithText("Select time").assertIsDisplayed()
-        UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()).pressBack()
+        composeRule.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag("time_picker_dialog", useUnmergedTree = true).assertDoesNotExist()
         composeRule.onNodeWithText("Select time").assertDoesNotExist()
         composeRule.runOnIdle {

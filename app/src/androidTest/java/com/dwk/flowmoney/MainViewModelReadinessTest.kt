@@ -1,15 +1,18 @@
 package com.dwk.flowmoney
 
 import android.content.Context
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.core.app.ActivityScenario
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
-import androidx.test.uiautomator.By
-import androidx.test.uiautomator.UiDevice
-import androidx.test.uiautomator.Until
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -27,11 +30,14 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class MainViewModelReadinessTest {
+    @get:Rule val composeRule = createEmptyComposeRule()
+
     private val context = ApplicationProvider.getApplicationContext<Context>()
 
     @Before
@@ -100,13 +106,16 @@ class MainViewModelReadinessTest {
         val message = "Saved transaction migration could not be completed; it will retry next launch."
 
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
-            assertTrue(device.wait(Until.hasObject(By.text(message)), 5_000))
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithText(message).fetchSemanticsNodes().size == 1
+            }
+            composeRule.onAllNodesWithText(message).assertCountEquals(1)
             assertEquals(7, preferences.getInt("transactions_csv", 0))
             assertFalse(preferences.getBoolean("room_migrated", false))
 
             scenario.recreate()
-            assertFalse(device.wait(Until.hasObject(By.text(message)), 1_000))
+            composeRule.waitForIdle()
+            composeRule.onAllNodesWithText(message).assertCountEquals(0)
         }
     }
 
@@ -117,20 +126,26 @@ class MainViewModelReadinessTest {
         assertTrue(preferences.edit().putString("transactions_csv", CsvCodec.encode(listOf(legacy))).commit())
         val database = FlowMoneyDatabase.get(context)
         val sqlDatabase = database.openHelper.writableDatabase
-        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
         sqlDatabase.beginTransaction()
         var transactionOpen = true
         val scenario = ActivityScenario.launch(MainActivity::class.java)
 
         try {
-            assertTrue(device.wait(Until.hasObject(By.text("Loading your spending")), 5_000))
-            assertFalse(device.hasObject(By.text("No transactions yet")))
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithTag("app_loading_state").fetchSemanticsNodes().size == 1
+            }
+            composeRule.onNodeWithTag("app_loading_state").assertIsDisplayed()
+            composeRule.onNodeWithTag("empty_add_transaction").assertDoesNotExist()
 
             sqlDatabase.endTransaction()
             transactionOpen = false
 
-            assertTrue(device.wait(Until.hasObject(By.text(legacy.merchant)), 5_000))
-            assertFalse(device.hasObject(By.text("No transactions yet")))
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithText(legacy.merchant).fetchSemanticsNodes().isNotEmpty()
+            }
+            composeRule.onAllNodesWithText(legacy.merchant).onFirst().assertIsDisplayed()
+            composeRule.onNodeWithTag("app_loading_state").assertDoesNotExist()
+            composeRule.onNodeWithTag("empty_add_transaction").assertDoesNotExist()
             assertEquals(
                 listOf(legacy.id),
                 runBlocking { database.transactionDao().getAll() }.map { it.id },

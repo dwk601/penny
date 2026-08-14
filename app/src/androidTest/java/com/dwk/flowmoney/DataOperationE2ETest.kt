@@ -1,6 +1,7 @@
 package com.dwk.flowmoney
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -10,7 +11,9 @@ import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
+import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
@@ -123,11 +126,70 @@ class DataOperationE2ETest {
     }
 
     private fun cancelPicker(tag: String) {
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val (pickerDescription, pickerResource) = when (tag) {
+            "csv_import_button" -> "open-document picker" to "dir_list"
+            "csv_export_button" -> "create-document picker" to "container_save"
+            else -> error("No picker expectation configured for $tag")
+        }
+
         composeRule.onNodeWithTag(tag).performClick()
-        UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()).pressBack()
+        assertDeviceState(
+            waitForForegroundPackage(device, DOCUMENTS_UI_PACKAGE, 5_000),
+            device,
+            "Expected $pickerDescription in $DOCUMENTS_UI_PACKAGE before cancelling $tag",
+        )
+        assertDeviceState(
+            device.currentPackageName == DOCUMENTS_UI_PACKAGE &&
+                device.hasObject(By.pkg(DOCUMENTS_UI_PACKAGE)) &&
+                device.hasObject(By.res(DOCUMENTS_UI_PACKAGE, pickerResource)),
+            device,
+            "Expected $pickerDescription resource $pickerResource before cancelling $tag",
+        )
+        device.pressBack()
+        assertDeviceState(
+            waitForForegroundPackage(device, APP_PACKAGE, 5_000),
+            device,
+            "Expected $APP_PACKAGE after cancelling $pickerDescription for $tag",
+        )
+
         composeRule.waitUntil(5_000) {
             runCatching { composeRule.onNodeWithTag(tag).assertIsEnabled() }.isSuccess
         }
         composeRule.onNodeWithTag(tag).assertIsEnabled()
+    }
+
+    private fun waitForForegroundPackage(
+        device: UiDevice,
+        expectedPackage: String,
+        timeoutMillis: Long,
+    ): Boolean {
+        val deadline = SystemClock.uptimeMillis() + timeoutMillis
+        do {
+            if (device.currentPackageName == expectedPackage && device.hasObject(By.pkg(expectedPackage))) {
+                return true
+            }
+            SystemClock.sleep(50)
+        } while (SystemClock.uptimeMillis() < deadline)
+        return false
+    }
+
+    private fun assertDeviceState(condition: Boolean, device: UiDevice, message: String) {
+        if (condition) return
+        throw AssertionError(
+            "$message\nCurrent package: ${device.currentPackageName}\nUI hierarchy:\n${device.windowHierarchy()}",
+        )
+    }
+
+    private fun UiDevice.windowHierarchy(): String = runCatching {
+        ByteArrayOutputStream().use { output ->
+            dumpWindowHierarchy(output)
+            output.toString(Charsets.UTF_8.name())
+        }
+    }.getOrElse { failure -> "<unable to dump hierarchy: ${failure.message}>" }
+
+    private companion object {
+        const val APP_PACKAGE = "com.dwk.flowmoney"
+        const val DOCUMENTS_UI_PACKAGE = "com.google.android.documentsui"
     }
 }
