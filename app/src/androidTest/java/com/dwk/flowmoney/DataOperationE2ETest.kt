@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import androidx.annotation.RequiresApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -16,6 +17,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.filters.SdkSuppress
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
@@ -23,7 +25,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Rule
@@ -48,21 +49,20 @@ class DataOperationE2ETest {
                 override fun evaluate() {
                     val context = ApplicationProvider.getApplicationContext<Context>()
                     val instrumentationContext = InstrumentationRegistry.getInstrumentation().context
+                    // Picker assertion messages include the test-package-private artifact path.
+                    // Remove only stale artifacts here so a failure's 0600 artifact remains at that
+                    // path until the next test (or the next run of this class) starts.
                     cleanPickerHierarchyArtifacts(instrumentationContext)
-                    try {
-                        FlowMoneyDatabase.resetForTest()
-                        context.deleteDatabase("flow_money.db")
-                        File(context.noBackupFilesDir, "simplefin_access_url.bin").deleteRecursively()
-                        context
-                            .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
-                            .edit()
-                            .clear()
-                            .putBoolean("room_migrated", true)
-                            .commit()
-                        base.evaluate()
-                    } finally {
-                        cleanPickerHierarchyArtifacts(instrumentationContext)
-                    }
+                    FlowMoneyDatabase.resetForTest()
+                    context.deleteDatabase("flow_money.db")
+                    File(context.noBackupFilesDir, "simplefin_access_url.bin").deleteRecursively()
+                    context
+                        .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
+                        .edit()
+                        .clear()
+                        .putBoolean("room_migrated", true)
+                        .commit()
+                    base.evaluate()
                 }
             }
         }
@@ -77,7 +77,21 @@ class DataOperationE2ETest {
     }
 
     @Test
+    fun hierarchyArtifactApiFloorReturnsSanitizedUnsupportedResult() {
+        val hierarchy =
+            requireNotNull(hierarchyApiFloorFailure(HIERARCHY_ARTIFACT_MIN_API - 1))
+
+        assertNull(hierarchy.artifactPath)
+        assertEquals("UnsupportedApi", hierarchy.failureClass)
+        assertEquals(UNSUPPORTED_HIERARCHY_REASON, hierarchy.failureReason)
+        assertNull(hierarchyApiFloorFailure(HIERARCHY_ARTIFACT_MIN_API))
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
     fun hierarchyArtifactsUseTestStoragePrivateModeAndCleanup() {
+        if (Build.VERSION.SDK_INT < HIERARCHY_ARTIFACT_MIN_API) return
+
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val instrumentationContext = instrumentation.context
         val device = UiDevice.getInstance(instrumentation)
@@ -85,15 +99,11 @@ class DataOperationE2ETest {
         check(hierarchy.failureClass == null) { hierarchy.assertionMessage() }
         val artifact = File(requireNotNull(hierarchy.artifactPath))
 
-        assertEquals(
-            instrumentationContext.filesDir.absoluteFile,
-            artifact.parentFile?.absoluteFile,
-        )
-        assertNotEquals(
-            instrumentation.targetContext.filesDir.absoluteFile,
-            artifact.parentFile?.absoluteFile,
-        )
+        // These commands run-as each package, proving the artifact is private test-package data
+        // rather than merely comparing two File objects constructed by this test.
+        assertEquals("700", privateStorageDirectoryMode(instrumentationContext))
         assertEquals("600", privateHierarchyArtifactMode(instrumentationContext, artifact.name))
+        assertFalse(privateHierarchyArtifactsExist(instrumentation.targetContext))
 
         cleanPickerHierarchyArtifacts(instrumentationContext)
         assertFalse(privateHierarchyArtifactExists(instrumentationContext, artifact.name))
@@ -322,6 +332,25 @@ class DataOperationE2ETest {
     }
 
     private fun writeWindowHierarchy(device: UiDevice): HierarchyDumpResult {
+        if (Build.VERSION.SDK_INT < HIERARCHY_ARTIFACT_MIN_API) {
+            return requireNotNull(hierarchyApiFloorFailure(Build.VERSION.SDK_INT))
+        }
+        return writeWindowHierarchyApi34(device)
+    }
+
+    private fun hierarchyApiFloorFailure(sdkInt: Int): HierarchyDumpResult? =
+        if (sdkInt < HIERARCHY_ARTIFACT_MIN_API) {
+            HierarchyDumpResult(
+                artifactPath = null,
+                failureClass = "UnsupportedApi",
+                failureReason = UNSUPPORTED_HIERARCHY_REASON,
+            )
+        } else {
+            null
+        }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun writeWindowHierarchyApi34(device: UiDevice): HierarchyDumpResult {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val instrumentationContext = instrumentation.context
         val artifactName = "$PICKER_HIERARCHY_PREFIX${UUID.randomUUID()}.xml"
@@ -344,6 +373,7 @@ class DataOperationE2ETest {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private fun writePrivateHierarchyArtifact(
         instrumentation: Instrumentation,
         artifactName: String,
@@ -353,15 +383,17 @@ class DataOperationE2ETest {
         val packageName = context.packageName.shellArgument()
         val safeArtifactName = artifactName.hierarchyArtifactShellArgument()
         // Instrumentation code runs under the target UID. Stream through UiAutomation so the
-        // test APK UID creates a Context.MODE_PRIVATE-equivalent 0600 file in its own filesDir.
+        // test APK UID creates a 0700 directory and 0600 artifact in its own private storage.
         executeTestStorageCommand(context, "mkdir -p files")
+        executeTestStorageCommand(context, "chmod 700 files")
         executeTestStorageCommand(
             context,
             "install -m 600 /dev/null files/$safeArtifactName",
         )
 
         val descriptors =
-            instrumentation.uiAutomation.executeShellCommandRwe(
+            executeShellCommandRweApi34(
+                instrumentation,
                 "run-as $packageName dd of=files/$safeArtifactName",
             )
         if (descriptors.size != 3) {
@@ -386,6 +418,7 @@ class DataOperationE2ETest {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private fun tryDeletePrivateHierarchyArtifact(
         context: Context,
         artifactName: String,
@@ -412,7 +445,14 @@ class DataOperationE2ETest {
     }
 
     private fun cleanPickerHierarchyArtifacts(context: Context) {
+        if (Build.VERSION.SDK_INT < HIERARCHY_ARTIFACT_MIN_API) return
+        cleanPickerHierarchyArtifactsApi34(context)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun cleanPickerHierarchyArtifactsApi34(context: Context) {
         executeTestStorageCommand(context, "mkdir -p files")
+        executeTestStorageCommand(context, "chmod 700 files")
         executeTestStorageCommand(context, "find files -maxdepth 1 -type f -print")
             .lineSequence()
             .map { path -> File(path).name }
@@ -425,6 +465,10 @@ class DataOperationE2ETest {
             }
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun privateStorageDirectoryMode(context: Context): String = executeTestStorageCommand(context, "stat -c %a files")
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private fun privateHierarchyArtifactMode(
         context: Context,
         artifactName: String,
@@ -433,6 +477,14 @@ class DataOperationE2ETest {
         return executeTestStorageCommand(context, "stat -c %a files/$safeArtifactName")
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun privateHierarchyArtifactsExist(context: Context): Boolean =
+        executeTestStorageCommand(context, "find files -maxdepth 1 -type f -print")
+            .lineSequence()
+            .map { path -> File(path).name }
+            .any { name -> name.startsWith(PICKER_HIERARCHY_PREFIX) }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private fun privateHierarchyArtifactExists(
         context: Context,
         artifactName: String,
@@ -444,13 +496,15 @@ class DataOperationE2ETest {
         ).isNotEmpty()
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private fun executeTestStorageCommand(
         context: Context,
         command: String,
     ): String {
         val packageName = context.packageName.shellArgument()
         val descriptors =
-            InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommandRwe(
+            executeShellCommandRweApi34(
+                InstrumentationRegistry.getInstrumentation(),
                 "run-as $packageName $command",
             )
         if (descriptors.size != 3) {
@@ -471,6 +525,12 @@ class DataOperationE2ETest {
         }
         return output
     }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun executeShellCommandRweApi34(
+        instrumentation: Instrumentation,
+        command: String,
+    ): Array<ParcelFileDescriptor> = instrumentation.uiAutomation.executeShellCommandRwe(command)
 
     private fun String.hierarchyArtifactShellArgument(): String {
         require(all { it.isLetterOrDigit() || it in "._-" })
@@ -493,7 +553,10 @@ class DataOperationE2ETest {
 
     private companion object {
         const val CSV_MIME_TYPE = "text/csv"
+        const val HIERARCHY_ARTIFACT_MIN_API = 34
         const val PICKER_HIERARCHY_PREFIX = "picker-hierarchy-"
+        const val UNSUPPORTED_HIERARCHY_REASON =
+            "window hierarchy artifact unavailable below API 34"
         val IMPORT_MIME_TYPES = arrayOf("text/*", CSV_MIME_TYPE, "application/csv")
     }
 }
