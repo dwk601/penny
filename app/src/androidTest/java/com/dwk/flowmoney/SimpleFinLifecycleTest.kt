@@ -693,7 +693,8 @@ class SimpleFinLifecycleTest {
                 val profile = db.simpleFinDao().getProfile()!!
                 assertEquals(successfulAt, profile.lastSuccessfulSyncAtEpochMillis)
                 assertTrue(profile.lastSyncAttemptAtEpochMillis != null)
-                assertEquals("one account failed", profile.lastError)
+                assertEquals("SimpleFIN returned an invalid sync response.", profile.lastError)
+                assertFalse(profile.lastError!!.contains("one account failed"))
                 assertTrue(
                     db
                         .simpleFinDao()
@@ -1166,7 +1167,7 @@ class SimpleFinLifecycleTest {
         }
 
     @Test
-    fun rawVersion4DatabaseMigratesCompletelyToVersion6() =
+    fun rawVersion4DatabaseMigratesCompletelyToVersion7() =
         runBlocking {
             val name = "simplefin-v4-${UUID.randomUUID()}.db"
             val file = context.getDatabasePath(name)
@@ -1207,8 +1208,11 @@ class SimpleFinLifecycleTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_4_5, FlowMoneyDatabase.MIGRATION_5_6)
-                    .build()
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_4_5,
+                        FlowMoneyDatabase.MIGRATION_5_6,
+                        FlowMoneyDatabase.MIGRATION_6_7,
+                    ).build()
             try {
                 assertNull(migrated.simpleFinDao().getProfile())
                 assertTrue(
@@ -1258,7 +1262,7 @@ class SimpleFinLifecycleTest {
         }
 
     @Test
-    fun rawVersion3DatabaseMigratesThroughVersion4ToVersion6() =
+    fun rawVersion3DatabaseMigratesThroughVersion4ToVersion7() =
         runBlocking {
             val name = "simplefin-v3-${UUID.randomUUID()}.db"
             val file = context.getDatabasePath(name)
@@ -1277,8 +1281,12 @@ class SimpleFinLifecycleTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_3_4, FlowMoneyDatabase.MIGRATION_4_5, FlowMoneyDatabase.MIGRATION_5_6)
-                    .build()
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_3_4,
+                        FlowMoneyDatabase.MIGRATION_4_5,
+                        FlowMoneyDatabase.MIGRATION_5_6,
+                        FlowMoneyDatabase.MIGRATION_6_7,
+                    ).build()
             try {
                 val transaction = migrated.transactionDao().getAll().single()
                 assertEquals("local", transaction.source)
@@ -1292,7 +1300,7 @@ class SimpleFinLifecycleTest {
         }
 
     @Test
-    fun rawVersion5ProfileMigratesToVersion6WithoutDataLoss() =
+    fun rawVersion5ProfileMigratesToVersion7WithoutDataLoss() =
         runBlocking {
             val name = "simplefin-v5-${UUID.randomUUID()}.db"
             val file = context.getDatabasePath(name)
@@ -1322,7 +1330,7 @@ class SimpleFinLifecycleTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_5_6)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_5_6, FlowMoneyDatabase.MIGRATION_6_7)
                     .build()
             try {
                 val profile = migrated.simpleFinDao().getProfile()!!

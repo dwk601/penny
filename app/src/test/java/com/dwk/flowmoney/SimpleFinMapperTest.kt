@@ -4,95 +4,128 @@ import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 
 class SimpleFinMapperTest {
-    @Test fun mapsUsdPostedTransactionsAndWarnsOnBadAmount() {
-        val result = SimpleFinMapper.map(
-            "connection-a",
-            listOf(
-                SimpleFinAccount(
-                    providerConnectionId = "provider-a",
-                    id = "acct",
-                    name = "Checking",
-                    orgName = "Bank",
-                    currency = "USD",
-                    balance = "1.00",
-                    availableBalance = "0.50",
-                    transactions = listOf(
-                        SimpleFinTransaction("ok", posted = 10, amount = "-12.34", description = "Store", pending = false),
-                        SimpleFinTransaction("bad", posted = 11, amount = "nope", description = "Bad", pending = false),
+    @Test
+    fun mapsUsdPostedTransactionsWithStableRemoteIdentityAndWarnsOnBadAmount() {
+        val result =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(
+                    SimpleFinAccount(
+                        providerConnectionId = "provider-a",
+                        id = "acct",
+                        name = "Checking",
+                        orgName = "Bank",
+                        currency = "USD",
+                        balance = "1.00",
+                        availableBalance = "0.50",
+                        transactions =
+                            listOf(
+                                SimpleFinTransaction("ok", posted = 10, amount = "-12.34", description = "Store", pending = false),
+                                SimpleFinTransaction("bad", posted = 11, amount = "nope", description = "Bad", pending = false),
+                            ),
                     ),
                 ),
-            ),
-        )
+            )
 
-        assertThat(result.transactions.map { it.id }).containsExactly("simplefin:connection-a:cHJvdmlkZXItYQ:YWNjdA:b2s")
+        assertThat(result.transactions.map { it.id }).containsExactly(
+            "simplefin:v2:aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZw:cHJvdmlkZXItYQ:YWNjdA:b2s",
+        )
         assertThat(result.transactions.single().cents).isEqualTo(-1234)
         assertThat(result.warnings.single()).contains("malformed amount")
     }
 
-    @Test fun mapsSecondsToMillisAndKeepsSameTransactionIdDistinctByAccount() {
-        val result = SimpleFinMapper.map(
-            "connection-a",
-            listOf(
-                account(id = "a1", transactions = listOf(tx(id = "same", posted = 123, amount = "1.23"))),
-                account(id = "a2", transactions = listOf(tx(id = "same", posted = 124, amount = "-4.56"))),
-            ),
-        )
+    @Test
+    fun mapsSecondsToMillisAndKeepsSameTransactionIdDistinctByAccount() {
+        val result =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(
+                    account(id = "a1", transactions = listOf(tx(id = "same", posted = 123, amount = "1.23"))),
+                    account(id = "a2", transactions = listOf(tx(id = "same", posted = 124, amount = "-4.56"))),
+                ),
+            )
 
         assertThat(result.transactions.map { it.id })
             .containsExactly(
-                "simplefin:connection-a:cHJvdmlkZXItYQ:YTE:c2FtZQ",
-                "simplefin:connection-a:cHJvdmlkZXItYQ:YTI:c2FtZQ",
+                "simplefin:v2:aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZw:cHJvdmlkZXItYQ:YTE:c2FtZQ",
+                "simplefin:v2:aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZw:cHJvdmlkZXItYQ:YTI:c2FtZQ",
             )
         assertThat(result.transactions.first().occurredAtEpochMillis).isEqualTo(123_000L)
         assertThat(result.transactions.last().cents).isEqualTo(-456)
     }
 
-    @Test fun skipsNonUsdMissingCurrencyPendingAndUnposted() {
-        val result = SimpleFinMapper.map(
-            "connection-a",
-            listOf(
-                account(id = "eur", currency = "EUR", transactions = listOf(tx())),
-                account(id = "missing", currency = null, transactions = listOf(tx())),
-                account(id = "usd", transactions = listOf(
-                    tx(id = "pending", pending = true),
-                    tx(id = "zero", posted = 0),
-                    tx(id = "good", posted = 2),
-                )),
-            ),
-        )
+    @Test
+    fun skipsNonUsdMissingCurrencyPendingAndUnposted() {
+        val result =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(
+                    account(id = "eur", currency = "EUR", transactions = listOf(tx())),
+                    account(id = "missing", currency = null, transactions = listOf(tx())),
+                    account(
+                        id = "usd",
+                        transactions =
+                            listOf(
+                                tx(id = "pending", pending = true),
+                                tx(id = "zero", posted = 0),
+                                tx(id = "good", posted = 2),
+                            ),
+                    ),
+                ),
+            )
 
-        assertThat(result.transactions.map { it.id }).containsExactly("simplefin:connection-a:cHJvdmlkZXItYQ:dXNk:Z29vZA")
+        assertThat(result.transactions.map { it.id }).containsExactly(
+            "simplefin:v2:aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZw:cHJvdmlkZXItYQ:dXNk:Z29vZA",
+        )
     }
 
-    @Test fun scopesOpaqueAccountAndTransactionIdsToConnection() {
-        val first = SimpleFinMapper.map(
-            "connection-a",
-            listOf(account(id = "account:one", transactions = listOf(tx(id = "transaction:one")))),
-        )
-        val second = SimpleFinMapper.map(
-            "connection-b",
-            listOf(account(id = "account:one", transactions = listOf(tx(id = "transaction:one")))),
-        )
+    @Test
+    fun canonicalOriginIgnoresCredentialsCaseDefaultPortPathAndQuery() {
+        val firstOrigin =
+            origin(
+                "HTTPS://first-user:first-password@BRIDGE.SimpleFIN.org:443/private/access?token=first-secret",
+            )
+        val secondOrigin =
+            origin(
+                "https://second-user:second-password@bridge.simplefin.org/another/path?token=second-secret",
+            )
+        val first = SimpleFinMapper.map(firstOrigin, listOf(account(id = "account", transactions = listOf(tx(id = "transaction")))))
+        val second = SimpleFinMapper.map(secondOrigin, listOf(account(id = "account", transactions = listOf(tx(id = "transaction")))))
 
-        assertThat(first.accounts.single().accountId).isNotEqualTo(second.accounts.single().accountId)
-        assertThat(first.transactions.single().id).isNotEqualTo(second.transactions.single().id)
-        assertThat(first.transactions.single().accountKey).isEqualTo(first.accounts.single().accountId)
-        assertThat(first.transactions.single().id).doesNotContain("account:one")
+        assertThat(firstOrigin.value).isEqualTo("https://bridge.simplefin.org")
+        assertThat(secondOrigin).isEqualTo(firstOrigin)
+        assertThat(first.accounts.single().accountId).isEqualTo(second.accounts.single().accountId)
+        assertThat(first.transactions.single().id).isEqualTo(second.transactions.single().id)
+        val persistedIds = first.accounts.single().accountId + first.transactions.single().id
+        assertThat(persistedIds).doesNotContain("first-user")
+        assertThat(persistedIds).doesNotContain("first-password")
+        assertThat(persistedIds).doesNotContain("private")
+        assertThat(persistedIds).doesNotContain("first-secret")
+        assertThat(persistedIds).doesNotContain("local-random-connection-id")
     }
 
-    @Test fun scopesDuplicateProviderLocalIdsToProviderConnection() {
-        val first = SimpleFinMapper.map(
-            "connection-a",
-            listOf(account(id = "same-account", providerConnectionId = "provider-a", transactions = listOf(tx(id = "same-tx")))),
-        )
-        val second = SimpleFinMapper.map(
-            "connection-a",
-            listOf(account(id = "same-account", providerConnectionId = "provider-b", transactions = listOf(tx(id = "same-tx")))),
-        )
+    @Test
+    fun scopesRemoteIdsToNonDefaultPortAndProviderConnection() {
+        val defaultOrigin = SimpleFinMapper.map(origin(), listOf(account(id = "same", transactions = listOf(tx(id = "same")))))
+        val otherPort =
+            SimpleFinMapper.map(
+                origin("https://user:password@bridge.simplefin.org:8443/simplefin"),
+                listOf(account(id = "same", transactions = listOf(tx(id = "same")))),
+            )
+        val otherProvider =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(account(id = "same", providerConnectionId = "provider-b", transactions = listOf(tx(id = "same")))),
+            )
 
-        assertThat(first.accounts.single().accountId).isNotEqualTo(second.accounts.single().accountId)
-        assertThat(first.transactions.single().id).isNotEqualTo(second.transactions.single().id)
+        assertThat(defaultOrigin.accounts.single().accountId).isNotEqualTo(otherPort.accounts.single().accountId)
+        assertThat(defaultOrigin.transactions.single().id).isNotEqualTo(otherPort.transactions.single().id)
+        assertThat(defaultOrigin.accounts.single().accountId).isNotEqualTo(otherProvider.accounts.single().accountId)
+        assertThat(defaultOrigin.transactions.single().id).isNotEqualTo(otherProvider.transactions.single().id)
+        assertThat(defaultOrigin.transactions.single().accountKey).isEqualTo(defaultOrigin.accounts.single().accountId)
     }
+
+    private fun origin(url: String = ACCESS_URL) = SimpleFinServerOrigin.fromAccessUrl(url)
 
     private fun account(
         id: String,
@@ -116,4 +149,8 @@ class SimpleFinMapperTest {
         amount: String = "1.00",
         pending: Boolean = false,
     ) = SimpleFinTransaction(id, posted, amount, "Merchant", pending)
+
+    private companion object {
+        const val ACCESS_URL = "https://user:password@bridge.simplefin.org/simplefin"
+    }
 }

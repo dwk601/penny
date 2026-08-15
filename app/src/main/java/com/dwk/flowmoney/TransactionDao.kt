@@ -60,48 +60,55 @@ interface TransactionDao {
     suspend fun transactionsForIds(ids: List<String>): List<TransactionEntity>
 
     @Transaction
-    suspend fun upsertSyncedTransactionsIgnoringTombstones(
-        transactions: List<TransactionEntity>,
-    ): SyncedTransactionWriteResult {
+    suspend fun upsertSyncedTransactionsIgnoringTombstones(transactions: List<TransactionEntity>): SyncedTransactionWriteResult {
         val unique = transactions.distinctBy { it.id }
-        val ignored = unique.map { it.id }
-            .chunked(SYNCED_TRANSACTION_QUERY_BATCH_SIZE)
-            .flatMap { ignoredTransactionIds(it) }
-            .toSet()
-        val eligible = unique.filterNot { it.id in ignored }
-        val existing = if (eligible.isEmpty()) emptyMap() else {
-            eligible.map { it.id }
+        val ignored =
+            unique
+                .map { it.id }
                 .chunked(SYNCED_TRANSACTION_QUERY_BATCH_SIZE)
-                .flatMap { transactionsForIds(it) }
-                .associateBy { it.id }
-        }
+                .flatMap { ignoredTransactionIds(it) }
+                .toSet()
+        val eligible = unique.filterNot { it.id in ignored }
+        val existing =
+            if (eligible.isEmpty()) {
+                emptyMap()
+            } else {
+                eligible
+                    .map { it.id }
+                    .chunked(SYNCED_TRANSACTION_QUERY_BATCH_SIZE)
+                    .flatMap { transactionsForIds(it) }
+                    .associateBy { it.id }
+            }
         var inserted = 0
         var updated = 0
         var collisions = 0
-        val merged = eligible.mapNotNull { incoming ->
-            val current = existing[incoming.id]
-            when {
-                current == null -> {
-                    inserted++
-                    incoming.copy(source = "simplefin")
-                }
-                current.source == "simplefin" -> {
-                    updated++
-                    current.copy(
-                        occurredAtEpochMillis = incoming.occurredAtEpochMillis,
-                        merchant = incoming.merchant,
-                        cents = incoming.cents,
-                        source = "simplefin",
-                        accountKey = incoming.accountKey,
-                        accountName = incoming.accountName,
-                    )
-                }
-                else -> {
-                    collisions++
-                    null
+        val merged =
+            eligible.mapNotNull { incoming ->
+                val current = existing[incoming.id]
+                when {
+                    current == null -> {
+                        inserted++
+                        incoming.copy(source = "simplefin")
+                    }
+
+                    current.source == "simplefin" -> {
+                        updated++
+                        current.copy(
+                            occurredAtEpochMillis = incoming.occurredAtEpochMillis,
+                            merchant = incoming.merchant,
+                            cents = incoming.cents,
+                            source = "simplefin",
+                            accountKey = incoming.accountKey,
+                            accountName = incoming.accountName,
+                        )
+                    }
+
+                    else -> {
+                        collisions++
+                        null
+                    }
                 }
             }
-        }
         if (merged.isNotEmpty()) upsertAll(merged)
         return SyncedTransactionWriteResult(
             inserted = inserted,
@@ -127,7 +134,15 @@ interface TransactionDao {
 
     @Transaction
     suspend fun deleteWithSimpleFinTombstone(id: String) {
-        if (sourceForId(id) == "simplefin") insertIgnoredTransaction(SimpleFinIgnoredTransactionEntity(id))
+        val transaction = transactionsForIds(listOf(id)).singleOrNull()
+        if (transaction?.source == "simplefin") {
+            insertIgnoredTransaction(
+                SimpleFinIgnoredTransactionEntity(
+                    transactionId = id,
+                    occurredAtEpochMillis = transaction.occurredAtEpochMillis,
+                ),
+            )
+        }
         deleteById(id)
     }
 }

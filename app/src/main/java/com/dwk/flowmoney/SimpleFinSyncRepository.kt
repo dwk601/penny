@@ -238,17 +238,24 @@ class SimpleFinSyncRepository internal constructor(
             val start = end - SIMPLEFIN_SYNC_WINDOW_SECONDS
             val result = functions.accounts(accessUrl, start, end)
             if (result.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
-            val mapped = SimpleFinMapper.map(profile.connectionId, result.accounts)
+            val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
+            val mapped = SimpleFinMapper.map(origin, result.accounts)
             val error =
                 (mapped.warnings + listOfNotNull(nonUsdMessage(result.accounts)))
                     .joinToString("; ")
                     .ifBlank { null }
             var writeResult = SyncedTransactionWriteResult(0, 0, 0)
             db.withTransaction {
+                val identityDao = db.simpleFinIdentityDao()
+                val reconciliationRequired = identityDao.isReconciliationComplete() != true
+                if (reconciliationRequired) SimpleFinIdentityReconciler.reconcile(identityDao, origin)
                 writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
                 dao.upsertAccounts(mapped.accounts)
                 check(dao.recordSuccess(profile.connectionId, now(), error) == 1) {
                     "SimpleFIN connection changed during sync"
+                }
+                if (reconciliationRequired) {
+                    identityDao.upsertState(SimpleFinIdentityStateEntity(reconciliationComplete = true))
                 }
             }
             SimpleFinSyncResult.Success(writeResult.inserted, writeResult.updated, writeResult.skipped)
@@ -330,7 +337,8 @@ class SimpleFinSyncRepository internal constructor(
             val end = TimeUnit.MILLISECONDS.toSeconds(fetchedAt)
             val initial = functions.accounts(accessUrl, end - SIMPLEFIN_SYNC_WINDOW_SECONDS, end)
             if (initial.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
-            val mapped = SimpleFinMapper.map(connectionId, initial.accounts)
+            val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
+            val mapped = SimpleFinMapper.map(origin, initial.accounts)
             val warning =
                 (mapped.warnings + listOfNotNull(nonUsdMessage(initial.accounts)))
                     .joinToString("; ")
@@ -360,11 +368,17 @@ class SimpleFinSyncRepository internal constructor(
                     )
                 functions.scheduleWork(profile.automaticSyncsPerDay)
                 db.withTransaction {
+                    val identityDao = db.simpleFinIdentityDao()
+                    val reconciliationRequired = identityDao.isReconciliationComplete() != true
+                    if (reconciliationRequired) SimpleFinIdentityReconciler.reconcile(identityDao, origin)
                     db.simpleFinDao().clearProfile()
                     db.simpleFinDao().clearAccounts()
                     writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
                     db.simpleFinDao().upsertAccounts(mapped.accounts)
                     db.simpleFinDao().upsertProfile(profile)
+                    if (reconciliationRequired) {
+                        identityDao.upsertState(SimpleFinIdentityStateEntity(reconciliationComplete = true))
+                    }
                 }
 
                 // Publication is complete. A cleanup failure is recovered on the next repository start.
