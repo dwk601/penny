@@ -19,6 +19,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -29,9 +31,12 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -117,6 +122,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -435,14 +441,11 @@ fun FlowMoneyApp(
     var editorId by rememberSaveable { mutableStateOf<String?>(null) }
     var persistenceBusy by remember { mutableStateOf(false) }
     var showDiscardDialog by rememberSaveable { mutableStateOf(false) }
-    var pendingDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
-    var closeEditorAfterDelete by rememberSaveable { mutableStateOf(false) }
     var pendingWidgetQuickAddAfterDiscard by rememberSaveable { mutableStateOf(false) }
     var lastHandledOpenAddSheetRequest by remember { mutableStateOf(0) }
     var dataOperation by remember { mutableStateOf<DataOperation?>(null) }
     var showDisconnectConfirmation by rememberSaveable { mutableStateOf(false) }
     val selectedTab = remember(selectedTabName) { DashboardTab.valueOf(selectedTabName) }
-    val pendingDelete = pendingDeleteId?.let { id -> uiState.sortedTransactions.firstOrNull { it.id == id } }
     val editorDirty = editorDraft != originalEditorDraft
     val latestEditorDirty by rememberUpdatedState(editorDirty)
     val latestPersistenceBusy by rememberUpdatedState(persistenceBusy)
@@ -567,13 +570,15 @@ fun FlowMoneyApp(
         if (editorDirty) showDiscardDialog = true else showSheet = false
     }
 
-    fun requestDelete(
+    fun deleteImmediately(
         transaction: Transaction,
         closeEditor: Boolean = false,
     ) {
         if (persistenceBusy) return
-        pendingDeleteId = transaction.id
-        closeEditorAfterDelete = closeEditor
+        persistenceBusy = true
+        deleteWithUndo(transaction) {
+            if (closeEditor) showSheet = false
+        }
     }
 
     val importLauncher =
@@ -669,7 +674,7 @@ fun FlowMoneyApp(
             onSelectedMonthChange = viewModel::setSelectedMonth,
             onEdit = ::openTransactionEditor,
             onViewAllTransactions = { selectedTabName = DashboardTab.Transactions.name },
-            onDelete = { requestDelete(it) },
+            onDelete = ::deleteImmediately,
             onAddTransaction = ::openNewTransactionEditor,
             onData = { showDataSheet = true },
             modifier =
@@ -725,7 +730,7 @@ fun FlowMoneyApp(
                 onDelete =
                     editorId?.let { id ->
                         uiState.sortedTransactions.firstOrNull { it.id == id }?.let { transaction ->
-                            { requestDelete(transaction, closeEditor = true) }
+                            { deleteImmediately(transaction, closeEditor = true) }
                         }
                     },
                 onCancel = ::requestEditorDismissal,
@@ -764,40 +769,6 @@ fun FlowMoneyApp(
                     showDiscardDialog = false
                     pendingWidgetQuickAddAfterDiscard = false
                 }) { Text("Keep editing") }
-            },
-        )
-    }
-
-    pendingDelete?.let { transaction ->
-        AlertDialog(
-            onDismissRequest = {
-                pendingDeleteId = null
-                closeEditorAfterDelete = false
-            },
-            title = { Text("Delete transaction?") },
-            text = { Text("Delete ${transaction.deleteDescription()}?") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (persistenceBusy) return@TextButton
-                        pendingDeleteId = null
-                        persistenceBusy = true
-                        deleteWithUndo(transaction) {
-                            if (closeEditorAfterDelete) showSheet = false
-                            closeEditorAfterDelete = false
-                        }
-                    },
-                    enabled = !persistenceBusy,
-                    modifier = Modifier.testTag("confirm_delete_button"),
-                ) { Text("Delete", color = LocalFinanceColors.current.expense) }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        pendingDeleteId = null
-                        closeEditorAfterDelete = false
-                    },
-                ) { Text("Cancel") }
             },
         )
     }
@@ -1506,6 +1477,39 @@ private fun TransactionsPage(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PagePadding,
         ) {
+            item {
+                RecentTransactionsHeader(
+                    title = "Transactions",
+                    count = filteredTransactions.size,
+                    detail =
+                        if (filteredTransactions.size ==
+                            sortedTransactions.size
+                        ) {
+                            "All time"
+                        } else {
+                            "${sortedTransactions.size} total"
+                        },
+                )
+            }
+            item {
+                TransactionFilterBar(
+                    timeFilter = timeFilter,
+                    selectedCategory = selectedCategory,
+                    categories = categories,
+                    whereFilter = whereFilter,
+                    isExpanded = filtersExpanded,
+                    onExpandedChange = { filtersExpanded = it },
+                    onTimeFilterChange = { timeFilterName = it.name },
+                    onCategoryChange = { selectedCategory = it },
+                    onWhereFilterChange = { whereFilter = it },
+                    onClear = {
+                        timeFilterName = TransactionTimeFilter.All.name
+                        selectedCategory = null
+                        whereFilter = ""
+                        filtersExpanded = false
+                    },
+                )
+            }
             if (sortedTransactions.isEmpty()) {
                 item {
                     EmptyState(
@@ -1515,40 +1519,6 @@ private fun TransactionsPage(
                             Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 320.dp),
-                    )
-                }
-            } else {
-                item {
-                    RecentTransactionsHeader(
-                        title = "Transactions",
-                        count = filteredTransactions.size,
-                        detail =
-                            if (filteredTransactions.size ==
-                                sortedTransactions.size
-                            ) {
-                                "All time"
-                            } else {
-                                "${sortedTransactions.size} total"
-                            },
-                    )
-                }
-                item {
-                    TransactionFilterBar(
-                        timeFilter = timeFilter,
-                        selectedCategory = selectedCategory,
-                        categories = categories,
-                        whereFilter = whereFilter,
-                        isExpanded = filtersExpanded,
-                        onExpandedChange = { filtersExpanded = it },
-                        onTimeFilterChange = { timeFilterName = it.name },
-                        onCategoryChange = { selectedCategory = it },
-                        onWhereFilterChange = { whereFilter = it },
-                        onClear = {
-                            timeFilterName = TransactionTimeFilter.All.name
-                            selectedCategory = null
-                            whereFilter = ""
-                            filtersExpanded = false
-                        },
                     )
                 }
             }
@@ -1571,12 +1541,31 @@ private fun TransactionsPage(
                     stickyHeader(key = "transaction_day_${group.date}") {
                         TransactionDayHeader(group)
                     }
-                    items(group.transactions, key = { it.id }) { transaction ->
-                        SwipeTransactionRow(
-                            transaction = transaction,
-                            onEdit = { onEdit(transaction) },
-                            onDelete = { onDelete(transaction) },
-                        )
+                    item(key = "transaction_day_rows_${group.date}") {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            shape = MaterialTheme.shapes.large,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column {
+                                group.transactions.forEachIndexed { index, transaction ->
+                                    key(transaction.id) {
+                                        SwipeTransactionRow(
+                                            transaction = transaction,
+                                            onEdit = { onEdit(transaction) },
+                                            onDelete = { onDelete(transaction) },
+                                        )
+                                    }
+                                    if (index < group.transactions.lastIndex) {
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(start = 68.dp),
+                                            thickness = 1.dp,
+                                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1588,14 +1577,14 @@ private fun TransactionsPage(
 @OptIn(ExperimentalLayoutApi::class)
 private fun TransactionDayHeader(group: TransactionDayGroup) {
     Surface(
-        color = MaterialTheme.colorScheme.background,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier =
             Modifier
                 .fillMaxWidth()
                 .testTag("transaction_day_header_${group.date}"),
     ) {
         Column(
-            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
@@ -1646,7 +1635,30 @@ private fun TransactionFilterBar(
             if (whereFilter.isNotBlank()) add("“${whereFilter.trim()}”")
         }.joinToString(" · ").ifBlank { "All transactions" }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        modifier =
+            Modifier.animateContentSize(
+                animationSpec =
+                    tween(
+                        durationMillis = PennyMotion.DurationMedium,
+                        easing = PennyMotion.StandardEasing,
+                    ),
+            ),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            value = whereFilter,
+            onValueChange = onWhereFilterChange,
+            placeholder = { Text("Where or merchant") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            colors = flowTextFieldColors(),
+            shape = MaterialTheme.shapes.large,
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .testTag("transaction_where_filter"),
+        )
         Row(
             modifier =
                 Modifier
@@ -1681,67 +1693,88 @@ private fun TransactionFilterBar(
             Text(if (isExpanded) "Hide" else "Show", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
         }
 
-        if (isExpanded) {
-            OutlinedTextField(
-                value = whereFilter,
-                onValueChange = onWhereFilterChange,
-                placeholder = { Text("Where or merchant") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                colors = flowTextFieldColors(),
-                shape = MaterialTheme.shapes.large,
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .testTag("transaction_where_filter"),
-            )
-            FlowRow(
-                modifier =
-                    Modifier
-                        .selectableGroup()
-                        .testTag("transaction_time_filter_group"),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                TransactionTimeFilter.entries.forEach { filter ->
+        AnimatedVisibility(
+            visible = isExpanded,
+            enter =
+                expandVertically(
+                    animationSpec =
+                        tween(
+                            durationMillis = PennyMotion.DurationMedium,
+                            easing = PennyMotion.StandardEasing,
+                        ),
+                ) +
+                    fadeIn(
+                        animationSpec =
+                            tween(
+                                durationMillis = PennyMotion.DurationShort,
+                                easing = PennyMotion.StandardDecelerateEasing,
+                            ),
+                    ),
+            exit =
+                shrinkVertically(
+                    animationSpec =
+                        tween(
+                            durationMillis = PennyMotion.DurationMedium,
+                            easing = PennyMotion.StandardEasing,
+                        ),
+                ) +
+                    fadeOut(
+                        animationSpec =
+                            tween(
+                                durationMillis = PennyMotion.DurationShort,
+                                easing = PennyMotion.StandardAccelerateEasing,
+                            ),
+                    ),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    modifier =
+                        Modifier
+                            .selectableGroup()
+                            .testTag("transaction_time_filter_group"),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TransactionTimeFilter.entries.forEach { filter ->
+                        SuggestionChip(
+                            label = filter.label,
+                            selected = timeFilter == filter,
+                            testTag = "transaction_filter_${filter.name.lowercase(Locale.US)}",
+                            onClick = { onTimeFilterChange(filter) },
+                        )
+                    }
+                }
+                FlowRow(
+                    modifier =
+                        Modifier
+                            .selectableGroup()
+                            .testTag("transaction_category_filter_group"),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     SuggestionChip(
-                        label = filter.label,
-                        selected = timeFilter == filter,
-                        testTag = "transaction_filter_${filter.name.lowercase(Locale.US)}",
-                        onClick = { onTimeFilterChange(filter) },
+                        label = "Any category",
+                        selected = selectedCategory == null,
+                        testTag = "transaction_category_filter_all",
+                        onClick = { onCategoryChange(null) },
+                    )
+                    categories.forEach { category ->
+                        SuggestionChip(
+                            label = category,
+                            selected = selectedCategory == category,
+                            testTag = "transaction_category_filter_${category.toCategoryChipTagSuffix()}",
+                            onClick = { onCategoryChange(category) },
+                        )
+                    }
+                }
+                if (hasActiveFilter) {
+                    SuggestionChip(
+                        label = "Clear",
+                        testTag = "transaction_filter_clear",
+                        isSelection = false,
+                        onClick = onClear,
                     )
                 }
-            }
-            FlowRow(
-                modifier =
-                    Modifier
-                        .selectableGroup()
-                        .testTag("transaction_category_filter_group"),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                SuggestionChip(
-                    label = "Any category",
-                    selected = selectedCategory == null,
-                    testTag = "transaction_category_filter_all",
-                    onClick = { onCategoryChange(null) },
-                )
-                categories.forEach { category ->
-                    SuggestionChip(
-                        label = category,
-                        selected = selectedCategory == category,
-                        testTag = "transaction_category_filter_${category.toCategoryChipTagSuffix()}",
-                        onClick = { onCategoryChange(category) },
-                    )
-                }
-            }
-            if (hasActiveFilter) {
-                SuggestionChip(
-                    label = "Clear",
-                    testTag = "transaction_filter_clear",
-                    isSelection = false,
-                    onClick = onClear,
-                )
             }
         }
     }
@@ -3641,32 +3674,43 @@ internal fun TransactionEditor(
                 }
 
                 item {
-                    SectionLabel("Category")
-                    Spacer(Modifier.height(8.dp))
-                    FlowRow(
-                        modifier = Modifier.selectableGroup(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    Column(
+                        modifier =
+                            Modifier.animateContentSize(
+                                animationSpec =
+                                    tween(
+                                        durationMillis = PennyMotion.DurationMedium,
+                                        easing = PennyMotion.StandardEasing,
+                                    ),
+                            ),
                     ) {
-                        categoryPickerOptions.visible.forEach { option ->
+                        SectionLabel("Category")
+                        Spacer(Modifier.height(8.dp))
+                        FlowRow(
+                            modifier = Modifier.selectableGroup(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            categoryPickerOptions.visible.forEach { option ->
+                                SuggestionChip(
+                                    label = option.label,
+                                    selected = draft.category == option.label,
+                                    testTag = "category_chip_${option.label.toCategoryChipTagSuffix()}",
+                                    onClick = {
+                                        onDraftChange(draft.copy(category = option.label))
+                                    },
+                                )
+                            }
+                        }
+                        if (categoryPickerOptions.hiddenCount > 0 || showAllCategories) {
+                            Spacer(Modifier.height(8.dp))
                             SuggestionChip(
-                                label = option.label,
-                                selected = draft.category == option.label,
-                                testTag = "category_chip_${option.label.toCategoryChipTagSuffix()}",
-                                onClick = {
-                                    onDraftChange(draft.copy(category = option.label))
-                                },
+                                label = if (showAllCategories) "Less" else "More (${categoryPickerOptions.hiddenCount})",
+                                testTag = "category_more_button",
+                                isSelection = false,
+                                onClick = { showAllCategories = !showAllCategories },
                             )
                         }
-                    }
-                    if (categoryPickerOptions.hiddenCount > 0 || showAllCategories) {
-                        Spacer(Modifier.height(8.dp))
-                        SuggestionChip(
-                            label = if (showAllCategories) "Less" else "More (${categoryPickerOptions.hiddenCount})",
-                            testTag = "category_more_button",
-                            isSelection = false,
-                            onClick = { showAllCategories = !showAllCategories },
-                        )
                     }
                 }
 
@@ -3843,7 +3887,13 @@ private fun MoreDetailsDisclosure(
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp)
-                .clip(MaterialTheme.shapes.medium)
+                .animateContentSize(
+                    animationSpec =
+                        tween(
+                            durationMillis = PennyMotion.DurationMedium,
+                            easing = PennyMotion.StandardEasing,
+                        ),
+                ).clip(MaterialTheme.shapes.medium)
                 .background(MaterialTheme.colorScheme.surfaceContainer)
                 .clickable(role = Role.Button) { onExpandedChange(!expanded) }
                 .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
@@ -3978,21 +4028,40 @@ private fun KeypadButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val indication = LocalIndication.current
     Box(
         modifier =
             modifier
                 .heightIn(min = 48.dp)
                 .testTag("amount_key_${key.toAmountKeyTagSuffix()}")
+                .pennyPressScale(interactionSource)
                 .clip(MaterialTheme.shapes.large)
                 .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.08f))
-                .clickable(role = Role.Button, onClick = onClick)
-                .semantics {
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = indication,
+                    role = Role.Button,
+                    onClick = onClick,
+                ).semantics {
                     if (key == "back") contentDescription = "Delete last digit"
                 },
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = MaterialTheme.colorScheme.inverseOnSurface, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
     }
+}
+
+@Composable
+private fun Modifier.pennyPressScale(interactionSource: MutableInteractionSource): Modifier {
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scaleFactor by
+        animateFloatAsState(
+            targetValue = if (isPressed) 0.97f else 1f,
+            animationSpec = tween(durationMillis = PennyMotion.DurationShort, easing = PennyMotion.StandardEasing),
+            label = "Penny press scale",
+        )
+    return scale(scaleFactor)
 }
 
 private fun String.toAmountKeyTagSuffix(): String =
