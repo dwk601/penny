@@ -122,9 +122,35 @@ Additional assumptions and limitations:
   ./gradlew connectedDebugAndroidTest
   ```
 
-  On failure, a picker hierarchy artifact is retained with mode `0600` in the
-  test APK's private storage until cleanup at the next test start. It is not stored
-  in the target app and is not part of the target app/release fingerprint.
+  Only an API 34+ picker state-assertion failure can retain a hierarchy
+  artifact. It has mode `0600` in the instrumentation test APK's private
+  storage, not Penny's storage, and is not part of the release fingerprint.
+  Below API 34, no hierarchy artifact is written; the failed assertion reports
+  `UnsupportedApi` and `Hierarchy artifact: none` instead.
+
+  Retrieve an API 34+ artifact immediately, using its UUID-bearing basename
+  from the assertion and an existing mode-`0700` host evidence directory.
+  Replace `SERIAL`, `ARTIFACT_UUID`, and the destination as appropriate:
+
+  ```bash
+  (
+    set -eu
+    umask 077
+    ARTIFACT='picker-hierarchy-ARTIFACT_UUID.xml'
+    DEST='/secure/evidence/picker-hierarchy-ARTIFACT_UUID.xml'
+    TMP="$(mktemp "${DEST}.tmp.XXXXXX")"
+    trap 'rm -f -- "$TMP"' EXIT HUP INT TERM
+    adb -s SERIAL exec-out run-as com.dwk.flowmoney.test \
+      cat "files/$ARTIFACT" >"$TMP"
+    test -s "$TMP"
+    mv -- "$TMP" "$DEST"
+    trap - EXIT HUP INT TERM
+  )
+  ```
+
+  The test APK retains the artifact only until the next test starts, when its
+  cleanup removes it. Retrieve it before rerunning or starting another test;
+  an automatically continuing test run may reach that cleanup first.
 
 - [ ] Run the focused SimpleFIN lifecycle suite and retain results:
 
