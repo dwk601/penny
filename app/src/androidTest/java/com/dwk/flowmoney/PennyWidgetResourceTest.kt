@@ -44,8 +44,10 @@ class PennyWidgetResourceTest {
         val cases =
             listOf(
                 StaticWidgetLayoutCase(
-                    name = "picker preview",
+                    name = "picker preview 110x110",
                     layoutId = R.layout.widget_penny_preview,
+                    widthDp = 110,
+                    heightDp = 110,
                     expectedText =
                         mapOf(
                             R.id.widget_preview_label to R.string.widget_preview_label,
@@ -68,19 +70,35 @@ class PennyWidgetResourceTest {
                     addButtonId = R.id.widget_preview_add_button,
                 ),
                 StaticWidgetLayoutCase(
-                    name = "initial frame",
+                    name = "initial frame compact 110x48",
                     layoutId = R.layout.widget_penny_initial,
+                    widthDp = 110,
+                    heightDp = 48,
                     expectedText =
                         mapOf(
                             R.id.widget_initial_label to R.string.widget_initial_label,
-                            R.id.widget_initial_status to R.string.widget_initial_status,
-                            R.id.widget_initial_detail to R.string.widget_initial_detail,
+                            R.id.widget_initial_guidance to R.string.widget_initial_guidance,
                         ),
                     expectedTextColors =
                         mapOf(
                             R.id.widget_initial_label to R.color.widget_on_surface_inverse_muted,
-                            R.id.widget_initial_status to R.color.widget_on_surface_inverse,
-                            R.id.widget_initial_detail to R.color.widget_on_surface_inverse_muted,
+                            R.id.widget_initial_guidance to R.color.widget_on_surface_inverse,
+                        ),
+                ),
+                StaticWidgetLayoutCase(
+                    name = "initial frame standard 110x110",
+                    layoutId = R.layout.widget_penny_initial,
+                    widthDp = 110,
+                    heightDp = 110,
+                    expectedText =
+                        mapOf(
+                            R.id.widget_initial_label to R.string.widget_initial_label,
+                            R.id.widget_initial_guidance to R.string.widget_initial_guidance,
+                        ),
+                    expectedTextColors =
+                        mapOf(
+                            R.id.widget_initial_label to R.color.widget_on_surface_inverse_muted,
+                            R.id.widget_initial_guidance to R.color.widget_on_surface_inverse,
                         ),
                 ),
             )
@@ -107,18 +125,19 @@ class PennyWidgetResourceTest {
         nightMode: Int,
     ) {
         val density = context.resources.displayMetrics.density
-        val size = (110 * density + 0.5f).toInt()
+        val width = (case.widthDp * density + 0.5f).toInt()
+        val height = (case.heightDp * density + 0.5f).toInt()
         val description = "${case.name}, fontScale $fontScale, nightMode $nightMode"
         val root = RemoteViews(context.packageName, case.layoutId).apply(context, null) as ViewGroup
 
         root.measure(
-            View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(size, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
         )
         root.layout(0, 0, root.measuredWidth, root.measuredHeight)
 
-        assertEquals("$description width", size, root.width)
-        assertEquals("$description height", size, root.height)
+        assertEquals("$description width", width, root.width)
+        assertEquals("$description height", height, root.height)
         assertNotNull("$description background", root.background)
 
         val visibleViews = visibleDescendants(root)
@@ -178,15 +197,22 @@ class PennyWidgetResourceTest {
             }.joinToString(" | ")
         assertFalse("$description advertises failure: $representedContent", representedContent.contains("Unavailable", true))
         assertFalse("$description claims a real zero: $representedContent", representedContent.contains("\$0.00"))
+        listOf("merchant", "account", "credential", "access url", "routing number", "private note").forEach {
+            assertFalse("$description exposes private $it content", representedContent.contains(it, true))
+        }
 
         if (case.layoutId == R.layout.widget_penny_preview) {
             assertTrue("$description must identify synthetic content", representedContent.contains("sample", true))
-            listOf("merchant", "account", "credential", "access url", "routing number", "private note").forEach {
-                assertFalse("$description exposes private $it content", representedContent.contains(it, true))
-            }
         } else {
-            assertTrue("$description must be neutral/loading", representedContent.contains("loading", true))
+            val recoveryGuidance = context.getString(R.string.widget_initial_guidance)
+            assertTrue(
+                "$description must show recovery guidance: $representedContent",
+                representedContent.contains(recoveryGuidance, true),
+            )
+            assertTrue("$description must name Penny", representedContent.contains("Penny", true))
+            assertTrue("$description must say how to load", representedContent.contains("load", true))
             assertFalse("$description must not reuse picker samples", representedContent.contains("sample", true))
+            assertFalse("$description must differ from runtime failure", representedContent.contains("Open app", true))
             assertFalse(
                 "$description must not claim a monetary value: $representedContent",
                 Regex("[$€£]\\s*\\d").containsMatchIn(representedContent),
@@ -285,6 +311,8 @@ class PennyWidgetResourceTest {
     private data class StaticWidgetLayoutCase(
         val name: String,
         val layoutId: Int,
+        val widthDp: Int,
+        val heightDp: Int,
         val expectedText: Map<Int, Int>,
         val expectedTextColors: Map<Int, Int>,
         val expectedContentDescriptions: Map<Int, Int> = emptyMap(),
