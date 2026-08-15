@@ -1,6 +1,7 @@
 package com.dwk.flowmoney
 
 import android.content.Context
+import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -115,6 +116,15 @@ class MainViewModelReadinessTest {
 
             scenario.recreate()
             composeRule.waitForIdle()
+            val duplicateErrorStayedAbsent = try {
+                composeRule.waitUntil(1_000) {
+                    composeRule.onAllNodesWithText(message).fetchSemanticsNodes().isNotEmpty()
+                }
+                false
+            } catch (_: ComposeTimeoutException) {
+                true
+            }
+            assertTrue("Migration error reappeared after recreation", duplicateErrorStayedAbsent)
             composeRule.onAllNodesWithText(message).assertCountEquals(0)
         }
     }
