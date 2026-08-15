@@ -2,16 +2,21 @@ package com.dwk.flowmoney
 
 import android.content.Context
 import androidx.room.withTransaction
-import java.io.IOException
-import java.util.UUID
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.util.UUID
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
 
 internal const val MIN_AUTOMATIC_SYNCS_PER_DAY = 1
 internal const val MAX_AUTOMATIC_SYNCS_PER_DAY = 12
@@ -25,29 +30,36 @@ internal fun automaticSyncIntervalMillis(count: Int): Long {
     return (day + count - 1) / count
 }
 
-internal fun isSimpleFinSyncEligible(profile: SimpleFinProfileEntity, time: Long): Boolean {
+internal fun isSimpleFinSyncEligible(
+    profile: SimpleFinProfileEntity,
+    time: Long,
+): Boolean {
     val attempt = profile.lastSyncAttemptAtEpochMillis
     val success = profile.lastSuccessfulSyncAtEpochMillis
     val lastAttemptSucceeded = success != null && (attempt == null || success >= attempt)
     val anchor = if (lastAttemptSucceeded) success else attempt ?: return true
     if (anchor > time) return false
-    val age = try {
-        Math.subtractExact(time, anchor)
-    } catch (_: ArithmeticException) {
-        Long.MAX_VALUE
-    }
-    val interval = if (lastAttemptSucceeded) {
-        automaticSyncIntervalMillis(profile.automaticSyncsPerDay)
-    } else {
-        SIMPLEFIN_RETRY_INTERVAL_MILLIS
-    }
+    val age =
+        try {
+            Math.subtractExact(time, anchor)
+        } catch (_: ArithmeticException) {
+            Long.MAX_VALUE
+        }
+    val interval =
+        if (lastAttemptSucceeded) {
+            automaticSyncIntervalMillis(profile.automaticSyncsPerDay)
+        } else {
+            SIMPLEFIN_RETRY_INTERVAL_MILLIS
+        }
     return age >= interval
 }
 
-internal class SimpleFinAutomaticSchedulingException(cause: Throwable) : Exception(
-    "Automatic sync frequency was saved, but scheduling could not be updated",
-    cause,
-)
+internal class SimpleFinAutomaticSchedulingException(
+    cause: Throwable,
+) : Exception(
+        "Automatic sync frequency was saved, but scheduling could not be updated",
+        cause,
+    )
 
 internal class SimpleFinSyncFunctions(
     val claim: suspend (String) -> String,
@@ -55,6 +67,10 @@ internal class SimpleFinSyncFunctions(
     val saveCredential: suspend (String, String) -> Unit,
     val readCredential: suspend (String) -> String?,
     val deleteCredential: suspend () -> Unit,
+    val stagePendingCredential: suspend (String, String) -> Unit,
+    val readPendingCredential: suspend () -> SimpleFinPendingCredential?,
+    val promotePendingCredential: suspend (String) -> Unit,
+    val deletePendingCredential: suspend () -> Unit,
     val scheduleWork: suspend (Int) -> Unit,
     val cancelWork: suspend () -> Unit,
     val now: () -> Long,
@@ -66,80 +82,130 @@ class SimpleFinSyncRepository internal constructor(
 ) {
     constructor(context: Context) : this(FlowMoneyDatabase.get(context), productionFunctions(context))
 
+    private val mutablePendingConnectionState = MutableStateFlow(SimpleFinPendingConnectionState.UNKNOWN)
+
     val profile = db.simpleFinDao().observeProfile()
+    val pendingConnectionState: StateFlow<SimpleFinPendingConnectionState> = mutablePendingConnectionState.asStateFlow()
+
+    suspend fun recoverPendingConnection(): SimpleFinPendingConnectionState =
+        lifecycleMutex.withLock {
+            val pending =
+                try {
+                    functions.readPendingCredential()
+                } catch (_: Throwable) {
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.UNKNOWN
+                    return@withLock mutablePendingConnectionState.value
+                }
+            if (pending == null) {
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
+                return@withLock mutablePendingConnectionState.value
+            }
+
+            // A crash after database publication but before cleanup leaves a harmless completed stage.
+            if (db.simpleFinDao().getProfile()?.connectionId == pending.connectionId) {
+                try {
+                    functions.deletePendingCredential()
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
+                } catch (_: Throwable) {
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.UNKNOWN
+                }
+            } else {
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.RETRY_AVAILABLE
+            }
+            mutablePendingConnectionState.value
+        }
 
     suspend fun connect(setupToken: String): SimpleFinSyncResult {
         val connectionId = UUID.randomUUID().toString()
-        var previous: PreviousConnection? = null
-        lifecycleMutex.withLock { pendingConnectionId = connectionId }
+        beginConnection(connectionId)?.let { return it }
         return try {
-            val accessUrl = try {
-                functions.claim(setupToken)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                return SimpleFinSyncResult.Failure(e.userMessage(), e.retryable())
-            }
-            try {
-                SimpleFinClient.validateAccessUrl(accessUrl)
-                lifecycleMutex.withLock {
-                    check(pendingConnectionId == connectionId) { "SimpleFIN connection was cancelled" }
-                    val oldProfile = db.simpleFinDao().getProfile()
-                    previous = PreviousConnection(
-                        oldProfile,
-                        db.simpleFinDao().observeAccounts().first(),
-                        oldProfile?.let { functions.readCredential(it.connectionId) },
-                    )
+            val accessUrl =
+                try {
+                    functions.claim(setupToken).also(SimpleFinClient::validateAccessUrl)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    return failure.toConnectFailure(pendingRetryAvailable = false)
                 }
-                val fetchedAt = now()
-                val end = TimeUnit.MILLISECONDS.toSeconds(fetchedAt)
-                val initial = functions.accounts(accessUrl, end - TimeUnit.DAYS.toSeconds(90), end)
-                if (initial.errors.isNotEmpty()) throw SimpleFinException(initial.errors.joinToString("; "))
-                val mapped = SimpleFinMapper.map(connectionId, initial.accounts)
-                val warning = (mapped.warnings + listOfNotNull(nonUsdMessage(initial.accounts)))
-                    .joinToString("; ")
-                    .ifBlank { null }
-                var writeResult = SyncedTransactionWriteResult(0, 0, 0)
-                lifecycleMutex.withLock {
-                    check(pendingConnectionId == connectionId) { "SimpleFIN connection was cancelled" }
-                    functions.saveCredential(connectionId, accessUrl)
-                    check(functions.readCredential(connectionId) == accessUrl) { "SimpleFIN credential save failed verification" }
-                    val profile = SimpleFinProfileEntity(
-                        connectionId = connectionId,
-                        connectedAtEpochMillis = fetchedAt,
-                        lastSyncAttemptAtEpochMillis = fetchedAt,
-                        lastSuccessfulSyncAtEpochMillis = fetchedAt,
-                        lastError = warning,
-                    )
-                    functions.scheduleWork(profile.automaticSyncsPerDay)
-                    db.withTransaction {
-                        db.simpleFinDao().clearProfile()
-                        db.simpleFinDao().clearAccounts()
-                        writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
-                        db.simpleFinDao().upsertAccounts(mapped.accounts)
-                        db.simpleFinDao().upsertProfile(profile)
+
+            val previous =
+                try {
+                    lifecycleMutex.withLock {
+                        check(activeConnectionId == connectionId) { "SimpleFIN connection was cancelled" }
+                        val snapshot = previousConnection()
+                        functions.stagePendingCredential(connectionId, accessUrl)
+                        mutablePendingConnectionState.value = SimpleFinPendingConnectionState.RETRY_AVAILABLE
+                        snapshot
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    return failure.toConnectFailure()
                 }
-                SimpleFinSyncResult.Success(writeResult.inserted, writeResult.updated, writeResult.skipped)
-            } catch (e: CancellationException) {
-                compensateConnect(connectionId, previous)
-                throw e
-            } catch (e: Throwable) {
-                compensateConnect(connectionId, previous)
-                SimpleFinSyncResult.Failure(e.userMessage(), e.retryable())
-            }
+            finishPendingConnection(connectionId, accessUrl, previous)
         } finally {
-            withContext(NonCancellable) {
-                lifecycleMutex.withLock {
-                    if (pendingConnectionId == connectionId) pendingConnectionId = null
+            clearActiveConnection(connectionId)
+        }
+    }
+
+    suspend fun retryPendingConnection(): SimpleFinSyncResult {
+        var pending: SimpleFinPendingCredential? = null
+        var previous: PreviousConnection? = null
+        val beginFailure =
+            lifecycleMutex.withLock {
+                if (activeConnectionId != null) return@withLock connectionInProgressFailure()
+                pending =
+                    try {
+                        functions.readPendingCredential()
+                    } catch (failure: Throwable) {
+                        return@withLock failure.toConnectFailure()
+                    }
+                if (pending == null) {
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
+                    return@withLock noPendingConnectionFailure()
                 }
+                activeConnectionId = pending!!.connectionId
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.RETRY_AVAILABLE
+                previous =
+                    try {
+                        previousConnection()
+                    } catch (failure: Throwable) {
+                        activeConnectionId = null
+                        return@withLock failure.toConnectFailure(pendingRetryAvailable = true)
+                    }
+                null
+            }
+        beginFailure?.let { return it }
+
+        val staged = checkNotNull(pending)
+        return try {
+            try {
+                SimpleFinClient.validateAccessUrl(staged.accessUrl)
+            } catch (failure: Throwable) {
+                deleteRejectedPendingConnection(staged.connectionId)
+                return failure.toConnectFailure()
+            }
+            finishPendingConnection(staged.connectionId, staged.accessUrl, checkNotNull(previous))
+        } finally {
+            clearActiveConnection(staged.connectionId)
+        }
+    }
+
+    suspend fun cancelPendingConnection() {
+        lifecycleMutex.withLock {
+            withContext(NonCancellable) {
+                activeConnectionId = null
+                functions.deletePendingCredential()
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
             }
         }
     }
 
-    suspend fun syncNow(): SimpleFinSyncResult {
-        return syncMutex.withLock { syncNowLocked(bypassEligibility = false) }
+    suspend fun startOverPendingConnection() {
+        cancelPendingConnection()
     }
+
+    suspend fun syncNow(): SimpleFinSyncResult = syncMutex.withLock { syncNowLocked(bypassEligibility = false) }
 
     private suspend fun syncNowLocked(bypassEligibility: Boolean): SimpleFinSyncResult {
         val dao = db.simpleFinDao()
@@ -157,34 +223,35 @@ class SimpleFinSyncRepository internal constructor(
             val end = TimeUnit.MILLISECONDS.toSeconds(time)
             val start = end - TimeUnit.DAYS.toSeconds(90)
             val result = functions.accounts(accessUrl, start, end)
-            if (result.errors.isNotEmpty()) throw SimpleFinException(result.errors.joinToString("; "))
+            if (result.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val mapped = SimpleFinMapper.map(profile.connectionId, result.accounts)
-            val error = (mapped.warnings + listOfNotNull(nonUsdMessage(result.accounts)))
-                .joinToString("; ")
-                .ifBlank { null }
+            val error =
+                (mapped.warnings + listOfNotNull(nonUsdMessage(result.accounts)))
+                    .joinToString("; ")
+                    .ifBlank { null }
             var writeResult = SyncedTransactionWriteResult(0, 0, 0)
             db.withTransaction {
                 writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
                 dao.upsertAccounts(mapped.accounts)
-                check(dao.recordSuccess(profile.connectionId, now(), error) == 1) { "SimpleFIN connection changed during sync" }
+                check(dao.recordSuccess(profile.connectionId, now(), error) == 1) {
+                    "SimpleFIN connection changed during sync"
+                }
             }
             SimpleFinSyncResult.Success(writeResult.inserted, writeResult.updated, writeResult.skipped)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            val failure = SimpleFinSyncResult.Failure(e.userMessage(), e.retryable())
-            if (e is SimpleFinReconnectException) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            val result = failure.toSyncFailure()
+            if (failure.failureKind() == SimpleFinFailureKind.AUTHENTICATION) {
                 markReconnectRequired(profile.connectionId)
-            } else {
-                if (dao.recordFailure(profile.connectionId, e.userMessage()) != 1) return failure
+            } else if (dao.recordFailure(profile.connectionId, result.message) != 1) {
+                return result
             }
-            failure
+            result
         }
     }
 
-    suspend fun syncIfStale(): SimpleFinSyncResult {
-        return syncMutex.withLock { syncNowLocked(bypassEligibility = false) }
-    }
+    suspend fun syncIfStale(): SimpleFinSyncResult = syncMutex.withLock { syncNowLocked(bypassEligibility = false) }
 
     suspend fun updateAutomaticSyncsPerDay(count: Int) {
         require(isValidAutomaticSyncsPerDay(count)) { "Automatic syncs per day must be between 1 and 12" }
@@ -207,32 +274,123 @@ class SimpleFinSyncRepository internal constructor(
     suspend fun disconnect() {
         lifecycleMutex.withLock {
             withContext(NonCancellable) {
-                pendingConnectionId = null
+                activeConnectionId = null
                 db.withTransaction {
                     db.simpleFinDao().clearProfile()
                     db.simpleFinDao().clearAccounts()
                 }
                 functions.deleteCredential()
+                functions.deletePendingCredential()
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
                 functions.cancelWork()
             }
         }
     }
 
-    private suspend fun readCredential(connectionId: String): String {
-        val accessUrl = try {
-            functions.readCredential(connectionId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
+    private suspend fun beginConnection(connectionId: String): SimpleFinSyncResult.Failure? =
+        lifecycleMutex.withLock {
+            if (activeConnectionId != null) return@withLock connectionInProgressFailure()
+            val pending =
+                try {
+                    functions.readPendingCredential()
+                } catch (failure: Throwable) {
+                    return@withLock failure.toConnectFailure()
+                }
+            if (pending != null) {
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.RETRY_AVAILABLE
+                return@withLock pendingConnectionExistsFailure()
+            }
+            activeConnectionId = connectionId
+            mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
             null
         }
-        if (accessUrl.isNullOrBlank()) {
-            throw SimpleFinReconnectException()
+
+    private suspend fun finishPendingConnection(
+        connectionId: String,
+        accessUrl: String,
+        previous: PreviousConnection,
+    ): SimpleFinSyncResult =
+        try {
+            val fetchedAt = now()
+            val end = TimeUnit.MILLISECONDS.toSeconds(fetchedAt)
+            val initial = functions.accounts(accessUrl, end - TimeUnit.DAYS.toSeconds(90), end)
+            if (initial.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
+            val mapped = SimpleFinMapper.map(connectionId, initial.accounts)
+            val warning =
+                (mapped.warnings + listOfNotNull(nonUsdMessage(initial.accounts)))
+                    .joinToString("; ")
+                    .ifBlank { null }
+            var writeResult = SyncedTransactionWriteResult(0, 0, 0)
+            lifecycleMutex.withLock {
+                check(activeConnectionId == connectionId) { "SimpleFIN connection was cancelled" }
+                val staged = functions.readPendingCredential()
+                check(staged?.connectionId == connectionId && staged.accessUrl == accessUrl) {
+                    "SimpleFIN pending credential changed"
+                }
+                functions.promotePendingCredential(connectionId)
+                check(functions.readCredential(connectionId) == accessUrl) {
+                    "SimpleFIN credential promotion failed verification"
+                }
+                val profile =
+                    SimpleFinProfileEntity(
+                        connectionId = connectionId,
+                        connectedAtEpochMillis = fetchedAt,
+                        lastSyncAttemptAtEpochMillis = fetchedAt,
+                        lastSuccessfulSyncAtEpochMillis = fetchedAt,
+                        lastError = warning,
+                    )
+                functions.scheduleWork(profile.automaticSyncsPerDay)
+                db.withTransaction {
+                    db.simpleFinDao().clearProfile()
+                    db.simpleFinDao().clearAccounts()
+                    writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
+                    db.simpleFinDao().upsertAccounts(mapped.accounts)
+                    db.simpleFinDao().upsertProfile(profile)
+                }
+
+                // Publication is complete. A cleanup failure is recovered on the next repository start.
+                try {
+                    functions.deletePendingCredential()
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
+                } catch (_: Throwable) {
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.UNKNOWN
+                }
+            }
+            SimpleFinSyncResult.Success(writeResult.inserted, writeResult.updated, writeResult.skipped)
+        } catch (cancelled: CancellationException) {
+            compensateConnect(connectionId, previous)
+            throw cancelled
+        } catch (failure: Throwable) {
+            compensateConnect(connectionId, previous)
+            if (failure.failureKind() == SimpleFinFailureKind.AUTHENTICATION) {
+                deleteRejectedPendingConnection(connectionId)
+            }
+            failure.toConnectFailure(pendingRetryAvailable = true)
         }
-        return runCatching {
+
+    private suspend fun previousConnection(): PreviousConnection {
+        val oldProfile = db.simpleFinDao().getProfile()
+        return PreviousConnection(
+            profile = oldProfile,
+            accounts = db.simpleFinDao().observeAccounts().first(),
+            credential = oldProfile?.let { functions.readCredential(it.connectionId) },
+        )
+    }
+
+    private suspend fun readCredential(connectionId: String): String {
+        val accessUrl =
+            try {
+                functions.readCredential(connectionId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                null
+            }
+        if (accessUrl.isNullOrBlank()) throw SimpleFinReconnectException()
+        return try {
             SimpleFinClient.validateAccessUrl(accessUrl)
             accessUrl
-        }.getOrElse {
+        } catch (_: Throwable) {
             throw SimpleFinReconnectException()
         }
     }
@@ -245,28 +403,55 @@ class SimpleFinSyncRepository internal constructor(
         }
     }
 
-    private suspend fun compensateConnect(connectionId: String, previous: PreviousConnection?) = withContext(NonCancellable) {
+    private suspend fun compensateConnect(
+        connectionId: String,
+        previous: PreviousConnection,
+    ) = withContext(NonCancellable) {
         lifecycleMutex.withLock {
-            if (pendingConnectionId != connectionId) return@withLock
-            val stateRestored = runCatching {
-                db.withTransaction {
-                    db.simpleFinDao().clearProfile()
-                    db.simpleFinDao().clearAccounts()
-                    previous?.profile?.let { db.simpleFinDao().upsertProfile(it) }
-                    previous?.accounts?.takeIf { it.isNotEmpty() }?.let { db.simpleFinDao().upsertAccounts(it) }
-                    true
-                }
-            }.getOrDefault(false)
+            if (activeConnectionId != connectionId) return@withLock
+            val stateRestored =
+                runCatching {
+                    db.withTransaction {
+                        db.simpleFinDao().clearProfile()
+                        db.simpleFinDao().clearAccounts()
+                        previous.profile?.let { db.simpleFinDao().upsertProfile(it) }
+                        previous.accounts.takeIf { it.isNotEmpty() }?.let { db.simpleFinDao().upsertAccounts(it) }
+                        true
+                    }
+                }.getOrDefault(false)
             if (!stateRestored) return@withLock
             runCatching { functions.deleteCredential() }
-            if (previous?.profile != null && previous.credential != null) {
+            if (previous.profile != null && previous.credential != null) {
                 runCatching { functions.saveCredential(previous.profile.connectionId, previous.credential) }
                 runCatching { functions.scheduleWork(previous.profile.automaticSyncsPerDay) }
             } else {
                 runCatching { functions.cancelWork() }
             }
+            mutablePendingConnectionState.value =
+                if (runCatching { functions.readPendingCredential() }.getOrNull() == null) {
+                    SimpleFinPendingConnectionState.NONE
+                } else {
+                    SimpleFinPendingConnectionState.RETRY_AVAILABLE
+                }
         }
     }
+
+    private suspend fun deleteRejectedPendingConnection(connectionId: String) =
+        withContext(NonCancellable) {
+            lifecycleMutex.withLock {
+                val pending = runCatching { functions.readPendingCredential() }.getOrNull()
+                if (pending?.connectionId != connectionId) return@withLock
+                runCatching { functions.deletePendingCredential() }
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
+            }
+        }
+
+    private suspend fun clearActiveConnection(connectionId: String) =
+        withContext(NonCancellable) {
+            lifecycleMutex.withLock {
+                if (activeConnectionId == connectionId) activeConnectionId = null
+            }
+        }
 
     private data class PreviousConnection(
         val profile: SimpleFinProfileEntity?,
@@ -275,26 +460,131 @@ class SimpleFinSyncRepository internal constructor(
     )
 
     private fun nonUsdMessage(accounts: List<SimpleFinAccount>): String? =
-        accounts.filterNot { it.currency.equals("USD", ignoreCase = true) }
+        accounts
+            .filterNot { it.currency.equals("USD", ignoreCase = true) }
             .takeIf { it.isNotEmpty() }
             ?.joinToString { "Skipped ${it.name}: ${it.currency ?: "missing currency"}" }
 
-    private fun Throwable.userMessage(): String = when (this) {
-        is SimpleFinTransientException -> message ?: "SimpleFIN sync failed"
-        is SimpleFinReconnectException -> message ?: "SimpleFIN reconnect required"
-        is SimpleFinQuotaException -> message ?: "SimpleFIN payment or quota issue"
-        is SimpleFinException -> message ?: "SimpleFIN error"
-        else -> "SimpleFIN sync failed"
+    private fun Throwable.toConnectFailure(pendingRetryAvailable: Boolean = false): SimpleFinSyncResult.Failure {
+        val classified = classifyFailure()
+        val message =
+            when (classified.kind) {
+                SimpleFinFailureKind.MALFORMED_TOKEN -> {
+                    "This SimpleFIN setup token is invalid. Create a new setup token and try again."
+                }
+
+                SimpleFinFailureKind.AUTHENTICATION -> {
+                    "SimpleFIN rejected this connection. Start over with a new setup token."
+                }
+
+                SimpleFinFailureKind.TIMEOUT -> {
+                    if (pendingRetryAvailable) {
+                        "SimpleFIN timed out while connecting. Retry the pending connection."
+                    } else {
+                        "SimpleFIN timed out while claiming the setup token. Create a new setup token and try again."
+                    }
+                }
+
+                SimpleFinFailureKind.NETWORK -> {
+                    if (pendingRetryAvailable) {
+                        "SimpleFIN could not be reached while connecting. Retry the pending connection."
+                    } else {
+                        "SimpleFIN could not claim the setup token. Create a new setup token and try again."
+                    }
+                }
+
+                SimpleFinFailureKind.TLS -> {
+                    "SimpleFIN could not establish a secure connection. Start over or try again later."
+                }
+
+                SimpleFinFailureKind.RATE_LIMIT -> {
+                    if (pendingRetryAvailable) {
+                        "SimpleFIN is temporarily limiting connections. Retry the pending connection later."
+                    } else {
+                        "SimpleFIN could not claim the setup token. Create a new setup token and try again later."
+                    }
+                }
+
+                SimpleFinFailureKind.PROVIDER_5XX -> {
+                    if (pendingRetryAvailable) {
+                        "SimpleFIN is temporarily unavailable. Retry the pending connection."
+                    } else {
+                        "SimpleFIN could not claim the setup token. Create a new setup token and try again later."
+                    }
+                }
+
+                SimpleFinFailureKind.PROTOCOL -> {
+                    "SimpleFIN returned an invalid connection response. Start over or try again later."
+                }
+
+                SimpleFinFailureKind.UNKNOWN -> {
+                    "SimpleFIN could not finish connecting. Start over or try again."
+                }
+            }
+        return SimpleFinSyncResult.Failure(
+            message = message,
+            retryable = classified.retryable && pendingRetryAvailable,
+            kind = classified.kind,
+        )
     }
 
-    private fun Throwable.retryable(): Boolean = this is SimpleFinTransientException || this is IOException
+    private fun Throwable.toSyncFailure(): SimpleFinSyncResult.Failure {
+        val classified = classifyFailure()
+        val message =
+            when (classified.kind) {
+                SimpleFinFailureKind.MALFORMED_TOKEN -> "SimpleFIN credentials are invalid. Reconnect SimpleFIN."
+                SimpleFinFailureKind.AUTHENTICATION -> "Reconnect SimpleFIN to sync."
+                SimpleFinFailureKind.TIMEOUT -> "SimpleFIN sync timed out."
+                SimpleFinFailureKind.NETWORK -> "SimpleFIN could not be reached."
+                SimpleFinFailureKind.TLS -> "SimpleFIN could not establish a secure connection."
+                SimpleFinFailureKind.RATE_LIMIT -> "SimpleFIN is temporarily limiting sync requests."
+                SimpleFinFailureKind.PROVIDER_5XX -> "SimpleFIN is temporarily unavailable."
+                SimpleFinFailureKind.PROTOCOL -> "SimpleFIN returned an invalid sync response."
+                SimpleFinFailureKind.UNKNOWN -> "SimpleFIN sync failed."
+            }
+        return SimpleFinSyncResult.Failure(message, classified.retryable, classified.kind)
+    }
+
+    private fun Throwable.failureKind(): SimpleFinFailureKind = classifyFailure().kind
+
+    private fun Throwable.classifyFailure(): ClassifiedFailure =
+        when (this) {
+            is SimpleFinException -> ClassifiedFailure(kind, retryable)
+            is SocketTimeoutException -> ClassifiedFailure(SimpleFinFailureKind.TIMEOUT, retryable = true)
+            is SSLException -> ClassifiedFailure(SimpleFinFailureKind.TLS, retryable = false)
+            is IOException -> ClassifiedFailure(SimpleFinFailureKind.NETWORK, retryable = true)
+            else -> ClassifiedFailure(SimpleFinFailureKind.UNKNOWN, retryable = false)
+        }
+
+    private data class ClassifiedFailure(
+        val kind: SimpleFinFailureKind,
+        val retryable: Boolean,
+    )
+
+    private fun connectionInProgressFailure() =
+        SimpleFinSyncResult.Failure(
+            message = "A SimpleFIN connection is already in progress.",
+            kind = SimpleFinFailureKind.PROTOCOL,
+        )
+
+    private fun pendingConnectionExistsFailure() =
+        SimpleFinSyncResult.Failure(
+            message = "A SimpleFIN connection is waiting to retry. Retry it or start over.",
+            kind = SimpleFinFailureKind.PROTOCOL,
+        )
+
+    private fun noPendingConnectionFailure() =
+        SimpleFinSyncResult.Failure(
+            message = "There is no pending SimpleFIN connection to retry.",
+            kind = SimpleFinFailureKind.PROTOCOL,
+        )
 
     private fun now() = functions.now()
 
     private companion object {
         val lifecycleMutex = Mutex()
         val syncMutex = Mutex()
-        var pendingConnectionId: String? = null
+        var activeConnectionId: String? = null
 
         fun productionFunctions(context: Context): SimpleFinSyncFunctions {
             val appContext = context.applicationContext
@@ -310,6 +600,18 @@ class SimpleFinSyncRepository internal constructor(
                     withContext(Dispatchers.IO) { credentialStore.read(connectionId) }
                 },
                 deleteCredential = { withContext(Dispatchers.IO) { credentialStore.delete() } },
+                stagePendingCredential = { connectionId, accessUrl ->
+                    withContext(Dispatchers.IO) { credentialStore.stage(connectionId, accessUrl) }
+                },
+                readPendingCredential = {
+                    withContext(Dispatchers.IO) { credentialStore.readPending() }
+                },
+                promotePendingCredential = { connectionId ->
+                    withContext(Dispatchers.IO) { credentialStore.promotePending(connectionId) }
+                },
+                deletePendingCredential = {
+                    withContext(Dispatchers.IO) { credentialStore.deletePending() }
+                },
                 scheduleWork = { SimpleFinSyncWorker.schedule(appContext, it) },
                 cancelWork = { SimpleFinSyncWorker.cancel(appContext) },
                 now = System::currentTimeMillis,

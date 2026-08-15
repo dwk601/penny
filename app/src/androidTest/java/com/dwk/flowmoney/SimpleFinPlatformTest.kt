@@ -4,13 +4,16 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 
 @RunWith(AndroidJUnit4::class)
 class SimpleFinPlatformTest {
@@ -23,7 +26,7 @@ class SimpleFinPlatformTest {
 
     @Test
     fun keystoreCredentialPersistsAcrossStoreRecreationAndRejectsWrongIdentityAndCorruption() {
-        val file = File(context.noBackupFilesDir, "simplefin_access_url.bin")
+        val file = File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME)
         file.deleteRecursively()
         val first = SimpleFinCredentialStore(context)
         first.save("connection-a", ACCESS_URL)
@@ -41,7 +44,7 @@ class SimpleFinPlatformTest {
 
     @Test
     fun keystoreCredentialDeleteReportsFilesystemFailure() {
-        val file = File(context.noBackupFilesDir, "simplefin_access_url.bin")
+        val file = File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME)
         file.deleteRecursively()
         try {
             assertTrue(file.mkdir())
@@ -56,21 +59,112 @@ class SimpleFinPlatformTest {
     }
 
     @Test
+    fun pendingCredentialIsEncryptedPromotedWithoutEarlyDeletionAndExplicitlyDeleted() {
+        val credentialFile = File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME)
+        val pendingFile = File(context.noBackupFilesDir, SimpleFinCredentialStore.PENDING_FILE_NAME)
+        credentialFile.deleteRecursively()
+        pendingFile.deleteRecursively()
+        val store = SimpleFinCredentialStore(context)
+        try {
+            store.stage("pending-connection", ACCESS_URL)
+
+            assertTrue(pendingFile.isFile)
+            assertFalse(pendingFile.readBytes().containsSubsequence(ACCESS_URL.toByteArray(StandardCharsets.UTF_8)))
+            assertEquals(
+                SimpleFinPendingCredential("pending-connection", ACCESS_URL),
+                SimpleFinCredentialStore(context).readPending(),
+            )
+            assertNull(store.read("pending-connection"))
+
+            store.promotePending("pending-connection")
+
+            assertTrue(pendingFile.exists())
+            assertEquals(ACCESS_URL, store.read("pending-connection"))
+            assertFalse(credentialFile.readBytes().containsSubsequence(ACCESS_URL.toByteArray(StandardCharsets.UTF_8)))
+
+            val stagedBytes = pendingFile.readBytes()
+            pendingFile.writeBytes(credentialFile.readBytes())
+            assertNull(store.readPending())
+            pendingFile.writeBytes(stagedBytes)
+            assertEquals("pending-connection", store.readPending()?.connectionId)
+
+            store.deletePending()
+            assertFalse(pendingFile.exists())
+            assertEquals(ACCESS_URL, store.read("pending-connection"))
+
+            store.delete()
+            assertFalse(credentialFile.exists())
+        } finally {
+            credentialFile.deleteRecursively()
+            pendingFile.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun setupTokenBoundsBase64Utf8AndHttpsValidationAreStrict() {
+        val client = SimpleFinClient()
+        val claimUrl = "https://example.com/claim?token=~aa"
+        val bytes = claimUrl.toByteArray(StandardCharsets.UTF_8)
+        val standard = Base64.getEncoder().encodeToString(bytes)
+        val urlSafe = Base64.getUrlEncoder().encodeToString(bytes)
+        assertTrue(standard.contains('+'))
+        assertTrue(urlSafe.contains('-'))
+        assertEquals(claimUrl, client.decodeSetupToken(standard))
+        assertEquals(claimUrl, client.decodeSetupToken(urlSafe))
+
+        val exactLimitUrl =
+            "https://example.com/" +
+                "x".repeat(SimpleFinClient.MAX_SETUP_CLAIM_URL_BYTES - "https://example.com/".length)
+        val exactLimitToken = Base64.getEncoder().encodeToString(exactLimitUrl.toByteArray(StandardCharsets.UTF_8))
+        assertEquals(SimpleFinClient.MAX_SETUP_TOKEN_ENCODED_CHARS, exactLimitToken.length)
+        assertEquals(exactLimitUrl, client.decodeSetupToken(exactLimitToken))
+
+        fun assertMalformed(token: String) {
+            val failure = assertThrows(SimpleFinException::class.java) { client.decodeSetupToken(token) }
+            assertEquals(SimpleFinFailureKind.MALFORMED_TOKEN, failure.kind)
+        }
+
+        assertMalformed("A".repeat(SimpleFinClient.MAX_SETUP_TOKEN_ENCODED_CHARS + 1))
+        assertMalformed("%%%not-base64%%%")
+        assertMalformed(Base64.getEncoder().encodeToString(byteArrayOf(0xC3.toByte())))
+        assertMalformed(Base64.getEncoder().encodeToString("http://example.com/claim".toByteArray()))
+        assertMalformed(Base64.getEncoder().encodeToString("https:///missing-host".toByteArray()))
+        assertMalformed(Base64.getEncoder().encodeToString("https://user:pass@example.com/claim".toByteArray()))
+
+        assertThrows(SimpleFinException::class.java) {
+            SimpleFinClient.validateAccessUrl("http://user:pass@example.com/simplefin")
+        }
+        assertThrows(SimpleFinException::class.java) {
+            SimpleFinClient.validateAccessUrl("https://example.com/simplefin")
+        }
+    }
+
+    @Test
     fun parsesBridgeV2StructuredErrorsWithoutDiscardingAccounts() {
-        val result = SimpleFinClient().parseAccounts(
-            """{
-                "errors":[],
-                "errlist":[{"type":"act.failed","account":"broken"},{"type":"con.auth"}],
-                "accounts":[{
-                    "conn_id":"provider-connection","id":"working","name":"Working","currency":"USD",
-                    "transactions":[{"id":"tx","posted":1700000000,"amount":"-1.00","description":"Shop"}]
-                }]
-            }""".trimIndent(),
-        )
+        val result =
+            SimpleFinClient().parseAccounts(
+                """
+                {
+                    "errors":[],
+                    "errlist":[{"type":"act.failed","account":"broken"},{"type":"con.auth"}],
+                    "accounts":[{
+                        "conn_id":"provider-connection","id":"working","name":"Working","currency":"USD",
+                        "transactions":[{"id":"tx","posted":1700000000,"amount":"-1.00","description":"Shop"}]
+                    }]
+                }
+                """.trimIndent(),
+            )
 
         assertEquals(1, result.accounts.size)
         assertEquals("provider-connection", result.accounts.single().providerConnectionId)
-        assertEquals("tx", result.accounts.single().transactions.single().id)
+        assertEquals(
+            "tx",
+            result.accounts
+                .single()
+                .transactions
+                .single()
+                .id,
+        )
         assertEquals(2, result.errors.size)
         assertTrue(result.errors.joinToString().contains("act.failed"))
         assertTrue(result.errors.joinToString().contains("con.auth"))
@@ -95,10 +189,18 @@ class SimpleFinPlatformTest {
 
         val countError = assertThrows(SimpleFinException::class.java) { client.parseErrors(errors(101)) }
         assertEquals("SimpleFIN response exceeds allowed limits", countError.message)
-        val stringError = assertThrows(SimpleFinException::class.java) {
-            client.parseErrors("""{"errors":["${"e".repeat(16_385)}"]}""")
-        }
+        val stringError =
+            assertThrows(SimpleFinException::class.java) {
+                client.parseErrors("""{"errors":["${"e".repeat(16_385)}"]}""")
+            }
         assertEquals("SimpleFIN response exceeds allowed limits", stringError.message)
+    }
+
+    private fun ByteArray.containsSubsequence(candidate: ByteArray): Boolean {
+        if (candidate.isEmpty() || candidate.size > size) return false
+        return (0..size - candidate.size).any { start ->
+            candidate.indices.all { offset -> this[start + offset] == candidate[offset] }
+        }
     }
 
     private companion object {

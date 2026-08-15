@@ -7,11 +7,19 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 
 internal class InputTooLargeException : IOException("Input exceeds size limit")
+
 internal class MalformedUtf8Exception : IOException("Input is not valid UTF-8")
-internal class InputReadException : IOException("Input could not be read")
+
+internal class InputReadException(
+    cause: IOException? = null,
+) : IOException("Input could not be read", cause)
 
 internal object StrictUtf8Reader {
-    fun read(input: InputStream, maxBytes: Int, advertisedLength: Long = -1): String {
+    fun read(
+        input: InputStream,
+        maxBytes: Int,
+        advertisedLength: Long = -1,
+    ): String {
         require(maxBytes >= 0)
         return try {
             input.use { stream ->
@@ -35,7 +43,8 @@ internal object StrictUtf8Reader {
                     }
                 }
                 try {
-                    Charsets.UTF_8.newDecoder()
+                    Charsets.UTF_8
+                        .newDecoder()
                         .onMalformedInput(CodingErrorAction.REPORT)
                         .onUnmappableCharacter(CodingErrorAction.REPORT)
                         .decode(java.nio.ByteBuffer.wrap(out.toByteArray()))
@@ -47,7 +56,7 @@ internal object StrictUtf8Reader {
         } catch (error: IOException) {
             when (error) {
                 is InputTooLargeException, is MalformedUtf8Exception, is InputReadException -> throw error
-                else -> throw InputReadException()
+                else -> throw InputReadException(error)
             }
         }
     }
