@@ -122,35 +122,101 @@ Additional assumptions and limitations:
   ./gradlew connectedDebugAndroidTest
   ```
 
-  Only an API 34+ picker state-assertion failure can retain a hierarchy
-  artifact. It has mode `0600` in the instrumentation test APK's private
-  storage, not Penny's storage, and is not part of the release fingerprint.
-  Below API 34, no hierarchy artifact is written; the failed assertion reports
+  On API 34+, a picker state-assertion failure can retain a hierarchy artifact.
+  It has mode `0600` in the instrumentation test APK's private storage, not
+  Penny's storage, and is not part of the release fingerprint. The deliberate
+  artifact mode/cleanup self-test also creates an artifact, but its `finally`
+  block always removes that generated file even when a permission or location
+  assertion fails; it does not provide a retained artifact for retrieval. Below
+  API 34, no hierarchy artifact is written; the failed assertion reports
   `UnsupportedApi` and `Hierarchy artifact: none` instead.
 
-  Retrieve an API 34+ artifact immediately, using its UUID-bearing basename
-  from the assertion and an existing mode-`0700` host evidence directory.
-  Replace `SERIAL`, `ARTIFACT_UUID`, and the destination as appropriate:
+  Retrieve an API 34+ failure artifact immediately, using its exact UUID-bearing
+  basename from the assertion and an existing mode-`0700` host evidence
+  directory. Replace the example serial, artifact basename, and destination
+  directory as appropriate. The package is fixed, and the basename check must
+  pass before the value is used in a device command:
 
   ```bash
   (
     set -eu
     umask 077
-    ARTIFACT='picker-hierarchy-ARTIFACT_UUID.xml'
-    DEST='/secure/evidence/picker-hierarchy-ARTIFACT_UUID.xml'
+    SERIAL='emulator-5554'
+    ARTIFACT='picker-hierarchy-01234567-89ab-4cde-8f01-23456789abcd.xml'
+    DEST_DIR='/secure/evidence'
+
+    if [[ ! "$ARTIFACT" =~ ^picker-hierarchy-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.xml$ ]]; then
+      printf '%s\n' 'Invalid picker hierarchy artifact basename' >&2
+      exit 1
+    fi
+
+    python3 - "$DEST_DIR" <<'PY'
+  import os
+  import stat
+  import sys
+
+  path = sys.argv[1]
+  try:
+      metadata = os.stat(path)
+  except OSError:
+      raise SystemExit("Destination evidence directory is unavailable") from None
+  if not stat.S_ISDIR(metadata.st_mode):
+      raise SystemExit("Destination evidence path is not a directory")
+  if stat.S_IMODE(metadata.st_mode) != 0o700:
+      raise SystemExit("Destination evidence directory mode is not 0700")
+  PY
+
+    adb -s "$SERIAL" shell -T run-as com.dwk.flowmoney.test \
+      test -f "files/$ARTIFACT"
+    REMOTE_SIZE="$(
+      adb -s "$SERIAL" shell -T run-as com.dwk.flowmoney.test \
+        stat -c %s "files/$ARTIFACT"
+    )"
+    REMOTE_SIZE="${REMOTE_SIZE%$'\r'}"
+    if [[ ! "$REMOTE_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+      printf '%s\n' 'Invalid device artifact size' >&2
+      exit 1
+    fi
+
+    DEST="$DEST_DIR/$ARTIFACT"
+    test ! -e "$DEST"
     TMP="$(mktemp "${DEST}.tmp.XXXXXX")"
     trap 'rm -f -- "$TMP"' EXIT HUP INT TERM
-    adb -s SERIAL exec-out run-as com.dwk.flowmoney.test \
-      cat "files/$ARTIFACT" >"$TMP"
-    test -s "$TMP"
+
+    # exec-out is only the raw byte transport; its status is not evidence that
+    # run-as or cat succeeded. The status-bearing checks above and validations
+    # below establish whether retrieval succeeded.
+    adb -s "$SERIAL" exec-out run-as com.dwk.flowmoney.test \
+      cat "files/$ARTIFACT" >"$TMP" || :
+
+    python3 - "$TMP" "$REMOTE_SIZE" <<'PY'
+  import os
+  import sys
+  import xml.etree.ElementTree as ElementTree
+
+  path = sys.argv[1]
+  expected_size = int(sys.argv[2])
+  if os.path.getsize(path) != expected_size:
+      raise SystemExit("Artifact byte count differs from the device stat")
+
+  try:
+      root = ElementTree.parse(path).getroot()
+  except (OSError, ElementTree.ParseError):
+      raise SystemExit("Artifact is not one complete XML document") from None
+  if root.tag != "hierarchy":
+      raise SystemExit("Artifact XML root is not <hierarchy>")
+  PY
+
     mv -- "$TMP" "$DEST"
     trap - EXIT HUP INT TERM
   )
   ```
 
-  The test APK retains the artifact only until the next test starts, when its
-  cleanup removes it. Retrieve it before rerunning or starting another test;
-  an automatically continuing test run may reach that cleanup first.
+  A picker state failure's retained on-device copy persists only until the next
+  `DataOperationE2ETest` starts, when that test's setup removes stale picker
+  artifacts. Retrieve it before rerunning that class. An automatically
+  continuing class run may start its next test and delete the state-failure copy
+  before the run returns control.
 
 - [ ] Run the focused SimpleFIN lifecycle suite and retain results:
 
