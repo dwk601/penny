@@ -1,7 +1,7 @@
 package com.dwk.flowmoney
 
-import androidx.room.Dao
 import androidx.room.ColumnInfo
+import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -37,6 +37,7 @@ data class SimpleFinAccountEntity(
 data class SimpleFinIgnoredTransactionEntity(
     @PrimaryKey val transactionId: String,
     val ignoredAtEpochMillis: Long = System.currentTimeMillis(),
+    val occurredAtEpochMillis: Long? = null,
 )
 
 @Dao
@@ -53,20 +54,39 @@ interface SimpleFinDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertProfile(profile: SimpleFinProfileEntity)
 
-    @Query("UPDATE simplefin_profile SET lastSyncAttemptAtEpochMillis = :time, lastError = NULL WHERE id = 'default' AND connectionId = :connectionId")
-    suspend fun recordAttempt(connectionId: String, time: Long): Int
+    @Query(
+        "UPDATE simplefin_profile SET lastSyncAttemptAtEpochMillis = :time, lastError = NULL WHERE id = 'default' AND connectionId = :connectionId",
+    )
+    suspend fun recordAttempt(
+        connectionId: String,
+        time: Long,
+    ): Int
 
-    @Query("UPDATE simplefin_profile SET lastSuccessfulSyncAtEpochMillis = :time, lastError = :error WHERE id = 'default' AND connectionId = :connectionId")
-    suspend fun recordSuccess(connectionId: String, time: Long, error: String?): Int
+    @Query(
+        "UPDATE simplefin_profile SET lastSuccessfulSyncAtEpochMillis = :time, lastError = :error WHERE id = 'default' AND connectionId = :connectionId",
+    )
+    suspend fun recordSuccess(
+        connectionId: String,
+        time: Long,
+        error: String?,
+    ): Int
 
     @Query("UPDATE simplefin_profile SET lastError = :error WHERE id = 'default' AND connectionId = :connectionId")
-    suspend fun recordFailure(connectionId: String, error: String): Int
+    suspend fun recordFailure(
+        connectionId: String,
+        error: String,
+    ): Int
 
-    @Query("UPDATE simplefin_profile SET lastError = 'SimpleFIN reconnect required', isPaused = 1 WHERE id = 'default' AND connectionId = :connectionId")
+    @Query(
+        "UPDATE simplefin_profile SET lastError = 'SimpleFIN reconnect required', isPaused = 1 WHERE id = 'default' AND connectionId = :connectionId",
+    )
     suspend fun pauseForReconnect(connectionId: String): Int
 
     @Query("UPDATE simplefin_profile SET automaticSyncsPerDay = :count WHERE id = 'default' AND connectionId = :connectionId")
-    suspend fun updateAutomaticSyncsPerDay(connectionId: String, count: Int): Int
+    suspend fun updateAutomaticSyncsPerDay(
+        connectionId: String,
+        count: Int,
+    ): Int
 
     @Query("DELETE FROM simplefin_profile WHERE id = 'default' AND connectionId = :connectionId")
     suspend fun clearProfile(connectionId: String): Int
@@ -88,5 +108,4 @@ interface SimpleFinDao {
 
     @Query("DELETE FROM simplefin_ignored_transactions WHERE transactionId = :id")
     suspend fun deleteIgnored(id: String)
-
 }
