@@ -11,10 +11,13 @@ import android.os.SystemClock
 import androidx.annotation.RequiresApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SdkSuppress
@@ -37,6 +40,8 @@ import org.junit.runners.model.Statement
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
@@ -197,6 +202,157 @@ class DataOperationE2ETest {
             listOf(local, simpleFin),
             runBlocking {
                 FlowMoneyDatabase.get(context).transactionDao().getAll()
+            },
+        )
+    }
+
+    @Test
+    fun resetDaysEndToEndDeletesRangeAndUndoRestoresExactTransactionsAndTombstones() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val today = LocalDate.now()
+        val zoneId = ZoneId.systemDefault()
+        val start = today.atStartOfDay(zoneId).toInstant().toEpochMilli()
+        val end =
+            today
+                .plusDays(1)
+                .atStartOfDay(zoneId)
+                .toInstant()
+                .toEpochMilli()
+        val local =
+            TransactionEntity(
+                id = "range-local",
+                occurredAtEpochMillis = start,
+                merchant = "Manual row",
+                category = "Other",
+                note = "exact local note",
+                cents = -100,
+            )
+        val imported =
+            TransactionEntity(
+                id = "csv:v2:range-import",
+                occurredAtEpochMillis = start + 1,
+                merchant = "CSV row",
+                category = "Other",
+                note = "exact CSV note",
+                cents = 250,
+            )
+        val simpleFin =
+            TransactionEntity(
+                id = "simplefin:range-reset",
+                occurredAtEpochMillis = end - 1,
+                merchant = "Bank row",
+                category = "Other",
+                note = "exact bank note",
+                cents = -300,
+                source = "simplefin",
+                accountKey = "range-account",
+                accountName = "Checking",
+            )
+        val outside =
+            TransactionEntity(
+                id = "range-outside",
+                occurredAtEpochMillis = start - 1,
+                merchant = "Outside row",
+                category = "Other",
+                note = "must remain",
+                cents = -400,
+            )
+        val rangedTombstone =
+            SimpleFinIgnoredTransactionEntity(
+                transactionId = "simplefin:ranged-tombstone",
+                ignoredAtEpochMillis = 11,
+                occurredAtEpochMillis = start + 2,
+            )
+        val outsideTombstone =
+            SimpleFinIgnoredTransactionEntity(
+                transactionId = "simplefin:outside-tombstone",
+                ignoredAtEpochMillis = 22,
+                occurredAtEpochMillis = start - 1,
+            )
+        runBlocking {
+            FlowMoneyDatabase.get(context).apply {
+                simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "range-reset-e2e"))
+                transactionDao().upsertAll(listOf(local, imported, simpleFin, outside))
+                simpleFinDao().insertIgnored(rangedTombstone)
+                simpleFinDao().insertIgnored(outsideTombstone)
+            }
+        }
+        composeRule.activityRule.scenario.recreate()
+
+        openData()
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("simplefin_reset_days_picker_button"))
+        composeRule.onNodeWithTag("simplefin_reset_days_picker_button").performClick()
+        composeRule.onNodeWithTag("simplefin_reset_days_picker_dialog", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("OK").performClick()
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("simplefin_reset_days_count")
+                    .assertTextContains("4 items affected: 3 transactions + 1 deleted SimpleFIN record")
+            }.isSuccess
+        }
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("simplefin_reset_days_reset_button"))
+        composeRule.onNodeWithTag("simplefin_reset_days_reset_button").performClick()
+        composeRule
+            .onNodeWithTag("simplefin_reset_days_confirmation_count")
+            .assertTextContains("4 items affected", substring = true)
+        composeRule.onNodeWithTag("simplefin_reset_days_confirm_button").performClick()
+
+        composeRule.waitUntil(5_000) {
+            runBlocking {
+                FlowMoneyDatabase.get(context).transactionDao().getAll() == listOf(outside) &&
+                    FlowMoneyDatabase.get(context).simpleFinIdentityDao().tombstones() == listOf(outsideTombstone)
+            }
+        }
+        composeRule.onNodeWithTag("data_sheet_modal").assertDoesNotExist()
+        assertEquals(
+            listOf(outside),
+            runBlocking { FlowMoneyDatabase.get(context).transactionDao().getAll() },
+        )
+        assertEquals(
+            listOf(outsideTombstone),
+            runBlocking { FlowMoneyDatabase.get(context).simpleFinIdentityDao().tombstones() },
+        )
+
+        composeRule.onNodeWithText("Undo").assertIsDisplayed().performClick()
+        composeRule.waitUntil(5_000) {
+            runBlocking {
+                FlowMoneyDatabase
+                    .get(context)
+                    .transactionDao()
+                    .getAll()
+                    .toSet() ==
+                    setOf(local, imported, simpleFin, outside) &&
+                    FlowMoneyDatabase
+                        .get(context)
+                        .simpleFinIdentityDao()
+                        .tombstones()
+                        .toSet() ==
+                    setOf(rangedTombstone, outsideTombstone)
+            }
+        }
+        assertEquals(
+            setOf(local, imported, simpleFin, outside),
+            runBlocking {
+                FlowMoneyDatabase
+                    .get(context)
+                    .transactionDao()
+                    .getAll()
+                    .toSet()
+            },
+        )
+        assertEquals(
+            setOf(rangedTombstone, outsideTombstone),
+            runBlocking {
+                FlowMoneyDatabase
+                    .get(context)
+                    .simpleFinIdentityDao()
+                    .tombstones()
+                    .toSet()
             },
         )
     }
