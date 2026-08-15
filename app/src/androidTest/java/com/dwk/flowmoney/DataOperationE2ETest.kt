@@ -110,13 +110,15 @@ class DataOperationE2ETest {
         check(hierarchy.failureClass == null) { hierarchy.assertionMessage() }
         val artifact = File(requireNotNull(hierarchy.artifactPath))
 
-        // These commands run-as each package, proving the artifact is private test-package data
-        // rather than merely comparing two File objects constructed by this test.
-        assertEquals("700", privateStorageDirectoryMode(instrumentationContext))
-        assertEquals("600", privateHierarchyArtifactMode(instrumentationContext, artifact.name))
-        assertFalse(privateHierarchyArtifactsExist(instrumentation.targetContext))
-
-        cleanPickerHierarchyArtifacts(instrumentationContext)
+        try {
+            // These commands run-as each package, proving the artifact is private test-package data
+            // rather than merely comparing two File objects constructed by this test.
+            assertEquals("700", privateStorageDirectoryMode(instrumentationContext))
+            assertEquals("600", privateHierarchyArtifactMode(instrumentationContext, artifact.name))
+            assertFalse(privateHierarchyArtifactsExist(instrumentation.targetContext))
+        } finally {
+            cleanPickerHierarchyArtifacts(instrumentationContext)
+        }
         assertFalse(privateHierarchyArtifactExists(instrumentationContext, artifact.name))
     }
 
