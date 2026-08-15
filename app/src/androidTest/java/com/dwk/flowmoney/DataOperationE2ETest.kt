@@ -77,7 +77,18 @@ class DataOperationE2ETest {
     }
 
     @Test
+    @SdkSuppress(maxSdkVersion = HIERARCHY_ARTIFACT_MIN_API - 1)
     fun hierarchyArtifactApiFloorReturnsSanitizedUnsupportedResult() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val hierarchy = writeWindowHierarchy(UiDevice.getInstance(instrumentation))
+
+        assertNull(hierarchy.artifactPath)
+        assertEquals("UnsupportedApi", hierarchy.failureClass)
+        assertEquals(UNSUPPORTED_HIERARCHY_REASON, hierarchy.failureReason)
+    }
+
+    @Test
+    fun hierarchyApiFloorPureBranchReturnsSanitizedUnsupportedResult() {
         val hierarchy =
             requireNotNull(hierarchyApiFloorFailure(HIERARCHY_ARTIFACT_MIN_API - 1))
 
@@ -88,7 +99,7 @@ class DataOperationE2ETest {
     }
 
     @Test
-    @SdkSuppress(minSdkVersion = 34)
+    @SdkSuppress(minSdkVersion = HIERARCHY_ARTIFACT_MIN_API)
     fun hierarchyArtifactsUseTestStoragePrivateModeAndCleanup() {
         if (Build.VERSION.SDK_INT < HIERARCHY_ARTIFACT_MIN_API) return
 
@@ -479,8 +490,12 @@ class DataOperationE2ETest {
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private fun privateHierarchyArtifactsExist(context: Context): Boolean =
-        executeTestStorageCommand(context, "find files -maxdepth 1 -type f -print")
-            .lineSequence()
+        executeTestStorageCommand(
+            context = context,
+            command = "sh",
+            standardInput =
+                "if [ -d files ]; then find files -maxdepth 1 -type f -print; fi\n",
+        ).lineSequence()
             .map { path -> File(path).name }
             .any { name -> name.startsWith(PICKER_HIERARCHY_PREFIX) }
 
@@ -500,6 +515,7 @@ class DataOperationE2ETest {
     private fun executeTestStorageCommand(
         context: Context,
         command: String,
+        standardInput: String? = null,
     ): String {
         val packageName = context.packageName.shellArgument()
         val descriptors =
@@ -511,7 +527,9 @@ class DataOperationE2ETest {
             descriptors.forEach { descriptor -> runCatching { descriptor.close() } }
             throw IOException("Private test storage command unavailable")
         }
-        ParcelFileDescriptor.AutoCloseOutputStream(descriptors[1]).use { }
+        ParcelFileDescriptor.AutoCloseOutputStream(descriptors[1]).use { input ->
+            standardInput?.let { input.write(it.toByteArray()) }
+        }
         val output =
             ParcelFileDescriptor.AutoCloseInputStream(descriptors[0]).bufferedReader().use { input ->
                 input.readText().trim()
