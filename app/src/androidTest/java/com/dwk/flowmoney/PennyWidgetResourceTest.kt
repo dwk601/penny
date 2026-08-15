@@ -39,6 +39,16 @@ class PennyWidgetResourceTest {
     }
 
     @Test
+    fun initialFrameUsesCompactRuntimeBackground() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val compactBackground = layoutRootResource(context, R.layout.widget_penny_compact, "background")
+        val initialBackground = layoutRootResource(context, R.layout.widget_penny_initial, "background")
+
+        assertEquals(R.drawable.widget_penny_compact_background, compactBackground)
+        assertEquals("initial and runtime compact backgrounds", compactBackground, initialBackground)
+    }
+
+    @Test
     fun pickerPreviewAndInitialFrameStayBoundedAndPrivacySafe() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val cases =
@@ -164,6 +174,9 @@ class PennyWidgetResourceTest {
             )
         }
         assertTextDoesNotOverlap(description, root, textViews)
+        if (case.layoutId == R.layout.widget_penny_initial) {
+            assertInitialTextGeometry(description, root, textViews, density)
+        }
         val expectedContentDescriptions =
             case.expectedContentDescriptions.mapValues { (_, stringId) -> context.getString(stringId) }
         val actualContentDescriptions =
@@ -223,11 +236,24 @@ class PennyWidgetResourceTest {
     private fun widgetInfoLayout(
         context: Context,
         attributeName: String,
+    ): Int = xmlRootResource(context, R.xml.penny_widget_info, "appwidget-provider", attributeName)
+
+    private fun layoutRootResource(
+        context: Context,
+        layoutId: Int,
+        attributeName: String,
+    ): Int = xmlRootResource(context, layoutId, "LinearLayout", attributeName)
+
+    private fun xmlRootResource(
+        context: Context,
+        xmlId: Int,
+        rootName: String,
+        attributeName: String,
     ): Int {
-        val parser = context.resources.getXml(R.xml.penny_widget_info)
+        val parser = context.resources.getXml(xmlId)
         try {
             while (parser.eventType != XmlPullParser.END_DOCUMENT) {
-                if (parser.eventType == XmlPullParser.START_TAG && parser.name == "appwidget-provider") {
+                if (parser.eventType == XmlPullParser.START_TAG && parser.name == rootName) {
                     return parser.getAttributeResourceValue(ANDROID_NAMESPACE, attributeName, 0)
                 }
                 parser.next()
@@ -290,6 +316,53 @@ class PennyWidgetResourceTest {
         }
     }
 
+    private fun assertInitialTextGeometry(
+        description: String,
+        root: ViewGroup,
+        textViews: List<TextView>,
+        density: Float,
+    ) {
+        val minimumPadding = dpToPx(MINIMUM_INITIAL_VERTICAL_PADDING_DP, density)
+        val maximumPadding = dpToPx(MAXIMUM_INITIAL_VERTICAL_PADDING_DP, density)
+        assertTrue(
+            "$description top padding ${root.paddingTop}px is outside the safe range",
+            root.paddingTop in minimumPadding..maximumPadding,
+        )
+        assertTrue(
+            "$description bottom padding ${root.paddingBottom}px is outside the safe range",
+            root.paddingBottom in minimumPadding..maximumPadding,
+        )
+
+        val radius = dpToPx(COMPACT_CORNER_RADIUS_DP, density)
+        textViews.forEach { textView ->
+            val bounds = descendantBounds(root, textView)
+            listOf(
+                bounds.left to bounds.top,
+                bounds.right to bounds.top,
+                bounds.left to bounds.bottom,
+                bounds.right to bounds.bottom,
+            ).forEach { (x, y) ->
+                val nearestX = x.coerceIn(radius, root.width - radius)
+                val nearestY = y.coerceIn(radius, root.height - radius)
+                val deltaX = x - nearestX
+                val deltaY = y - nearestY
+                assertTrue(
+                    "$description ${viewDescription(root.context, textView)} bounds $bounds " +
+                        "cross the ${COMPACT_CORNER_RADIUS_DP}dp rounded safe inset at ($x, $y)",
+                    deltaX * deltaX + deltaY * deltaY <= radius * radius,
+                )
+            }
+        }
+
+        val guidance = root.findViewById<TextView>(R.id.widget_initial_guidance)
+        assertEquals("$description guidance max lines", 2, guidance.maxLines)
+    }
+
+    private fun dpToPx(
+        dp: Int,
+        density: Float,
+    ): Int = (dp * density + 0.5f).toInt()
+
     private fun descendantBounds(
         root: ViewGroup,
         child: View,
@@ -321,5 +394,8 @@ class PennyWidgetResourceTest {
 
     companion object {
         private const val ANDROID_NAMESPACE = "http://schemas.android.com/apk/res/android"
+        private const val COMPACT_CORNER_RADIUS_DP = 8
+        private const val MINIMUM_INITIAL_VERTICAL_PADDING_DP = 2
+        private const val MAXIMUM_INITIAL_VERTICAL_PADDING_DP = 6
     }
 }

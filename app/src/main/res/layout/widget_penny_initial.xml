@@ -3,16 +3,18 @@
     android:id="@+id/widget_initial_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/widget_penny_card_background"
+    android:background="@drawable/widget_penny_compact_background"
     android:orientation="vertical"
     android:paddingLeft="8dp"
-    android:paddingRight="8dp">
+    android:paddingTop="2dp"
+    android:paddingRight="8dp"
+    android:paddingBottom="2dp">
 
     <TextView
         android:id="@+id/widget_initial_label"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="0.8"
+        android:layout_weight="1"
         android:autoSizeMaxTextSize="11sp"
         android:autoSizeMinTextSize="6sp"
         android:autoSizeStepGranularity="1sp"
@@ -27,7 +29,7 @@
         android:id="@+id/widget_initial_guidance"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1.2"
+        android:layout_weight="2"
         android:autoSizeMaxTextSize="14sp"
         android:autoSizeMinTextSize="6sp"
         android:autoSizeStepGranularity="1sp"
