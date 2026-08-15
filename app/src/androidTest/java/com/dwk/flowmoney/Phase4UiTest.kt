@@ -418,6 +418,11 @@ class Phase4UiTest {
         composeRule.onNodeWithTag("transaction_content_expense").performTouchInput { swipeLeft() }
         assertEquals(0, edits)
         assertEquals(1, deletes)
+
+        // A failed delete leaves the row in place; resetting the dismiss state must allow a retry.
+        composeRule.onNodeWithTag("transaction_content_expense").performTouchInput { swipeLeft() }
+        assertEquals(0, edits)
+        assertEquals(2, deletes)
     }
 
     private fun setEmptyScreen(

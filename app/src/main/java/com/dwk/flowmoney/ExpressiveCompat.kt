@@ -40,8 +40,15 @@ internal fun PennyOverviewTopAppBar(
     scrollBehavior: TopAppBarScrollBehavior? = null,
 ) {
     MediumFlexibleTopAppBar(
-        title = title,
-        subtitle = subtitle,
+        title = subtitle,
+        navigationIcon = {
+            Box(
+                modifier = Modifier.padding(start = 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                title()
+            }
+        },
         actions = {
             TextButton(
                 onClick = onData,

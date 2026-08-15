@@ -433,6 +433,7 @@ fun FlowMoneyApp(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val dataSnackbarHostState = remember { SnackbarHostState() }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
@@ -441,6 +442,7 @@ fun FlowMoneyApp(
     var originalEditorDraft by rememberSaveable(stateSaver = EditorDraftSaver) { mutableStateOf(newEditorDraft()) }
     var editorId by rememberSaveable { mutableStateOf<String?>(null) }
     var persistenceBusy by remember { mutableStateOf(false) }
+    var allowBusyEditorHide by remember { mutableStateOf(false) }
     var showDiscardDialog by rememberSaveable { mutableStateOf(false) }
     var pendingWidgetQuickAddAfterDiscard by rememberSaveable { mutableStateOf(false) }
     var lastHandledOpenAddSheetRequest by remember { mutableStateOf(0) }
@@ -454,7 +456,9 @@ fun FlowMoneyApp(
         rememberModalBottomSheetState(
             skipPartiallyExpanded = true,
             confirmValueChange = { target ->
-                if (target == androidx.compose.material3.SheetValue.Hidden && latestEditorDirty && !latestPersistenceBusy) {
+                if (target == androidx.compose.material3.SheetValue.Hidden && allowBusyEditorHide) {
+                    true
+                } else if (target == androidx.compose.material3.SheetValue.Hidden && latestEditorDirty && !latestPersistenceBusy) {
                     showDiscardDialog = true
                     false
                 } else {
@@ -503,7 +507,7 @@ fun FlowMoneyApp(
 
     fun deleteWithUndo(
         transaction: Transaction,
-        onDeleted: () -> Unit = {},
+        onDeleted: suspend () -> Unit = {},
     ) {
         val description = transaction.deleteDescription()
         scope.launch {
@@ -578,7 +582,15 @@ fun FlowMoneyApp(
         if (persistenceBusy) return
         persistenceBusy = true
         deleteWithUndo(transaction) {
-            if (closeEditor) showSheet = false
+            if (closeEditor) {
+                allowBusyEditorHide = true
+                try {
+                    editorSheetState.hide()
+                    showSheet = false
+                } finally {
+                    allowBusyEditorHide = false
+                }
+            }
         }
     }
 
@@ -619,7 +631,7 @@ fun FlowMoneyApp(
                 } finally {
                     dataOperation = null
                 }
-                snackbarHostState.showSnackbar(message)
+                dataSnackbarHostState.showSnackbar(message)
             }
         }
 
@@ -653,7 +665,7 @@ fun FlowMoneyApp(
                 } finally {
                     dataOperation = null
                 }
-                snackbarHostState.showSnackbar(message)
+                dataSnackbarHostState.showSnackbar(message)
             }
         }
 
@@ -777,6 +789,7 @@ fun FlowMoneyApp(
     if (showDataSheet) {
         DataSheetModal(
             operation = dataOperation,
+            snackbarHostState = dataSnackbarHostState,
             onDismissRequest = { showDataSheet = false },
         ) {
             DataSheet(
@@ -786,7 +799,7 @@ fun FlowMoneyApp(
                     if (dataOperation != null) return@DataSheet
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(SimpleFinCreateUrl))
                     runCatching { context.startActivity(intent) }
-                        .onFailure { scope.launch { snackbarHostState.showSnackbar("Could not open SimpleFIN") } }
+                        .onFailure { scope.launch { dataSnackbarHostState.showSnackbar("Could not open SimpleFIN") } }
                 },
                 onConnect = { token ->
                     if (dataOperation != null) return@DataSheet
@@ -806,7 +819,7 @@ fun FlowMoneyApp(
                         } finally {
                             dataOperation = null
                         }
-                        snackbarHostState.showSnackbar(message)
+                        dataSnackbarHostState.showSnackbar(message)
                     }
                 },
                 onRetryConnection = {
@@ -827,7 +840,7 @@ fun FlowMoneyApp(
                         } finally {
                             dataOperation = null
                         }
-                        snackbarHostState.showSnackbar(message)
+                        dataSnackbarHostState.showSnackbar(message)
                     }
                 },
                 onCancelPendingConnection = {
@@ -845,7 +858,7 @@ fun FlowMoneyApp(
                         } finally {
                             dataOperation = null
                         }
-                        snackbarHostState.showSnackbar(message)
+                        dataSnackbarHostState.showSnackbar(message)
                     }
                 },
                 onSync = {
@@ -866,7 +879,7 @@ fun FlowMoneyApp(
                         } finally {
                             dataOperation = null
                         }
-                        snackbarHostState.showSnackbar(message)
+                        dataSnackbarHostState.showSnackbar(message)
                     }
                 },
                 onAutomaticSyncsPerDayChange = { count ->
@@ -884,7 +897,7 @@ fun FlowMoneyApp(
                         } finally {
                             dataOperation = null
                         }
-                        snackbarHostState.showSnackbar(message)
+                        dataSnackbarHostState.showSnackbar(message)
                     }
                 },
                 onImport = {
@@ -894,7 +907,7 @@ fun FlowMoneyApp(
                             importLauncher.launch(arrayOf("text/*", "text/csv", "application/csv"))
                         }.onFailure {
                             dataOperation = null
-                            scope.launch { snackbarHostState.showSnackbar("Import failed") }
+                            scope.launch { dataSnackbarHostState.showSnackbar("Import failed") }
                         }
                     }
                 },
@@ -905,7 +918,7 @@ fun FlowMoneyApp(
                             exportLauncher.launch("penny-${LocalDate.now()}.csv")
                         }.onFailure {
                             dataOperation = null
-                            scope.launch { snackbarHostState.showSnackbar("Export failed") }
+                            scope.launch { dataSnackbarHostState.showSnackbar("Export failed") }
                         }
                     }
                 },
@@ -945,7 +958,7 @@ fun FlowMoneyApp(
                             } finally {
                                 dataOperation = null
                             }
-                            snackbarHostState.showSnackbar(message)
+                            dataSnackbarHostState.showSnackbar(message)
                         }
                     },
                     enabled = dataOperation == null,
@@ -967,6 +980,7 @@ fun FlowMoneyApp(
 internal fun DataSheetModal(
     operation: DataOperation?,
     onDismissRequest: () -> Unit,
+    snackbarHostState: SnackbarHostState? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val sheetState =
@@ -986,8 +1000,23 @@ internal fun DataSheetModal(
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier.testTag("data_sheet_modal"),
-        content = content,
-    )
+    ) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                content = content,
+            )
+            snackbarHostState?.let { hostState ->
+                SnackbarHost(
+                    hostState = hostState,
+                    modifier =
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
+        }
+    }
 }
 
 internal enum class DashboardTab(
@@ -1953,6 +1982,14 @@ internal fun DataSheet(
     var setupToken by remember { mutableStateOf("") }
     var automaticSyncsExpanded by rememberSaveable(profile?.connectionId, profile?.isPaused) { mutableStateOf(false) }
     val isBusy = operation != null
+
+    fun submitSetupToken() {
+        val token = setupToken.trim()
+        if (token.isNotBlank()) {
+            setupToken = ""
+            onConnect(token)
+        }
+    }
     val localDataSection: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             DataSheetSectionHeader("Import & export")
@@ -2111,6 +2148,12 @@ internal fun DataSheet(
                                     label = { Text("Setup token") },
                                     singleLine = true,
                                     enabled = !isBusy,
+                                    trailingIcon = {
+                                        TextButton(
+                                            onClick = ::submitSetupToken,
+                                            enabled = !isBusy && setupToken.isNotBlank(),
+                                        ) { Text("Connect") }
+                                    },
                                     colors = flowTextFieldColors(),
                                     shape = MaterialTheme.shapes.medium,
                                     modifier =
@@ -2118,20 +2161,6 @@ internal fun DataSheet(
                                             .fillMaxWidth()
                                             .testTag("simplefin_setup_token"),
                                 )
-                                Spacer(Modifier.height(10.dp))
-                                Button(
-                                    onClick = {
-                                        val token = setupToken.trim()
-                                        if (token.isNotBlank()) {
-                                            setupToken = ""
-                                            onConnect(token)
-                                        }
-                                    },
-                                    enabled = !isBusy && setupToken.isNotBlank(),
-                                    colors = ButtonDefaults.buttonColors(),
-                                    shape = MaterialTheme.shapes.large,
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) { Text("Connect") }
                             }
                         }
                     }
@@ -2169,6 +2198,12 @@ internal fun DataSheet(
                                     label = { Text("New setup token") },
                                     singleLine = true,
                                     enabled = !isBusy,
+                                    trailingIcon = {
+                                        TextButton(
+                                            onClick = ::submitSetupToken,
+                                            enabled = !isBusy && setupToken.isNotBlank(),
+                                        ) { Text("Reconnect") }
+                                    },
                                     colors = flowTextFieldColors(),
                                     shape = MaterialTheme.shapes.medium,
                                     modifier =
@@ -2176,20 +2211,6 @@ internal fun DataSheet(
                                             .fillMaxWidth()
                                             .testTag("simplefin_setup_token"),
                                 )
-                                Spacer(Modifier.height(10.dp))
-                                Button(
-                                    onClick = {
-                                        val token = setupToken.trim()
-                                        if (token.isNotBlank()) {
-                                            setupToken = ""
-                                            onConnect(token)
-                                        }
-                                    },
-                                    enabled = !isBusy && setupToken.isNotBlank(),
-                                    colors = ButtonDefaults.buttonColors(),
-                                    shape = MaterialTheme.shapes.large,
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) { Text("Reconnect") }
                                 TextButton(
                                     onClick = onDisconnect,
                                     enabled = !isBusy,
@@ -3308,37 +3329,41 @@ private fun SwipeTransactionRow(
     onDelete: () -> Unit,
 ) {
     val haptic = LocalHapticFeedback.current
-    val dismissState =
-        rememberSwipeToDismissBoxState(
-            confirmValueChange = { value ->
-                when (value) {
-                    SwipeToDismissBoxValue.StartToEnd -> {
-                        onEdit()
-                        false
-                    }
+    val latestOnEdit by rememberUpdatedState(onEdit)
+    val latestOnDelete by rememberUpdatedState(onDelete)
+    var gestureGeneration by remember(transaction.id) { mutableStateOf(0) }
 
-                    SwipeToDismissBoxValue.EndToStart -> {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onDelete()
-                        false
-                    }
-
-                    SwipeToDismissBoxValue.Settled -> {
-                        false
-                    }
+    key(gestureGeneration) {
+        val dismissState = rememberSwipeToDismissBoxState()
+        LaunchedEffect(dismissState.currentValue) {
+            when (dismissState.currentValue) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    gestureGeneration += 1
+                    latestOnEdit()
                 }
-            },
-        )
 
-    SwipeToDismissBox(
-        state = dismissState,
-        backgroundContent = { SwipeActionBackground() },
-        modifier =
-            Modifier
-                .fillMaxWidth()
-                .testTag("transaction_row"),
-    ) {
-        TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete)
+                SwipeToDismissBoxValue.EndToStart -> {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    gestureGeneration += 1
+                    latestOnDelete()
+                }
+
+                SwipeToDismissBoxValue.Settled -> {
+                    Unit
+                }
+            }
+        }
+
+        SwipeToDismissBox(
+            state = dismissState,
+            backgroundContent = { SwipeActionBackground() },
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .testTag("transaction_row"),
+        ) {
+            TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete)
+        }
     }
 }
 
