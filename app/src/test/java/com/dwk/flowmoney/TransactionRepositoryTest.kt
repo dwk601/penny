@@ -8,20 +8,27 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class TransactionRepositoryTest {
-    @Test fun ordinaryImportRemapsIdsClearsProvenanceAndRepeats() = runTest {
+    @Test fun sameCsvReimportIsIdempotentAndKeepsDuplicateOccurrences() = runTest {
         val dao = FakeTransactionDao()
         val repository = TransactionRepository(dao)
         val local = transaction(id = "local", merchant = "Local", occurredAtEpochMillis = 1766145500000)
-        val imported = transaction(id = "imported", merchant = "Imported").copy(source = "simplefin", accountKey = "key", accountName = "name")
+        val csv = """
+            id,occurredAtEpochMillis,merchant,category,note,cents,recurring
+            simplefin:forged,1766145600000,Imported,Food,duplicate,-100,Monthly
+            simplefin:forged,1766145600000,Imported,Food,duplicate,-100,Monthly
+        """.trimIndent()
+        val imported = CsvCodec.decode(csv).map {
+            it.copy(source = "simplefin", accountKey = "key", accountName = "name")
+        }
 
         repository.upsert(local)
-        assertThat(repository.importTransactions(listOf(imported))).isEqualTo(1)
-        assertThat(repository.importTransactions(listOf(imported))).isEqualTo(1)
+        assertThat(imported.map { it.id }.toSet()).hasSize(2)
+        assertThat(repository.importTransactions(imported)).isEqualTo(2)
+        assertThat(repository.importTransactions(imported)).isEqualTo(0)
 
         val transactions = repository.transactions.first()
         assertThat(transactions).hasSize(3)
         assertThat(transactions.single { it.id == "local" }.merchant).isEqualTo("Local")
-        assertThat(transactions.filter { it.merchant == "Imported" }.map { it.id }).doesNotContain("imported")
         assertThat(transactions.filter { it.merchant == "Imported" }.all { it.source == "local" && it.accountKey == null && it.accountName == null }).isTrue()
     }
 
@@ -51,23 +58,26 @@ class TransactionRepositoryTest {
     @Test fun importPreservesRecurringInterval() = runTest {
         val dao = FakeTransactionDao()
         val repository = TransactionRepository(dao)
-
-        repository.importTransactions(
-            listOf(transaction(id = "rent", merchant = "Rent", recurringInterval = RecurrenceInterval.Monthly)),
+        val imported = CsvCodec.decode(
+            CsvCodec.encode(listOf(transaction(id = "rent", merchant = "Rent", recurringInterval = RecurrenceInterval.Monthly))),
         )
+
+        repository.importTransactions(imported)
 
         assertThat(repository.transactions.first().single().recurringInterval)
             .isEqualTo(RecurrenceInterval.Monthly)
     }
 
-    @Test fun trustedImportPreservesIdsAndCountsOnlyIgnoredRows() = runTest {
+    @Test fun legacyImportUsesGeneratedIdAndCountsOnlyNewRows() = runTest {
         val dao = FakeTransactionDao()
         val repository = TransactionRepository(dao)
-        val imported = transaction(id = "legacy", merchant = "Legacy")
+        val original = transaction(id = "legacy", merchant = "Legacy")
+        val imported = CsvCodec.decode(CsvCodec.encode(listOf(original)))
 
-        assertThat(repository.importTrustedLegacyTransactions(listOf(imported))).isEqualTo(1)
-        assertThat(repository.importTrustedLegacyTransactions(listOf(imported))).isEqualTo(0)
-        assertThat(repository.load().single().id).isEqualTo("legacy")
+        assertThat(repository.importTrustedLegacyTransactions(imported)).isEqualTo(1)
+        assertThat(repository.importTrustedLegacyTransactions(imported)).isEqualTo(0)
+        assertThat(repository.load().single().id).isEqualTo(imported.single().id)
+        assertThat(repository.load().single().id).isNotEqualTo(original.id)
     }
 
     @Test fun syncedUpsertAppliesProviderCorrectionsAndPreservesUserFields() = runTest {
