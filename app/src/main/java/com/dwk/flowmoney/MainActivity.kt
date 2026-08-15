@@ -812,7 +812,7 @@ fun FlowMoneyApp(
                             if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
                                 bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
                             }
-                            message = result.snackbarMessage()
+                            message = result.connectionSnackbarMessage()
                         } catch (failure: CancellationException) {
                             throw failure
                         } catch (_: Throwable) {
@@ -1809,6 +1809,8 @@ internal fun DataSheet(
     onDisconnect: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    onRetryConnection: () -> Unit = {},
+    onCancelPendingConnection: () -> Unit = {},
 ) {
     val profile = simpleFin.profile
     var setupToken by remember { mutableStateOf("") }
@@ -1896,12 +1898,54 @@ internal fun DataSheet(
                 )
             }
 
+            SimpleFinConnectionStatus(
+                simpleFin = simpleFin,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
                 contentPadding = PaddingValues(top = 10.dp, bottom = 20.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 when {
+                    simpleFin.isConnectionPending -> {
+                        item {
+                            DataCard(
+                                modifier = Modifier.testTag("simplefin_pending_card"),
+                                backgroundColor = MaterialTheme.colorScheme.tertiaryContainer,
+                            ) {
+                                SectionLabel("Bank connection pending")
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "SimpleFIN accepted your setup token, but the first sync did not finish. " +
+                                        "Retry connection to finish without another setup token.",
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                Button(
+                                    onClick = onRetryConnection,
+                                    enabled = !isBusy,
+                                    colors = ButtonDefaults.buttonColors(),
+                                    shape = MaterialTheme.shapes.large,
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .testTag("simplefin_retry_connection_button"),
+                                ) { Text("Retry connection") }
+                                TextButton(
+                                    onClick = onCancelPendingConnection,
+                                    enabled = !isBusy,
+                                    modifier = Modifier.testTag("simplefin_cancel_pending_button"),
+                                ) {
+                                    Text("Cancel and start over", color = LocalFinanceColors.current.expense)
+                                }
+                            }
+                        }
+                        item { localDataCard() }
+                    }
+
                     profile == null -> {
                         item { localDataCard() }
                         item {
@@ -2132,6 +2176,46 @@ internal fun DataSheet(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SimpleFinConnectionStatus(
+    simpleFin: SimpleFinUiState,
+    modifier: Modifier = Modifier,
+) {
+    val status =
+        when {
+            simpleFin.isConnectionPending -> "Connection pending"
+            simpleFin.profile == null -> "Not connected"
+            simpleFin.profile.isPaused -> "Reconnect required"
+            else -> "Connected"
+        }
+    DataCard(
+        modifier =
+            modifier
+                .testTag("simplefin_connection_status")
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "SimpleFIN connection status"
+                    stateDescription = status
+                },
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "SimpleFIN",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                status,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }
@@ -4020,6 +4104,9 @@ internal fun automaticSyncFrequencyUpdateFailureMessage(failure: Throwable): Str
     } else {
         "Could not update automatic sync frequency"
     }
+
+internal fun SimpleFinSyncResult.connectionSnackbarMessage(): String =
+    if (this is SimpleFinSyncResult.Success) "SimpleFIN connected." else snackbarMessage()
 
 private fun SimpleFinSyncResult.snackbarMessage(): String =
     when (this) {

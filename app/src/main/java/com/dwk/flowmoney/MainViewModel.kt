@@ -3,8 +3,6 @@ package com.dwk.flowmoney
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import java.time.LocalDate
-import java.time.YearMonth
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -20,6 +18,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import java.time.YearMonth
 
 data class MainUiState(
     val isLoading: Boolean = true,
@@ -40,6 +40,8 @@ data class MainUiState(
 data class SimpleFinUiState(
     val profile: SimpleFinProfileEntity? = null,
     val accounts: List<SimpleFinAccountEntity> = emptyList(),
+    /** A claim is staged, but its initial sync has not completed. */
+    val isConnectionPending: Boolean = false,
 )
 
 class MainViewModel(
@@ -53,66 +55,68 @@ class MainViewModel(
     private val initializationErrors = Channel<String>(Channel.BUFFERED)
     private val chartRangeMode = MutableStateFlow(ChartRangeMode.Week)
     private val selectedMonth = MutableStateFlow(YearMonth.now())
-    private val transactionSnapshots = repository.transactions
-        .map { transactions ->
-            TransactionSnapshot(
-                sortedTransactions = transactions,
-                recentTransactions = transactions.take(5),
-                suggestionHistory = TransactionSuggestions.historyFromNewestFirst(transactions),
+    private val transactionSnapshots =
+        repository.transactions
+            .map { transactions ->
+                TransactionSnapshot(
+                    sortedTransactions = transactions,
+                    recentTransactions = transactions.take(5),
+                    suggestionHistory = TransactionSuggestions.historyFromNewestFirst(transactions),
+                )
+            }.flowOn(defaultDispatcher)
+    private val dashboardState =
+        combine(transactionSnapshots, chartRangeMode, selectedMonth) { snapshot, mode, requestedMonth ->
+            val today = LocalDate.now()
+            val sorted = snapshot.sortedTransactions
+            val availableMonths = DashboardAnalytics.availableMonths(transactions = sorted, today = today)
+            val month = requestedMonth.takeIf { it in availableMonths } ?: availableMonths.first()
+            val range = DashboardAnalytics.rangeFor(mode = mode, selectedMonth = month, today = today)
+            val ranged = DashboardAnalytics.filterTransactions(sorted, range)
+            DashboardUiState(
+                sortedTransactions = sorted,
+                recentTransactions = snapshot.recentTransactions,
+                rangeTransactions = ranged,
+                metrics = DashboardAnalytics.metrics(ranged),
+                dateRange = range,
+                chartRangeMode = mode,
+                selectedMonth = month,
+                availableMonths = availableMonths,
+                dailySpending = DashboardAnalytics.dailySpending(ranged, range),
+                categoryTotals = DashboardAnalytics.categoryTotals(ranged),
+                suggestionHistory = snapshot.suggestionHistory,
             )
+        }.flowOn(defaultDispatcher)
+    private val simpleFinState =
+        combine(simpleFinRepository.profile, simpleFinAccounts) { profile, accounts ->
+            SimpleFinUiState(profile = profile, accounts = accounts)
         }
-        .flowOn(defaultDispatcher)
-    private val dashboardState = combine(transactionSnapshots, chartRangeMode, selectedMonth) { snapshot, mode, requestedMonth ->
-        val today = LocalDate.now()
-        val sorted = snapshot.sortedTransactions
-        val availableMonths = DashboardAnalytics.availableMonths(transactions = sorted, today = today)
-        val month = requestedMonth.takeIf { it in availableMonths } ?: availableMonths.first()
-        val range = DashboardAnalytics.rangeFor(mode = mode, selectedMonth = month, today = today)
-        val ranged = DashboardAnalytics.filterTransactions(sorted, range)
-        DashboardUiState(
-            sortedTransactions = sorted,
-            recentTransactions = snapshot.recentTransactions,
-            rangeTransactions = ranged,
-            metrics = DashboardAnalytics.metrics(ranged),
-            dateRange = range,
-            chartRangeMode = mode,
-            selectedMonth = month,
-            availableMonths = availableMonths,
-            dailySpending = DashboardAnalytics.dailySpending(ranged, range),
-            categoryTotals = DashboardAnalytics.categoryTotals(ranged),
-            suggestionHistory = snapshot.suggestionHistory,
-        )
-    }.flowOn(defaultDispatcher)
-    private val simpleFinState = combine(simpleFinRepository.profile, simpleFinAccounts) { profile, accounts ->
-        SimpleFinUiState(profile = profile, accounts = accounts)
-    }
 
     val initializationErrorEvents = initializationErrors.receiveAsFlow()
 
-    val uiState = flow {
-        initializationReady.first { it }
-        emitAll(
-            combine(dashboardState, simpleFinState) { dashboard, simpleFin ->
-                MainUiState(
-                    isLoading = false,
-                    sortedTransactions = dashboard.sortedTransactions,
-                    recentTransactions = dashboard.recentTransactions,
-                    rangeTransactions = dashboard.rangeTransactions,
-                    metrics = dashboard.metrics,
-                    dateRange = dashboard.dateRange,
-                    chartRangeMode = dashboard.chartRangeMode,
-                    selectedMonth = dashboard.selectedMonth,
-                    availableMonths = dashboard.availableMonths,
-                    dailySpending = dashboard.dailySpending,
-                    categoryTotals = dashboard.categoryTotals,
-                    suggestionHistory = dashboard.suggestionHistory,
-                    simpleFin = simpleFin,
-                )
-            },
-        )
-    }
-        .flowOn(defaultDispatcher)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
+    val uiState =
+        flow {
+            initializationReady.first { it }
+            emitAll(
+                combine(dashboardState, simpleFinState) { dashboard, simpleFin ->
+                    MainUiState(
+                        isLoading = false,
+                        sortedTransactions = dashboard.sortedTransactions,
+                        recentTransactions = dashboard.recentTransactions,
+                        rangeTransactions = dashboard.rangeTransactions,
+                        metrics = dashboard.metrics,
+                        dateRange = dashboard.dateRange,
+                        chartRangeMode = dashboard.chartRangeMode,
+                        selectedMonth = dashboard.selectedMonth,
+                        availableMonths = dashboard.availableMonths,
+                        dailySpending = dashboard.dailySpending,
+                        categoryTotals = dashboard.categoryTotals,
+                        suggestionHistory = dashboard.suggestionHistory,
+                        simpleFin = simpleFin,
+                    )
+                },
+            )
+        }.flowOn(defaultDispatcher)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
 
     val isInitializationReady: Boolean
         get() = initializationReady.value
