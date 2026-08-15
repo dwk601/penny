@@ -114,11 +114,17 @@ Additional assumptions and limitations:
   ./gradlew lintDebug assembleDebug
   ```
 
-- [ ] On a running supported emulator/device, run the full instrumented suite:
+- [ ] Run the full instrumented suite on API 26 and API 31+. Include an API 34+
+  full run, which may also satisfy the API 31+ run, because the picker hierarchy
+  artifact mode/cleanup subtest requires API 34+ and is suppressed below API 34:
 
   ```bash
   ./gradlew connectedDebugAndroidTest
   ```
+
+  On failure, a picker hierarchy artifact is retained with mode `0600` in the
+  test APK's private storage until cleanup at the next test start. It is not stored
+  in the target app and is not part of the target app/release fingerprint.
 
 - [ ] Run the focused SimpleFIN lifecycle suite and retain results:
 
@@ -265,19 +271,23 @@ Restore automatic time/timezone and the original locale when finished.
   merchant, note, account, individual transaction, or credential detail. The
   shared initial launcher frame must be neutral/loading, actionable—matching
   `Open Penny to load`—rather than a fabricated zero, stale value, or picker
-  sample, then be promptly replaced by the real aggregate runtime summary or the
-  runtime `Unavailable` state. Retain named evidence of
-  the picker, initial frame, and replacement frame within the same aggregate-only
-  privacy boundary.
+  sample. It intentionally uses the compact card's `8dp` radius so it remains
+  safe at the `48dp` minimum; its difference from the `28dp` radius used by the
+  `2x2`/`4x2` runtime cards is expected. The initial frame must then be promptly
+  replaced by the real aggregate runtime summary or the runtime `Unavailable`
+  state. Retain named evidence of the picker, initial frame, and replacement
+  frame within the same aggregate-only privacy boundary.
 - [ ] On API 26–30, capture the launcher's widget-picker fallback and a screen
   recording or frame sequence of a new placement before its first provider
   update, using synthetic data only. Depending on the launcher, the expected
   picker fallback is Penny's app icon or the shared neutral/loading, actionable
   initial frame matching `Open Penny to load`—not the API 31+ sample preview.
-  After placement, capture that initial frame. Neither the picker fallback nor
-  the initial frame may expose a merchant, note, account, individual
-  transaction, or credential detail or
-  present `$0.00` or `Unavailable` as a real state. Capture the initial frame's
+  After placement, capture that initial frame. It intentionally uses the compact
+  card's `8dp` radius so it remains safe at the `48dp` minimum; its difference
+  from the `28dp` radius used by the `2x2`/`4x2` runtime cards is expected.
+  Neither the picker fallback nor the initial frame may expose a merchant, note,
+  account, individual transaction, or credential detail or present `$0.00` or
+  `Unavailable` as a real state. Capture the initial frame's
   prompt replacement by the real aggregate runtime summary or the runtime
   `Unavailable` state. Retain named evidence for the picker fallback, initial
   frame, and replacement frame within the same aggregate-only privacy
