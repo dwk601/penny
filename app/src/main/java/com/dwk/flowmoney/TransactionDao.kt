@@ -16,6 +16,36 @@ data class SyncedTransactionWriteResult(
     val skipped: Int,
 )
 
+data class TransactionRangeCount(
+    val transactionCount: Long,
+    val tombstoneCount: Long,
+) {
+    init {
+        require(transactionCount >= 0) { "Transaction count must not be negative" }
+        require(tombstoneCount >= 0) { "Tombstone count must not be negative" }
+    }
+}
+
+val TransactionRangeCount.affectedCount: Long
+    get() = Math.addExact(transactionCount, tombstoneCount)
+
+/** Opaque, exact database rows removed by one atomic range reset. */
+class TransactionRangeResetSnapshot internal constructor(
+    transactionRows: List<TransactionEntity>,
+    tombstoneRows: List<SimpleFinIgnoredTransactionEntity>,
+) {
+    internal val transactionRows: List<TransactionEntity> = transactionRows.toList()
+    internal val tombstoneRows: List<SimpleFinIgnoredTransactionEntity> = tombstoneRows.toList()
+
+    val count =
+        TransactionRangeCount(
+            transactionCount = transactionRows.size.toLong(),
+            tombstoneCount = tombstoneRows.size.toLong(),
+        )
+    val affectedCount: Long
+        get() = count.affectedCount
+}
+
 @Dao
 interface TransactionDao {
     @Query("SELECT * FROM transactions ORDER BY occurredAtEpochMillis DESC")
@@ -34,6 +64,85 @@ interface TransactionDao {
         startInclusiveEpochMillis: Long,
         endExclusiveEpochMillis: Long,
     ): List<TransactionEntity>
+
+    @Query(
+        "SELECT " +
+            "(SELECT COUNT(*) FROM transactions " +
+            "WHERE occurredAtEpochMillis >= :startInclusiveEpochMillis " +
+            "AND occurredAtEpochMillis < :endExclusiveEpochMillis) AS transactionCount, " +
+            "(SELECT COUNT(*) FROM simplefin_ignored_transactions " +
+            "WHERE occurredAtEpochMillis IS NOT NULL " +
+            "AND occurredAtEpochMillis >= :startInclusiveEpochMillis " +
+            "AND occurredAtEpochMillis < :endExclusiveEpochMillis) AS tombstoneCount",
+    )
+    suspend fun countInRange(
+        startInclusiveEpochMillis: Long,
+        endExclusiveEpochMillis: Long,
+    ): TransactionRangeCount
+
+    @Query(
+        "SELECT * FROM simplefin_ignored_transactions " +
+            "WHERE occurredAtEpochMillis IS NOT NULL " +
+            "AND occurredAtEpochMillis >= :startInclusiveEpochMillis " +
+            "AND occurredAtEpochMillis < :endExclusiveEpochMillis " +
+            "ORDER BY occurredAtEpochMillis DESC, transactionId ASC",
+    )
+    suspend fun tombstonesInRange(
+        startInclusiveEpochMillis: Long,
+        endExclusiveEpochMillis: Long,
+    ): List<SimpleFinIgnoredTransactionEntity>
+
+    @Query(
+        "DELETE FROM transactions " +
+            "WHERE occurredAtEpochMillis >= :startInclusiveEpochMillis " +
+            "AND occurredAtEpochMillis < :endExclusiveEpochMillis",
+    )
+    suspend fun deleteTransactionsInRange(
+        startInclusiveEpochMillis: Long,
+        endExclusiveEpochMillis: Long,
+    ): Int
+
+    @Query(
+        "DELETE FROM simplefin_ignored_transactions " +
+            "WHERE occurredAtEpochMillis IS NOT NULL " +
+            "AND occurredAtEpochMillis >= :startInclusiveEpochMillis " +
+            "AND occurredAtEpochMillis < :endExclusiveEpochMillis",
+    )
+    suspend fun deleteTombstonesInRange(
+        startInclusiveEpochMillis: Long,
+        endExclusiveEpochMillis: Long,
+    ): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun restoreTransactions(transactions: List<TransactionEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun restoreTombstones(tombstones: List<SimpleFinIgnoredTransactionEntity>)
+
+    @Transaction
+    suspend fun snapshotAndDeleteInRange(
+        startInclusiveEpochMillis: Long,
+        endExclusiveEpochMillis: Long,
+    ): TransactionRangeResetSnapshot {
+        require(startInclusiveEpochMillis <= endExclusiveEpochMillis) {
+            "Range end must not precede range start"
+        }
+        val transactions = getInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
+        val tombstones = tombstonesInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
+        val deletedTransactions = deleteTransactionsInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
+        val deletedTombstones = deleteTombstonesInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
+        check(deletedTransactions == transactions.size) { "Transaction range changed during reset" }
+        check(deletedTombstones == tombstones.size) { "Tombstone range changed during reset" }
+        return TransactionRangeResetSnapshot(transactions, tombstones)
+    }
+
+    /** Restores snapshot rows directly so transaction upserts cannot clear restored tombstones. */
+    @Transaction
+    suspend fun restoreRange(snapshot: TransactionRangeResetSnapshot): TransactionRangeCount {
+        if (snapshot.transactionRows.isNotEmpty()) restoreTransactions(snapshot.transactionRows)
+        if (snapshot.tombstoneRows.isNotEmpty()) restoreTombstones(snapshot.tombstoneRows)
+        return snapshot.count
+    }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(transaction: TransactionEntity)

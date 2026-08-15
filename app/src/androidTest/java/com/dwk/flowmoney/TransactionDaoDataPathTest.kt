@@ -9,9 +9,11 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.time.Duration
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -177,6 +179,136 @@ class TransactionDaoDataPathTest {
                 assertEquals(2, repository.importTransactions(imported))
                 assertEquals(0, repository.importTransactions(CsvCodec.decode(csv)))
                 assertEquals(imported.map { it.id }.toSet(), repository.load().map { it.id }.toSet())
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun realRoomRangeResetIsDstSafeAndRestoresExactRowsAndTombstones() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val repository = TransactionRepository(dao)
+                val zoneId = ZoneId.of("America/New_York")
+                val range = PennyLocalDateRange(LocalDate.of(2024, 3, 10), LocalDate.of(2024, 3, 11))
+                val instantRange = range.toInstantRange(zoneId)
+                val start = instantRange.startInclusive.toEpochMilli()
+                val end = instantRange.endExclusive.toEpochMilli()
+                val beforeStart = entity("before-start", start - 1)
+                val atStart =
+                    entity("shared", start).copy(
+                        recurringInterval = "future-value",
+                        source = "simplefin",
+                        accountKey = "account-key",
+                        accountName = "Checking",
+                    )
+                val beforeEnd = entity("before-end", end - 1)
+                val atEnd = entity("at-end", end)
+                dao.upsertAll(listOf(beforeStart, atStart, beforeEnd, atEnd))
+                val sharedTombstone =
+                    SimpleFinIgnoredTransactionEntity(
+                        transactionId = atStart.id,
+                        ignoredAtEpochMillis = 11,
+                        occurredAtEpochMillis = start,
+                    )
+                val beforeEndTombstone =
+                    SimpleFinIgnoredTransactionEntity(
+                        transactionId = "before-end-tombstone",
+                        ignoredAtEpochMillis = 22,
+                        occurredAtEpochMillis = end - 1,
+                    )
+                val unknownTombstone =
+                    SimpleFinIgnoredTransactionEntity(
+                        transactionId = "unknown",
+                        ignoredAtEpochMillis = 33,
+                        occurredAtEpochMillis = null,
+                    )
+                val atEndTombstone =
+                    SimpleFinIgnoredTransactionEntity(
+                        transactionId = "at-end-tombstone",
+                        ignoredAtEpochMillis = 44,
+                        occurredAtEpochMillis = end,
+                    )
+                listOf(sharedTombstone, beforeEndTombstone, unknownTombstone, atEndTombstone)
+                    .forEach { database.simpleFinDao().insertIgnored(it) }
+
+                assertEquals(Duration.ofHours(23), Duration.between(instantRange.startInclusive, instantRange.endExclusive))
+                assertEquals(
+                    TransactionRangeCount(transactionCount = 2, tombstoneCount = 2),
+                    repository.countRange(range, zoneId),
+                )
+
+                val snapshot = repository.resetRange(range, zoneId)
+
+                assertEquals(TransactionRangeCount(transactionCount = 2, tombstoneCount = 2), snapshot.count)
+                assertEquals(4L, snapshot.affectedCount)
+                assertEquals(listOf(atEnd, beforeStart), dao.getAll())
+                assertEquals(
+                    setOf(unknownTombstone, atEndTombstone),
+                    database.simpleFinIdentityDao().tombstones().toSet(),
+                )
+
+                assertEquals(snapshot.count, repository.restoreRange(snapshot))
+                assertEquals(listOf(atEnd, beforeEnd, atStart, beforeStart), dao.getAll())
+                assertEquals(
+                    setOf(sharedTombstone, beforeEndTombstone, unknownTombstone, atEndTombstone),
+                    database.simpleFinIdentityDao().tombstones().toSet(),
+                )
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun realRoomRollsBackBothTablesWhenRangeResetOrRestoreFails() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val repository = TransactionRepository(dao)
+                val zoneId = ZoneId.of("UTC")
+                val range = PennyLocalDateRange(LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 2))
+                val occurredAt =
+                    range.startInclusive
+                        .atStartOfDay(zoneId)
+                        .toInstant()
+                        .toEpochMilli()
+                val transaction = entity("atomic-transaction", occurredAt)
+                val tombstone =
+                    SimpleFinIgnoredTransactionEntity(
+                        transactionId = "atomic-tombstone",
+                        ignoredAtEpochMillis = 55,
+                        occurredAtEpochMillis = occurredAt,
+                    )
+                dao.upsert(transaction)
+                database.simpleFinDao().insertIgnored(tombstone)
+                val sql = database.openHelper.writableDatabase
+                sql.execSQL(
+                    "CREATE TRIGGER fail_range_delete BEFORE DELETE ON simplefin_ignored_transactions " +
+                        "WHEN OLD.transactionId = 'atomic-tombstone' " +
+                        "BEGIN SELECT RAISE(ABORT, 'synthetic range delete failure'); END",
+                )
+
+                assertNotNull(runCatching { repository.resetRange(range, zoneId) }.exceptionOrNull())
+                assertEquals(listOf(transaction), dao.getAll())
+                assertEquals(listOf(tombstone), database.simpleFinIdentityDao().tombstones())
+
+                sql.execSQL("DROP TRIGGER fail_range_delete")
+                val snapshot = repository.resetRange(range, zoneId)
+                sql.execSQL(
+                    "CREATE TRIGGER fail_range_restore BEFORE INSERT ON simplefin_ignored_transactions " +
+                        "WHEN NEW.transactionId = 'atomic-tombstone' " +
+                        "BEGIN SELECT RAISE(ABORT, 'synthetic range restore failure'); END",
+                )
+
+                assertNotNull(runCatching { repository.restoreRange(snapshot) }.exceptionOrNull())
+                assertEquals(emptyList<TransactionEntity>(), dao.getAll())
+                assertEquals(emptyList<SimpleFinIgnoredTransactionEntity>(), database.simpleFinIdentityDao().tombstones())
+
+                sql.execSQL("DROP TRIGGER fail_range_restore")
+                assertEquals(snapshot.count, repository.restoreRange(snapshot))
+                assertEquals(listOf(transaction), dao.getAll())
+                assertEquals(listOf(tombstone), database.simpleFinIdentityDao().tombstones())
             } finally {
                 database.close()
             }

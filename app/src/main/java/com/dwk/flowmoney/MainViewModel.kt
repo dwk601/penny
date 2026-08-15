@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.ZoneId
 
 data class MainUiState(
     val isLoading: Boolean = true,
@@ -155,6 +156,18 @@ class MainViewModel(
     suspend fun delete(id: String) {
         repository.delete(id)
     }
+
+    suspend fun countRange(
+        range: PennyLocalDateRange,
+        zoneId: ZoneId,
+    ): TransactionRangeCount = repository.countRange(range, zoneId)
+
+    suspend fun resetRange(
+        range: PennyLocalDateRange,
+        zoneId: ZoneId,
+    ): TransactionRangeResetSnapshot = repository.resetRange(range, zoneId)
+
+    suspend fun restoreRange(snapshot: TransactionRangeResetSnapshot): TransactionRangeCount = repository.restoreRange(snapshot)
 
     suspend fun importCsv(csv: String): Int {
         val transactions = withContext(defaultDispatcher) { CsvCodec.decode(csv) }
