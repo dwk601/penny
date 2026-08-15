@@ -17,6 +17,7 @@ import androidx.compose.ui.test.ForcedSize
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -28,6 +29,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.time.Clock
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 
 class ExpressiveCompatUiTest {
     @get:Rule val composeRule = createComposeRule()
@@ -96,8 +101,11 @@ class ExpressiveCompatUiTest {
         }
 
         assertTrue(
-            composeRule.onNodeWithTag("choice_group").fetchSemanticsNode()
-                .config.contains(SemanticsProperties.SelectableGroup),
+            composeRule
+                .onNodeWithTag("choice_group")
+                .fetchSemanticsNode()
+                .config
+                .contains(SemanticsProperties.SelectableGroup),
         )
         val radioRole = SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton)
         val unselected = SemanticsMatcher.expectValue(SemanticsProperties.Selected, false)
@@ -197,6 +205,52 @@ class ExpressiveCompatUiTest {
     }
 
     @Test
+    fun simpleFinDateRangePickerConfirmsHalfOpenInitialRange() {
+        val today = LocalDate.of(2026, 3, 15)
+        val initialRange = PennyLocalDateRange(LocalDate.of(2026, 3, 10), today.plusDays(1))
+        var confirmed: PennyLocalDateRange? = null
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                PennySimpleFinDateRangePickerDialog(
+                    initialRange = initialRange,
+                    onDismiss = {},
+                    onConfirm = { confirmed = it },
+                    clock = Clock.fixed(Instant.parse("2026-03-15T12:00:00Z"), ZoneOffset.UTC),
+                )
+            }
+        }
+
+        val title = composeRule.onNodeWithText("Select dates to resync").assertIsDisplayed().fetchSemanticsNode()
+        assertTrue(title.config.contains(SemanticsProperties.Heading))
+        composeRule.onNodeWithText("OK").performClick()
+        composeRule.runOnIdle { assertEquals(initialRange, confirmed) }
+    }
+
+    @Test
+    fun simpleFinDateRangePickerRejectsUnboundedInitialRangeAndCancelsCleanly() {
+        val today = LocalDate.of(2026, 3, 15)
+        var dismisses = 0
+        var confirms = 0
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                PennySimpleFinDateRangePickerDialog(
+                    initialRange = PennyLocalDateRange(today.minusDays(45), today.plusDays(1)),
+                    onDismiss = { dismisses++ },
+                    onConfirm = { confirms++ },
+                    clock = Clock.fixed(Instant.parse("2026-03-15T12:00:00Z"), ZoneOffset.UTC),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("OK").assertIsNotEnabled()
+        composeRule.onNodeWithText("Cancel").performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, dismisses)
+            assertEquals(0, confirms)
+        }
+    }
+
+    @Test
     fun binaryChoiceFitsCompactLargeFontAndUpdatesInternalSelection() {
         composeRule.setContent {
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(320.dp, 360.dp))) {
@@ -219,9 +273,24 @@ class ExpressiveCompatUiTest {
             }
         }
 
-        val group = composeRule.onNodeWithTag("compact_choice_group").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-        val expense = composeRule.onNodeWithTag("expense_choice").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-        val income = composeRule.onNodeWithTag("income_choice").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val group =
+            composeRule
+                .onNodeWithTag("compact_choice_group")
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+                .boundsInRoot
+        val expense =
+            composeRule
+                .onNodeWithTag("expense_choice")
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+                .boundsInRoot
+        val income =
+            composeRule
+                .onNodeWithTag("income_choice")
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+                .boundsInRoot
         val boundsMessage = "group=$group expense=$expense income=$income"
         listOf(expense, income).forEach { bounds ->
             assertTrue(boundsMessage, bounds.width / composeRule.density.density >= 48f)
@@ -234,7 +303,11 @@ class ExpressiveCompatUiTest {
         val selected = SemanticsMatcher.expectValue(SemanticsProperties.Selected, true)
         val unselected = SemanticsMatcher.expectValue(SemanticsProperties.Selected, false)
         composeRule.onNodeWithTag("income_choice").performClick().assert(selected)
-        composeRule.onNodeWithTag("expense_choice").assert(unselected).performClick().assert(selected)
+        composeRule
+            .onNodeWithTag("expense_choice")
+            .assert(unselected)
+            .performClick()
+            .assert(selected)
         composeRule.onNodeWithTag("income_choice").assert(unselected)
     }
 }
