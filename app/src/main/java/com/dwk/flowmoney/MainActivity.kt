@@ -1953,48 +1953,55 @@ internal fun DataSheet(
     var setupToken by remember { mutableStateOf("") }
     var automaticSyncsExpanded by rememberSaveable(profile?.connectionId, profile?.isPaused) { mutableStateOf(false) }
     val isBusy = operation != null
-    val localDataCard: @Composable () -> Unit = {
-        DataCard(modifier = Modifier.testTag("local_data_card")) {
-            SectionLabel("Import and export")
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Move records in or out with CSV.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Spacer(Modifier.height(12.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Button(
-                    onClick = onImport,
-                    enabled = !isBusy,
-                    colors = ButtonDefaults.buttonColors(),
-                    shape = MaterialTheme.shapes.large,
-                    modifier =
-                        Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .testTag("csv_import_button"),
-                ) { Text("Import CSV") }
-                Button(
-                    onClick = onExport,
-                    enabled = !isBusy,
-                    colors =
-                        ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        ),
-                    shape = MaterialTheme.shapes.large,
-                    modifier =
-                        Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .testTag("csv_export_button"),
-                ) { Text("Export CSV") }
+    val localDataSection: @Composable () -> Unit = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            DataSheetSectionHeader("Import & export")
+            DataCard(modifier = Modifier.testTag("local_data_card")) {
+                Text(
+                    "Import transactions or save a portable CSV backup.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(12.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Button(
+                        onClick = onImport,
+                        enabled = !isBusy,
+                        colors = ButtonDefaults.buttonColors(),
+                        shape = MaterialTheme.shapes.large,
+                        modifier =
+                            Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("csv_import_button"),
+                    ) { Text("Import CSV") }
+                    Button(
+                        onClick = onExport,
+                        enabled = !isBusy,
+                        colors =
+                            ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            ),
+                        shape = MaterialTheme.shapes.large,
+                        modifier =
+                            Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("csv_export_button"),
+                    ) { Text("Export CSV") }
+                }
             }
+        }
+    }
+    val bankSyncSectionHeader: @Composable () -> Unit = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            DataSheetSectionHeader("Bank sync")
+            SimpleFinConnectionStatus(simpleFin = simpleFin)
         }
     }
 
@@ -2035,28 +2042,24 @@ internal fun DataSheet(
                 )
             }
 
-            SimpleFinConnectionStatus(
-                simpleFin = simpleFin,
-                modifier = Modifier.padding(top = 10.dp),
-            )
-
             LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-                contentPadding = PaddingValues(top = 10.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(top = 12.dp, bottom = 20.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 when {
                     simpleFin.isConnectionPending -> {
+                        item { bankSyncSectionHeader() }
                         item {
                             DataCard(
                                 modifier = Modifier.testTag("simplefin_pending_card"),
                                 backgroundColor = MaterialTheme.colorScheme.tertiaryContainer,
                             ) {
-                                SectionLabel("Bank connection pending")
-                                Spacer(Modifier.height(8.dp))
+                                Text("Connection pending", style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(6.dp))
                                 Text(
-                                    "SimpleFIN accepted your setup token, but the first sync did not finish. " +
-                                        "Retry connection to finish without another setup token.",
+                                    "Your setup token was accepted, but the first sync did not finish. " +
+                                        "Retry without entering another token.",
                                     color = MaterialTheme.colorScheme.onTertiaryContainer,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
@@ -2080,23 +2083,24 @@ internal fun DataSheet(
                                 }
                             }
                         }
-                        item { localDataCard() }
+                        item { localDataSection() }
                     }
 
                     profile == null -> {
-                        item { localDataCard() }
+                        item { localDataSection() }
+                        item { bankSyncSectionHeader() }
                         item {
                             DataCard(modifier = Modifier.testTag("simplefin_setup_card")) {
-                                SectionLabel("Bank sync")
-                                Spacer(Modifier.height(8.dp))
+                                Text("Connect SimpleFIN", style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(6.dp))
                                 Text(
-                                    "1. Open SimpleFIN and copy a setup token.",
+                                    "Open SimpleFIN and copy a setup token.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
                                 TextButton(onClick = onOpenSetup, enabled = !isBusy) { Text("Open setup") }
                                 Text(
-                                    "2. Paste the token below, then connect.",
+                                    "Paste the token below, then connect.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
@@ -2133,28 +2137,29 @@ internal fun DataSheet(
                     }
 
                     profile.isPaused -> {
+                        item { bankSyncSectionHeader() }
                         item {
                             DataCard(
                                 modifier = Modifier.testTag("simplefin_setup_card"),
                                 backgroundColor = MaterialTheme.colorScheme.errorContainer,
                             ) {
-                                SectionLabel("Bank sync needs attention")
-                                Spacer(Modifier.height(8.dp))
+                                Text("Reconnect SimpleFIN", style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(6.dp))
                                 Text(
-                                    "Reconnect SimpleFIN to resume bank syncing. Your local data and CSV are still available.",
+                                    "Reconnect to resume bank sync. Your Penny data and CSV tools stay available.",
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                     style = MaterialTheme.typography.bodyMedium,
                                     modifier = Modifier.testTag("simplefin_reconnect_message"),
                                 )
                                 Spacer(Modifier.height(10.dp))
                                 Text(
-                                    "1. Open SimpleFIN and copy a new setup token.",
+                                    "Open SimpleFIN and copy a new setup token.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 13.sp,
                                 )
                                 TextButton(onClick = onOpenSetup, enabled = !isBusy) { Text("Open setup") }
                                 Text(
-                                    "2. Paste the token below, then reconnect.",
+                                    "Paste the token below, then reconnect.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 13.sp,
                                 )
@@ -2194,14 +2199,13 @@ internal fun DataSheet(
                                 }
                             }
                         }
-                        item { localDataCard() }
+                        item { localDataSection() }
                     }
 
                     else -> {
+                        item { bankSyncSectionHeader() }
                         item {
                             DataCard(modifier = Modifier.testTag("bank_sync_card")) {
-                                SectionLabel("Bank sync")
-                                Spacer(Modifier.height(8.dp))
                                 StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
                                 StatusLine("Last error", profile.lastError?.takeIf { it.isNotBlank() } ?: "None")
                                 Spacer(Modifier.height(10.dp))
@@ -2265,7 +2269,7 @@ internal fun DataSheet(
                                     }
                                 }
                                 Text(
-                                    "Choose 1–12 automatic syncs per day. Timing is approximate. SimpleFIN expects 24 or fewer requests daily; redirects, retries, and setup can use extra requests, so this setting cannot guarantee that limit.",
+                                    "Choose 1–12 syncs a day. Timing is approximate; redirects, retries, and setup can use extra requests, so this cadence cannot guarantee SimpleFIN's 24-request daily limit.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.padding(top = 4.dp),
@@ -2292,7 +2296,7 @@ internal fun DataSheet(
                         }
                         item {
                             DataCard(modifier = Modifier.testTag("connected_accounts_card")) {
-                                SectionLabel("Connected accounts")
+                                Text("Connected accounts", style = MaterialTheme.typography.titleMedium)
                                 Spacer(Modifier.height(8.dp))
                                 if (simpleFin.accounts.isEmpty()) {
                                     Text("No accounts synced yet", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
@@ -2309,12 +2313,22 @@ internal fun DataSheet(
                                 }
                             }
                         }
-                        item { localDataCard() }
+                        item { localDataSection() }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun DataSheetSectionHeader(text: String) {
+    Text(
+        text = text,
+        color = MaterialTheme.colorScheme.onSurface,
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.padding(horizontal = 4.dp),
+    )
 }
 
 @Composable
@@ -2327,6 +2341,12 @@ private fun SimpleFinConnectionStatus(
             simpleFin.profile == null -> "Not connected"
             simpleFin.profile.isPaused -> "Reconnect required"
             else -> "Connected"
+        }
+    val statusColor =
+        when {
+            simpleFin.profile == null -> MaterialTheme.colorScheme.onSurfaceVariant
+            simpleFin.profile.isPaused -> LocalFinanceColors.current.expense
+            else -> MaterialTheme.colorScheme.secondary
         }
     DataCard(
         modifier =
@@ -2349,8 +2369,9 @@ private fun SimpleFinConnectionStatus(
             )
             Text(
                 status,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = statusColor,
                 style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
             )
         }
     }
@@ -2362,14 +2383,17 @@ private fun DataCard(
     backgroundColor: Color? = null,
     content: @Composable () -> Unit,
 ) {
-    Column(
-        modifier =
-            modifier
-                .fillMaxWidth()
-                .clip(MaterialTheme.shapes.medium)
-                .background(backgroundColor ?: MaterialTheme.colorScheme.surfaceContainer)
-                .padding(14.dp),
-    ) { content() }
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors =
+            CardDefaults.cardColors(
+                containerColor = backgroundColor ?: MaterialTheme.colorScheme.surfaceContainerLow,
+            ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) { content() }
+    }
 }
 
 @Composable
