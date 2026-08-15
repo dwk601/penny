@@ -6,6 +6,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
+import java.time.Duration
+import java.time.LocalDate
+import java.time.ZoneId
 
 class TransactionRepositoryTest {
     @Test fun sameCsvReimportIsIdempotentAndKeepsDuplicateOccurrences() =
@@ -224,6 +227,84 @@ class TransactionRepositoryTest {
             assertThat(dao.getAll().none { it.id == "id-904" }).isTrue()
         }
 
+    @Test fun rangeResetUsesHalfOpenDstBoundsAndRestoresExactRowsAndTombstones() =
+        runTest {
+            val dao = FakeTransactionDao()
+            val repository = TransactionRepository(dao)
+            val zoneId = ZoneId.of("America/New_York")
+            val range = PennyLocalDateRange(LocalDate.of(2024, 3, 10), LocalDate.of(2024, 3, 11))
+            val instantRange = range.toInstantRange(zoneId)
+            val start = instantRange.startInclusive.toEpochMilli()
+            val end = instantRange.endExclusive.toEpochMilli()
+            val atStart =
+                syncedEntity(id = "shared", merchant = "At start").copy(
+                    occurredAtEpochMillis = start,
+                    recurringInterval = "future-value",
+                )
+            val beforeEnd = syncedEntity(id = "before-end", merchant = "Before end").copy(occurredAtEpochMillis = end - 1)
+            val beforeStart = syncedEntity(id = "before-start").copy(occurredAtEpochMillis = start - 1)
+            val atEnd = syncedEntity(id = "at-end").copy(occurredAtEpochMillis = end)
+            dao.upsertAll(listOf(beforeStart, atStart, beforeEnd, atEnd))
+            val sharedTombstone =
+                SimpleFinIgnoredTransactionEntity(
+                    transactionId = atStart.id,
+                    ignoredAtEpochMillis = 11,
+                    occurredAtEpochMillis = start,
+                )
+            val beforeEndTombstone =
+                SimpleFinIgnoredTransactionEntity(
+                    transactionId = "before-end-tombstone",
+                    ignoredAtEpochMillis = 22,
+                    occurredAtEpochMillis = end - 1,
+                )
+            val unknownTombstone =
+                SimpleFinIgnoredTransactionEntity(
+                    transactionId = "unknown",
+                    ignoredAtEpochMillis = 33,
+                    occurredAtEpochMillis = null,
+                )
+            val atEndTombstone =
+                SimpleFinIgnoredTransactionEntity(
+                    transactionId = "at-end-tombstone",
+                    ignoredAtEpochMillis = 44,
+                    occurredAtEpochMillis = end,
+                )
+            listOf(sharedTombstone, beforeEndTombstone, unknownTombstone, atEndTombstone)
+                .forEach { dao.insertIgnoredTransaction(it) }
+
+            assertThat(Duration.between(instantRange.startInclusive, instantRange.endExclusive))
+                .isEqualTo(Duration.ofHours(23))
+            assertThat(repository.countRange(range, zoneId))
+                .isEqualTo(TransactionRangeCount(transactionCount = 2, tombstoneCount = 2))
+
+            val snapshot = repository.resetRange(range, zoneId)
+
+            assertThat(snapshot.count).isEqualTo(TransactionRangeCount(transactionCount = 2, tombstoneCount = 2))
+            assertThat(snapshot.affectedCount).isEqualTo(4)
+            assertThat(dao.getAll()).containsExactly(atEnd, beforeStart).inOrder()
+            assertThat(dao.ignoredTombstones()).containsExactly(atEndTombstone, unknownTombstone)
+
+            assertThat(repository.restoreRange(snapshot)).isEqualTo(snapshot.count)
+            assertThat(dao.getAll()).containsExactly(atEnd, beforeEnd, atStart, beforeStart).inOrder()
+            assertThat(dao.ignoredTombstones())
+                .containsExactly(sharedTombstone, beforeEndTombstone, unknownTombstone, atEndTombstone)
+            assertThat(dao.ignoredTombstone(atStart.id)).isEqualTo(sharedTombstone)
+            assertThat(dao.getAll().single { it.id == atStart.id }).isEqualTo(atStart)
+        }
+
+    @Test fun localDateRangeRejectsEmptyOrReversedInput() {
+        assertThat(
+            runCatching {
+                PennyLocalDateRange(LocalDate.of(2024, 3, 10), LocalDate.of(2024, 3, 10))
+            }.exceptionOrNull(),
+        ).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(
+            runCatching {
+                PennyLocalDateRange(LocalDate.of(2024, 3, 11), LocalDate.of(2024, 3, 10))
+            }.exceptionOrNull(),
+        ).isInstanceOf(IllegalArgumentException::class.java)
+    }
+
     private fun transaction(
         id: String,
         merchant: String,
@@ -265,6 +346,8 @@ class TransactionRepositoryTest {
 
         fun ignoredTombstone(id: String): SimpleFinIgnoredTransactionEntity? = ignored[id]
 
+        fun ignoredTombstones(): List<SimpleFinIgnoredTransactionEntity> = ignored.values.toList()
+
         override fun observeAll(): Flow<List<TransactionEntity>> = rows
 
         override suspend fun getAll(): List<TransactionEntity> = rows.value
@@ -277,6 +360,56 @@ class TransactionRepositoryTest {
                 it.occurredAtEpochMillis >= startInclusiveEpochMillis &&
                     it.occurredAtEpochMillis < endExclusiveEpochMillis
             }
+
+        override suspend fun countInRange(
+            startInclusiveEpochMillis: Long,
+            endExclusiveEpochMillis: Long,
+        ): TransactionRangeCount =
+            TransactionRangeCount(
+                transactionCount = getInRange(startInclusiveEpochMillis, endExclusiveEpochMillis).size.toLong(),
+                tombstoneCount = tombstonesInRange(startInclusiveEpochMillis, endExclusiveEpochMillis).size.toLong(),
+            )
+
+        override suspend fun tombstonesInRange(
+            startInclusiveEpochMillis: Long,
+            endExclusiveEpochMillis: Long,
+        ): List<SimpleFinIgnoredTransactionEntity> =
+            ignored.values
+                .filter { tombstone ->
+                    tombstone.occurredAtEpochMillis?.let { occurrence ->
+                        occurrence >= startInclusiveEpochMillis && occurrence < endExclusiveEpochMillis
+                    } == true
+                }.sortedWith(
+                    compareByDescending<SimpleFinIgnoredTransactionEntity> { it.occurredAtEpochMillis }
+                        .thenBy { it.transactionId },
+                )
+
+        override suspend fun deleteTransactionsInRange(
+            startInclusiveEpochMillis: Long,
+            endExclusiveEpochMillis: Long,
+        ): Int {
+            val ids = getInRange(startInclusiveEpochMillis, endExclusiveEpochMillis).map { it.id }
+            ids.forEach(entities::remove)
+            publish()
+            return ids.size
+        }
+
+        override suspend fun deleteTombstonesInRange(
+            startInclusiveEpochMillis: Long,
+            endExclusiveEpochMillis: Long,
+        ): Int {
+            val ids = tombstonesInRange(startInclusiveEpochMillis, endExclusiveEpochMillis).map { it.transactionId }
+            ids.forEach(ignored::remove)
+            return ids.size
+        }
+
+        override suspend fun restoreTransactions(transactions: List<TransactionEntity>) {
+            upsertAll(transactions)
+        }
+
+        override suspend fun restoreTombstones(tombstones: List<SimpleFinIgnoredTransactionEntity>) {
+            tombstones.forEach { tombstone -> ignored[tombstone.transactionId] = tombstone }
+        }
 
         override suspend fun upsert(transaction: TransactionEntity) {
             entities[transaction.id] = transaction

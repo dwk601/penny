@@ -10,7 +10,7 @@ import java.time.ZoneOffset
 internal const val SIMPLEFIN_RESYNC_PICKER_DAYS = 45
 
 /** A local-calendar range whose start is included and whose end is excluded. */
-internal data class PennyLocalDateRange(
+data class PennyLocalDateRange(
     val startInclusive: LocalDate,
     val endExclusive: LocalDate,
 ) {
