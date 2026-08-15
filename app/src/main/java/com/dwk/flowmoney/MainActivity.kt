@@ -95,6 +95,7 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -163,6 +164,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -301,6 +303,8 @@ internal enum class DataOperation(
     Sync("Syncing bank"),
     UpdateAutomaticSyncs("Saving sync frequency"),
     Disconnect("Disconnecting bank"),
+    ResetDays("Resetting days"),
+    RestoreDays("Restoring reset days"),
 }
 
 internal fun canDismissDataSheet(
@@ -312,6 +316,44 @@ internal fun pickerResultOperation(
     uri: Uri?,
     operation: DataOperation,
 ): DataOperation? = uri?.let { operation }
+
+private data class ResetDaysRequest(
+    val range: PennyLocalDateRange,
+    val count: TransactionRangeCount,
+)
+
+internal fun resetDaysRangeLabel(range: PennyLocalDateRange): String {
+    val start = range.startInclusive
+    val end = range.lastInclusive
+    val month = DateTimeFormatter.ofPattern("MMMM", Locale.ENGLISH)
+    return when {
+        start == end -> {
+            "${start.format(month)} ${start.dayOfMonth}, ${start.year}"
+        }
+
+        start.year == end.year && start.month == end.month -> {
+            "${start.format(month)} ${start.dayOfMonth}–${end.dayOfMonth}, ${start.year}"
+        }
+
+        start.year == end.year -> {
+            "${start.format(month)} ${start.dayOfMonth}–${end.format(month)} ${end.dayOfMonth}, ${start.year}"
+        }
+
+        else -> {
+            "${start.format(month)} ${start.dayOfMonth}, ${start.year}–" +
+                "${end.format(month)} ${end.dayOfMonth}, ${end.year}"
+        }
+    }
+}
+
+internal fun resetDaysCountLabel(count: TransactionRangeCount): String {
+    val affected = count.affectedCount
+    val itemLabel = if (affected == 1L) "item" else "items"
+    val transactionLabel = if (count.transactionCount == 1L) "transaction" else "transactions"
+    val deletionLabel = if (count.tombstoneCount == 1L) "deleted SimpleFIN record" else "deleted SimpleFIN records"
+    return "$affected $itemLabel affected: ${count.transactionCount} $transactionLabel + " +
+        "${count.tombstoneCount} $deletionLabel"
+}
 
 internal data class EditorDraft(
     val id: String?,
@@ -429,10 +471,14 @@ fun FlowMoneyApp(
     retryPendingSimpleFinConnection: suspend () -> SimpleFinSyncResult = viewModel::retryPendingSimpleFinConnection,
     cancelPendingSimpleFinConnection: suspend () -> Unit = viewModel::cancelPendingSimpleFinConnection,
     manualSimpleFinSync: suspend () -> SimpleFinSyncResult = viewModel::syncSimpleFinNow,
+    appSnackbarHostState: SnackbarHostState? = null,
+    resetDaysClock: Clock = Clock.systemDefaultZone(),
+    resetDaysZoneId: ZoneId = ZoneId.systemDefault(),
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
+    val rememberedAppSnackbarHostState = remember { SnackbarHostState() }
+    val snackbarHostState = appSnackbarHostState ?: rememberedAppSnackbarHostState
     val dataSnackbarHostState = remember { SnackbarHostState() }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showSheet by rememberSaveable { mutableStateOf(false) }
@@ -448,6 +494,8 @@ fun FlowMoneyApp(
     var lastHandledOpenAddSheetRequest by remember { mutableStateOf(0) }
     var dataOperation by remember { mutableStateOf<DataOperation?>(null) }
     var showDisconnectConfirmation by rememberSaveable { mutableStateOf(false) }
+    var resetDaysConfirmation by remember { mutableStateOf<ResetDaysRequest?>(null) }
+    var resetDaysFailure by rememberSaveable { mutableStateOf<String?>(null) }
     val selectedTab = remember(selectedTabName) { DashboardTab.valueOf(selectedTabName) }
     val editorDirty = editorDraft != originalEditorDraft
     val latestEditorDirty by rememberUpdatedState(editorDirty)
@@ -552,6 +600,57 @@ fun FlowMoneyApp(
                 }
             } finally {
                 persistenceBusy = false
+            }
+        }
+    }
+
+    fun showResetDaysUndo(
+        snapshot: TransactionRangeResetSnapshot,
+        range: PennyLocalDateRange,
+    ) {
+        val rangeLabel = resetDaysRangeLabel(range)
+        val itemLabel = if (snapshot.affectedCount == 1L) "item" else "items"
+        scope.launch {
+            var message = "Reset $rangeLabel: ${snapshot.affectedCount} $itemLabel removed"
+            var actionLabel = "Undo"
+            while (true) {
+                val result =
+                    snackbarHostState.showSnackbar(
+                        message = message,
+                        actionLabel = actionLabel,
+                        withDismissAction = true,
+                        duration = SnackbarDuration.Indefinite,
+                    )
+                if (result != SnackbarResult.ActionPerformed) return@launch
+                if (dataOperation != null) {
+                    message = "Could not restore $rangeLabel while another data operation is running."
+                    actionLabel = "Retry"
+                    continue
+                }
+
+                dataOperation = DataOperation.RestoreDays
+                val restored =
+                    try {
+                        check(viewModel.restoreRange(snapshot) == snapshot.count) {
+                            "Range restore count did not match its snapshot"
+                        }
+                        true
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (_: Throwable) {
+                        false
+                    } finally {
+                        dataOperation = null
+                    }
+                if (!restored) {
+                    message = "Could not restore $rangeLabel."
+                    actionLabel = "Retry"
+                    continue
+                }
+
+                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+                snackbarHostState.showSnackbar("Restored $rangeLabel")
+                return@launch
             }
         }
     }
@@ -900,6 +999,15 @@ fun FlowMoneyApp(
                         dataSnackbarHostState.showSnackbar(message)
                     }
                 },
+                onCountResetDays = viewModel::countRange,
+                onResetDays = { range, count ->
+                    if (dataOperation == null) {
+                        resetDaysFailure = null
+                        resetDaysConfirmation = ResetDaysRequest(range, count)
+                    }
+                },
+                resetDaysClock = resetDaysClock,
+                resetDaysZoneId = resetDaysZoneId,
                 onImport = {
                     if (dataOperation == null) {
                         dataOperation = DataOperation.Import
@@ -931,6 +1039,45 @@ fun FlowMoneyApp(
                 modifier = Modifier.imePadding(),
             )
         }
+    }
+
+    resetDaysConfirmation?.let { request ->
+        ResetDaysConfirmationDialog(
+            request = request,
+            operation = dataOperation,
+            failureMessage = resetDaysFailure,
+            onConfirm = {
+                if (dataOperation != null) return@ResetDaysConfirmationDialog
+                resetDaysFailure = null
+                dataOperation = DataOperation.ResetDays
+                scope.launch {
+                    val snapshot =
+                        try {
+                            viewModel.resetRange(request.range, resetDaysZoneId)
+                        } catch (failure: CancellationException) {
+                            throw failure
+                        } catch (_: Throwable) {
+                            resetDaysFailure = "Could not reset these days. Your Penny data was not changed."
+                            null
+                        } finally {
+                            dataOperation = null
+                        }
+                    snapshot?.let {
+                        resetDaysConfirmation = null
+                        resetDaysFailure = null
+                        showDataSheet = false
+                        showResetDaysUndo(it, request.range)
+                        bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+                    }
+                }
+            },
+            onDismiss = {
+                if (dataOperation == null) {
+                    resetDaysConfirmation = null
+                    resetDaysFailure = null
+                }
+            },
+        )
     }
 
     if (showDisconnectConfirmation) {
@@ -1091,7 +1238,12 @@ private fun FlowMoneyScaffold(
                 scrollBehavior = scrollBehavior,
             )
         },
-        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+        snackbarHost = {
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.testTag("app_snackbar_host"),
+            )
+        },
         bottomBar = {
             if (!isWide) {
                 FlowMoneyNavigationBar(selectedTab = selectedTab, onTabSelected = onTabSelected)
@@ -1970,6 +2122,12 @@ internal fun DataSheet(
     onConnect: (String) -> Unit,
     onSync: () -> Unit,
     onAutomaticSyncsPerDayChange: (Int) -> Unit = {},
+    onCountResetDays: suspend (PennyLocalDateRange, ZoneId) -> TransactionRangeCount = { _, _ ->
+        TransactionRangeCount(transactionCount = 0, tombstoneCount = 0)
+    },
+    onResetDays: (PennyLocalDateRange, TransactionRangeCount) -> Unit = { _, _ -> },
+    resetDaysClock: Clock = Clock.systemDefaultZone(),
+    resetDaysZoneId: ZoneId = ZoneId.systemDefault(),
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDisconnect: () -> Unit,
@@ -2082,7 +2240,10 @@ internal fun DataSheet(
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(top = 12.dp, bottom = 20.dp),
-                modifier = Modifier.fillMaxWidth(),
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag("data_sheet_list"),
             ) {
                 when {
                     simpleFin.isConnectionPending -> {
@@ -2121,6 +2282,15 @@ internal fun DataSheet(
                             }
                         }
                         item { localDataSection() }
+                        item {
+                            SimpleFinResetDaysCard(
+                                operation = operation,
+                                onCountResetDays = onCountResetDays,
+                                onResetDays = onResetDays,
+                                clock = resetDaysClock,
+                                zoneId = resetDaysZoneId,
+                            )
+                        }
                     }
 
                     profile == null -> {
@@ -2162,6 +2332,15 @@ internal fun DataSheet(
                                             .testTag("simplefin_setup_token"),
                                 )
                             }
+                        }
+                        item {
+                            SimpleFinResetDaysCard(
+                                operation = operation,
+                                onCountResetDays = onCountResetDays,
+                                onResetDays = onResetDays,
+                                clock = resetDaysClock,
+                                zoneId = resetDaysZoneId,
+                            )
                         }
                     }
 
@@ -2221,6 +2400,15 @@ internal fun DataSheet(
                             }
                         }
                         item { localDataSection() }
+                        item {
+                            SimpleFinResetDaysCard(
+                                operation = operation,
+                                onCountResetDays = onCountResetDays,
+                                onResetDays = onResetDays,
+                                clock = resetDaysClock,
+                                zoneId = resetDaysZoneId,
+                            )
+                        }
                     }
 
                     else -> {
@@ -2335,11 +2523,322 @@ internal fun DataSheet(
                             }
                         }
                         item { localDataSection() }
+                        item {
+                            SimpleFinResetDaysCard(
+                                operation = operation,
+                                onCountResetDays = onCountResetDays,
+                                onResetDays = onResetDays,
+                                clock = resetDaysClock,
+                                zoneId = resetDaysZoneId,
+                            )
+                        }
                     }
                 }
             }
         }
     }
+}
+
+private sealed interface ResetDaysCountState {
+    data object Idle : ResetDaysCountState
+
+    data object Loading : ResetDaysCountState
+
+    data class Loaded(
+        val count: TransactionRangeCount,
+    ) : ResetDaysCountState
+
+    data class Failed(
+        val message: String,
+    ) : ResetDaysCountState
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SimpleFinResetDaysCard(
+    operation: DataOperation?,
+    onCountResetDays: suspend (PennyLocalDateRange, ZoneId) -> TransactionRangeCount,
+    onResetDays: (PennyLocalDateRange, TransactionRangeCount) -> Unit,
+    clock: Clock,
+    zoneId: ZoneId,
+) {
+    var selectedStartEpochDay by rememberSaveable { mutableStateOf<Long?>(null) }
+    var selectedEndEpochDay by rememberSaveable { mutableStateOf<Long?>(null) }
+    var showPicker by rememberSaveable { mutableStateOf(false) }
+    var countRequest by remember { mutableStateOf(0) }
+    var countState by remember { mutableStateOf<ResetDaysCountState>(ResetDaysCountState.Idle) }
+    val latestCountResetDays by rememberUpdatedState(onCountResetDays)
+    val selectedRange =
+        remember(selectedStartEpochDay, selectedEndEpochDay) {
+            val startEpochDay = selectedStartEpochDay
+            val endEpochDay = selectedEndEpochDay
+            if (startEpochDay == null || endEpochDay == null) {
+                null
+            } else {
+                runCatching {
+                    PennyLocalDateRange(
+                        startInclusive = LocalDate.ofEpochDay(startEpochDay),
+                        endExclusive = LocalDate.ofEpochDay(endEpochDay),
+                    )
+                }.getOrNull()
+            }
+        }
+    val isBusy = operation != null
+    val isCounting = countState == ResetDaysCountState.Loading
+
+    LaunchedEffect(selectedRange, countRequest, zoneId) {
+        val range = selectedRange
+        if (range == null) {
+            countState = ResetDaysCountState.Idle
+            return@LaunchedEffect
+        }
+        countState = ResetDaysCountState.Loading
+        countState =
+            try {
+                ResetDaysCountState.Loaded(latestCountResetDays(range, zoneId))
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                ResetDaysCountState.Failed("Could not count affected data. Try again.")
+            }
+    }
+
+    DataCard(
+        modifier = Modifier.testTag("simplefin_reset_days_card"),
+        backgroundColor = MaterialTheme.colorScheme.errorContainer,
+    ) {
+        Text(
+            "Reset days",
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Remove selected days from Penny, including transactions and SimpleFIN deletion history. " +
+                "A later bank sync can re-download SimpleFIN data only while those days remain in its 45-day window. " +
+                "Manually added and CSV-imported rows cannot be downloaded.",
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(12.dp))
+        selectedRange?.let { range ->
+            Text(
+                resetDaysRangeLabel(range),
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag("simplefin_reset_days_range"),
+            )
+            Spacer(Modifier.height(6.dp))
+        }
+        Column(modifier = Modifier.fillMaxWidth()) {
+            when (val state = countState) {
+                ResetDaysCountState.Idle -> {
+                    Text(
+                        "Choose a range to see how many items are affected.",
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier =
+                            Modifier
+                                .semantics { liveRegion = LiveRegionMode.Polite }
+                                .testTag("simplefin_reset_days_count"),
+                    )
+                }
+
+                ResetDaysCountState.Loading -> {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier =
+                            Modifier
+                                .semantics { liveRegion = LiveRegionMode.Polite }
+                                .testTag("simplefin_reset_days_count"),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier =
+                                Modifier
+                                    .size(18.dp)
+                                    .testTag("simplefin_reset_days_count_busy"),
+                        )
+                        Text(
+                            "Counting affected data…",
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+
+                is ResetDaysCountState.Loaded -> {
+                    Text(
+                        resetDaysCountLabel(state.count),
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier =
+                            Modifier
+                                .semantics { liveRegion = LiveRegionMode.Polite }
+                                .testTag("simplefin_reset_days_count"),
+                    )
+                }
+
+                is ResetDaysCountState.Failed -> {
+                    Text(
+                        state.message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier =
+                            Modifier
+                                .semantics { liveRegion = LiveRegionMode.Polite }
+                                .testTag("simplefin_reset_days_count"),
+                    )
+                    TextButton(
+                        onClick = { countRequest += 1 },
+                        enabled = !isBusy,
+                        modifier = Modifier.testTag("simplefin_reset_days_count_retry_button"),
+                    ) { Text("Retry count") }
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Button(
+                onClick = { showPicker = true },
+                enabled = !isBusy && !isCounting,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                    ),
+                shape = MaterialTheme.shapes.large,
+                modifier =
+                    Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("simplefin_reset_days_picker_button"),
+            ) { Text(if (selectedRange == null) "Choose days" else "Change days") }
+            val loadedCount = (countState as? ResetDaysCountState.Loaded)?.count
+            Button(
+                onClick = {
+                    val range = selectedRange ?: return@Button
+                    val count = loadedCount ?: return@Button
+                    if (!simpleFinResyncPickerRange(clock).contains(range)) {
+                        countState = ResetDaysCountState.Failed("These days are outside SimpleFIN's current 45-day window. Choose again.")
+                        return@Button
+                    }
+                    onResetDays(range, count)
+                },
+                enabled = !isBusy && selectedRange != null && loadedCount != null,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                shape = MaterialTheme.shapes.large,
+                modifier =
+                    Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("simplefin_reset_days_reset_button"),
+            ) { Text("Reset…") }
+        }
+    }
+
+    if (showPicker) {
+        val initialRange =
+            selectedRange ?: simpleFinResyncPickerRange(clock).let { selectableRange ->
+                PennyLocalDateRange(selectableRange.lastInclusive, selectableRange.endExclusive)
+            }
+        PennySimpleFinDateRangePickerDialog(
+            initialRange = initialRange,
+            onDismiss = {
+                if (!isBusy) showPicker = false
+            },
+            onConfirm = { range ->
+                if (!isBusy) {
+                    selectedStartEpochDay = range.startInclusive.toEpochDay()
+                    selectedEndEpochDay = range.endExclusive.toEpochDay()
+                    countRequest += 1
+                    showPicker = false
+                }
+            },
+            modifier = Modifier.testTag("simplefin_reset_days_picker_dialog"),
+            clock = clock,
+        )
+    }
+}
+
+@Composable
+private fun ResetDaysConfirmationDialog(
+    request: ResetDaysRequest,
+    operation: DataOperation?,
+    failureMessage: String?,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val isBusy = operation != null
+    AlertDialog(
+        onDismissRequest = {
+            if (!isBusy) onDismiss()
+        },
+        title = { Text("Reset these days?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    resetDaysRangeLabel(request.range),
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag("simplefin_reset_days_confirmation_range"),
+                )
+                Text(
+                    resetDaysCountLabel(request.count),
+                    modifier = Modifier.testTag("simplefin_reset_days_confirmation_count"),
+                )
+                Text(
+                    "This removes these days from Penny, including manually added and CSV-imported transactions " +
+                        "and SimpleFIN deletion records. Only SimpleFIN data can be re-downloaded by a later bank sync, " +
+                        "and only within its 45-day window.",
+                )
+                failureMessage?.let { message ->
+                    Text(
+                        message,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier =
+                            Modifier
+                                .semantics { liveRegion = LiveRegionMode.Assertive }
+                                .testTag("simplefin_reset_days_failure"),
+                    )
+                }
+                if (isBusy) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.testTag("simplefin_reset_days_busy"),
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp))
+                        Text(operation?.label.orEmpty() + "…")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = !isBusy,
+                modifier = Modifier.testTag("simplefin_reset_days_confirm_button"),
+            ) { Text("Reset", color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isBusy,
+                modifier = Modifier.testTag("simplefin_reset_days_cancel_button"),
+            ) { Text("Cancel") }
+        },
+        modifier = Modifier.testTag("simplefin_reset_days_confirmation_dialog"),
+    )
 }
 
 @Composable
