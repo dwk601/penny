@@ -41,11 +41,21 @@ class PennyWidgetResourceTest {
     @Test
     fun initialFrameUsesCompactRuntimeBackground() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val compactBackground = layoutRootResource(context, R.layout.widget_penny_compact, "background")
-        val initialBackground = layoutRootResource(context, R.layout.widget_penny_initial, "background")
+        val compactRoot = layoutRootResource(context, R.layout.widget_penny_compact)
+        val initialRoot = layoutRootResource(context, R.layout.widget_penny_initial)
 
-        assertEquals(R.drawable.widget_penny_compact_background, compactBackground)
-        assertEquals("initial and runtime compact backgrounds", compactBackground, initialBackground)
+        assertEquals("runtime compact root", R.id.widget_root, compactRoot.id)
+        assertEquals("initial frame root", R.id.widget_initial_root, initialRoot.id)
+        assertEquals(
+            "runtime compact background",
+            R.drawable.widget_penny_compact_background,
+            compactRoot.background,
+        )
+        assertEquals(
+            "initial frame background",
+            R.drawable.widget_penny_compact_background,
+            initialRoot.background,
+        )
     }
 
     @Test
@@ -241,8 +251,23 @@ class PennyWidgetResourceTest {
     private fun layoutRootResource(
         context: Context,
         layoutId: Int,
-        attributeName: String,
-    ): Int = xmlRootResource(context, layoutId, "LinearLayout", attributeName)
+    ): LayoutRootResource {
+        val parser = context.resources.getXml(layoutId)
+        try {
+            while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType == XmlPullParser.START_TAG) {
+                    return LayoutRootResource(
+                        id = parser.getAttributeResourceValue(ANDROID_NAMESPACE, "id", 0),
+                        background = parser.getAttributeResourceValue(ANDROID_NAMESPACE, "background", 0),
+                    )
+                }
+                parser.next()
+            }
+        } finally {
+            parser.close()
+        }
+        throw AssertionError("${context.resources.getResourceName(layoutId)} has no root element")
+    }
 
     private fun xmlRootResource(
         context: Context,
@@ -333,7 +358,8 @@ class PennyWidgetResourceTest {
             root.paddingBottom in minimumPadding..maximumPadding,
         )
 
-        val radius = dpToPx(COMPACT_CORNER_RADIUS_DP, density)
+        val radius = compactCornerRadiusPx(root.context)
+        assertTrue("$description compact corner radius must be positive: ${radius}px", radius > 0)
         textViews.forEach { textView ->
             val bounds = descendantBounds(root, textView)
             listOf(
@@ -348,7 +374,7 @@ class PennyWidgetResourceTest {
                 val deltaY = y - nearestY
                 assertTrue(
                     "$description ${viewDescription(root.context, textView)} bounds $bounds " +
-                        "cross the ${COMPACT_CORNER_RADIUS_DP}dp rounded safe inset at ($x, $y)",
+                        "cross the ${radius}px rounded safe inset at ($x, $y)",
                     deltaX * deltaX + deltaY * deltaY <= radius * radius,
                 )
             }
@@ -356,6 +382,30 @@ class PennyWidgetResourceTest {
 
         val guidance = root.findViewById<TextView>(R.id.widget_initial_guidance)
         assertEquals("$description guidance max lines", 2, guidance.maxLines)
+    }
+
+    private fun compactCornerRadiusPx(context: Context): Int {
+        val parser = context.resources.getXml(R.drawable.widget_penny_compact_background)
+        try {
+            while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType == XmlPullParser.START_TAG && parser.name == "corners") {
+                    val attributes =
+                        context.resources.obtainAttributes(parser, intArrayOf(android.R.attr.radius))
+                    try {
+                        if (!attributes.hasValue(0)) {
+                            throw AssertionError("compact widget background corners have no radius")
+                        }
+                        return attributes.getDimensionPixelSize(0, -1)
+                    } finally {
+                        attributes.recycle()
+                    }
+                }
+                parser.next()
+            }
+        } finally {
+            parser.close()
+        }
+        throw AssertionError("compact widget background has no corners element")
     }
 
     private fun dpToPx(
@@ -381,6 +431,11 @@ class PennyWidgetResourceTest {
             context.resources.getResourceEntryName(view.id)
         }
 
+    private data class LayoutRootResource(
+        val id: Int,
+        val background: Int,
+    )
+
     private data class StaticWidgetLayoutCase(
         val name: String,
         val layoutId: Int,
@@ -394,7 +449,6 @@ class PennyWidgetResourceTest {
 
     companion object {
         private const val ANDROID_NAMESPACE = "http://schemas.android.com/apk/res/android"
-        private const val COMPACT_CORNER_RADIUS_DP = 8
         private const val MINIMUM_INITIAL_VERTICAL_PADDING_DP = 2
         private const val MAXIMUM_INITIAL_VERTICAL_PADDING_DP = 6
     }
