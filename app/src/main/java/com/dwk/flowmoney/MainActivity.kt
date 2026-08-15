@@ -3356,7 +3356,9 @@ private fun SwipeTransactionRow(
 
         SwipeToDismissBox(
             state = dismissState,
-            backgroundContent = { SwipeActionBackground() },
+            backgroundContent = {
+                SwipeActionBackground(dismissDirection = dismissState.dismissDirection)
+            },
             modifier =
                 Modifier
                     .fillMaxWidth()
@@ -3368,31 +3370,42 @@ private fun SwipeTransactionRow(
 }
 
 @Composable
-private fun SwipeActionBackground() {
+private fun SwipeActionBackground(dismissDirection: SwipeToDismissBoxValue) {
     Box(
         modifier =
             Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest),
     ) {
-        Text(
-            text = "Edit",
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.SemiBold,
-            modifier =
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = 18.dp),
-        )
-        Text(
-            text = "Delete",
-            color = LocalFinanceColors.current.expense,
-            fontWeight = FontWeight.SemiBold,
-            modifier =
-                Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 18.dp),
-        )
+        when (dismissDirection) {
+            SwipeToDismissBoxValue.StartToEnd -> {
+                Text(
+                    text = "Edit",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier =
+                        Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 18.dp),
+                )
+            }
+
+            SwipeToDismissBoxValue.EndToStart -> {
+                Text(
+                    text = "Delete",
+                    color = LocalFinanceColors.current.expense,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier =
+                        Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 18.dp),
+                )
+            }
+
+            SwipeToDismissBoxValue.Settled -> {
+                Unit
+            }
+        }
     }
 }
 
@@ -3408,6 +3421,7 @@ private fun TransactionRow(
         modifier =
             modifier
                 .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .testTag("transaction_content_${transaction.id}")
                 .clickable(onClick = onClick)
                 .semantics {
@@ -3443,7 +3457,7 @@ private fun TransactionRow(
                     modifier =
                         Modifier
                             .fillMaxWidth()
-                            .padding(start = 54.dp, top = 2.dp),
+                            .padding(top = 4.dp),
                 )
             }
         } else {
