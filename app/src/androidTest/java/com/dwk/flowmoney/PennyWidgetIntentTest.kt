@@ -903,7 +903,13 @@ class PennyWidgetIntentTest {
             }
             scenario.recreate()
 
-            composeRule.onNodeWithTag("merchant_field").assertTextContains("Restored widget draft")
+            composeRule.waitUntil(5_000) {
+                runCatching {
+                    composeRule
+                        .onNodeWithTag("merchant_field")
+                        .assertTextContains("Restored widget draft")
+                }.isSuccess
+            }
             composeRule.onNodeWithText("Discard changes?").assertDoesNotExist()
 
             scenario.onActivity { activity ->
