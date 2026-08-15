@@ -56,10 +56,17 @@ internal data class SimpleFinIdentityReconciliationPlan(
     val tombstones: List<SimpleFinIgnoredTransactionEntity>,
 )
 
+/** Credential-free occurrence metadata mapped from the current SimpleFIN payload. */
+internal data class SimpleFinPayloadOccurrence(
+    val transactionId: String,
+    val occurredAtEpochMillis: Long,
+)
+
 internal object SimpleFinIdentityReconciler {
     suspend fun reconcile(
         dao: SimpleFinIdentityDao,
         origin: SimpleFinServerOrigin,
+        payloadOccurrences: List<SimpleFinPayloadOccurrence>,
     ) {
         val plan =
             plan(
@@ -67,6 +74,7 @@ internal object SimpleFinIdentityReconciler {
                 transactions = dao.simpleFinTransactions(),
                 accounts = dao.accounts(),
                 tombstones = dao.tombstones(),
+                payloadOccurrences = payloadOccurrences,
             )
         dao.clearSimpleFinTransactions()
         if (plan.transactions.isNotEmpty()) dao.insertSimpleFinTransactions(plan.transactions)
@@ -81,6 +89,7 @@ internal object SimpleFinIdentityReconciler {
         transactions: List<TransactionEntity>,
         accounts: List<SimpleFinAccountEntity>,
         tombstones: List<SimpleFinIgnoredTransactionEntity>,
+        payloadOccurrences: List<SimpleFinPayloadOccurrence> = emptyList(),
     ): SimpleFinIdentityReconciliationPlan {
         val accountGroups = linkedMapOf<String, MutableList<SimpleFinAccountEntity>>()
         val untouchedAccounts = mutableListOf<SimpleFinAccountEntity>()
@@ -135,6 +144,21 @@ internal object SimpleFinIdentityReconciler {
             }
         }
 
+        val payloadOccurrencesByStableId =
+            payloadOccurrences
+                .mapNotNull { occurrence ->
+                    val remote = SimpleFinIdentity.parseTransactionId(occurrence.transactionId, origin) ?: return@mapNotNull null
+                    val stableId =
+                        SimpleFinIdentity.transactionId(
+                            origin,
+                            remote.providerConnectionId,
+                            remote.accountId,
+                            remote.transactionId,
+                        )
+                    stableId to occurrence.occurredAtEpochMillis
+                }.groupBy({ it.first }, { it.second })
+                .mapValues { (_, occurrences) -> occurrences.max() }
+
         val mergedTransactions =
             transactionGroups
                 .filterKeys { it !in tombstoneGroups }
@@ -149,7 +173,12 @@ internal object SimpleFinIdentityReconciler {
                 }
         val mergedTombstones =
             tombstoneGroups.map { (stableId, rows) ->
-                mergeTombstone(stableId, rows, transactionGroups[stableId]?.rows.orEmpty())
+                mergeTombstone(
+                    stableId = stableId,
+                    rows = rows,
+                    transactions = transactionGroups[stableId]?.rows.orEmpty(),
+                    payloadOccurredAtEpochMillis = payloadOccurrencesByStableId[stableId],
+                )
             }
 
         return SimpleFinIdentityReconciliationPlan(
@@ -226,6 +255,7 @@ internal object SimpleFinIdentityReconciler {
         stableId: String,
         rows: List<SimpleFinIgnoredTransactionEntity>,
         transactions: List<TransactionEntity>,
+        payloadOccurredAtEpochMillis: Long?,
     ): SimpleFinIgnoredTransactionEntity {
         val ranked =
             rows.sortedWith(
@@ -241,6 +271,7 @@ internal object SimpleFinIdentityReconciler {
                             .thenBy { it.id },
                     ).firstOrNull()
                     ?.occurredAtEpochMillis
+                ?: payloadOccurredAtEpochMillis
         return SimpleFinIgnoredTransactionEntity(
             transactionId = stableId,
             ignoredAtEpochMillis = rows.maxOf { it.ignoredAtEpochMillis },

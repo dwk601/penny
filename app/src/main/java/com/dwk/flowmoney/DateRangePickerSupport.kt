@@ -44,6 +44,17 @@ internal fun simpleFinResyncPickerRange(today: LocalDate): PennyLocalDateRange =
 
 internal fun simpleFinResyncPickerRange(clock: Clock): PennyLocalDateRange = simpleFinResyncPickerRange(LocalDate.now(clock))
 
+internal fun simpleFinResyncPickerRange(
+    clock: Clock,
+    zoneId: ZoneId,
+): PennyLocalDateRange = simpleFinResyncPickerRange(LocalDate.now(clock.withZone(zoneId)))
+
+internal fun isSimpleFinResetRangeCurrent(
+    range: PennyLocalDateRange,
+    clock: Clock,
+    zoneId: ZoneId,
+): Boolean = simpleFinResyncPickerRange(clock, zoneId).contains(range)
+
 /** Material date pickers encode calendar dates as UTC-midnight millis, not local instants. */
 internal fun localDateToPickerMillis(date: LocalDate): Long = date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
 

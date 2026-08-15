@@ -442,7 +442,24 @@ class Phase2AsyncEdgeTest {
                 .config[SemanticsActions.OnClick]
                 .action!!
 
-        composeRule.onNodeWithTag("transaction_content_${editorTarget.id}").performClick()
+        composeRule.waitUntil(5_000) {
+            composeRule.onAllNodesWithTag("editor_sheet").fetchSemanticsNodes().isEmpty()
+        }
+        composeRule.onNodeWithTag("editor_sheet").assertDoesNotExist()
+        val reopenEditorAction =
+            composeRule
+                .onNodeWithTag("transaction_content_${editorTarget.id}")
+                .performScrollTo()
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+        composeRule.runOnIdle { reopenEditorAction() }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+            }.isSuccess
+        }
         composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
         val saveAction =
             composeRule

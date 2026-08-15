@@ -162,6 +162,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Clock
@@ -319,6 +320,7 @@ internal fun pickerResultOperation(
 
 private data class ResetDaysRequest(
     val range: PennyLocalDateRange,
+    val zoneId: ZoneId,
     val count: TransactionRangeCount,
 )
 
@@ -481,14 +483,16 @@ fun FlowMoneyApp(
     val snackbarHostState = appSnackbarHostState ?: rememberedAppSnackbarHostState
     val dataSnackbarHostState = remember { SnackbarHostState() }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val viewModelMutationBusy by viewModel.mutationBusy.collectAsStateWithLifecycle()
+    val pendingRangeReset by viewModel.pendingRangeReset.collectAsStateWithLifecycle()
     var showSheet by rememberSaveable { mutableStateOf(false) }
+    var editorSessionId by rememberSaveable { mutableStateOf(0) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
     var selectedTabName by rememberSaveable { mutableStateOf(DashboardTab.Overview.name) }
     var editorDraft by rememberSaveable(stateSaver = EditorDraftSaver) { mutableStateOf(newEditorDraft()) }
     var originalEditorDraft by rememberSaveable(stateSaver = EditorDraftSaver) { mutableStateOf(newEditorDraft()) }
     var editorId by rememberSaveable { mutableStateOf<String?>(null) }
     var persistenceBusy by remember { mutableStateOf(false) }
-    var allowBusyEditorHide by remember { mutableStateOf(false) }
     var showDiscardDialog by rememberSaveable { mutableStateOf(false) }
     var pendingWidgetQuickAddAfterDiscard by rememberSaveable { mutableStateOf(false) }
     var lastHandledOpenAddSheetRequest by remember { mutableStateOf(0) }
@@ -496,24 +500,13 @@ fun FlowMoneyApp(
     var showDisconnectConfirmation by rememberSaveable { mutableStateOf(false) }
     var resetDaysConfirmation by remember { mutableStateOf<ResetDaysRequest?>(null) }
     var resetDaysFailure by rememberSaveable { mutableStateOf<String?>(null) }
+    var resetDaysRecountRequest by rememberSaveable { mutableStateOf(0) }
+    var resetDaysReselectRequest by rememberSaveable { mutableStateOf(0) }
     val selectedTab = remember(selectedTabName) { DashboardTab.valueOf(selectedTabName) }
     val editorDirty = editorDraft != originalEditorDraft
+    val editorMutationBusy = persistenceBusy || viewModelMutationBusy
     val latestEditorDirty by rememberUpdatedState(editorDirty)
-    val latestPersistenceBusy by rememberUpdatedState(persistenceBusy)
-    val editorSheetState =
-        rememberModalBottomSheetState(
-            skipPartiallyExpanded = true,
-            confirmValueChange = { target ->
-                if (target == androidx.compose.material3.SheetValue.Hidden && allowBusyEditorHide) {
-                    true
-                } else if (target == androidx.compose.material3.SheetValue.Hidden && latestEditorDirty && !latestPersistenceBusy) {
-                    showDiscardDialog = true
-                    false
-                } else {
-                    !latestPersistenceBusy
-                }
-            },
-        )
+    val latestEditorMutationBusy by rememberUpdatedState(editorMutationBusy)
 
     LaunchedEffect(openOverviewRequest) {
         if (openOverviewRequest > 0) selectedTabName = DashboardTab.Overview.name
@@ -521,6 +514,77 @@ fun FlowMoneyApp(
 
     LaunchedEffect(viewModel) {
         viewModel.initializationErrorEvents.collect { snackbarHostState.showSnackbar(it) }
+    }
+
+    LaunchedEffect(viewModel, snackbarHostState) {
+        while (true) {
+            val pending = viewModel.pendingRangeReset.first { it != null } ?: continue
+            val id = pending.id
+            val rangeLabel = resetDaysRangeLabel(pending.range)
+            viewModel.refreshWidgetsAfterRangeReset(id) {
+                bestEffortWidgetRefresh { transactionWidgetRefresh(context.applicationContext) }
+            }
+            var retryMessage: String? = null
+            while (true) {
+                val current = viewModel.pendingRangeReset.value
+                if (current == null || current.id != id) break
+                when (current.status) {
+                    PendingRangeResetStatus.Restoring -> {
+                        viewModel.pendingRangeReset.first {
+                            it == null || it.id != id || it.status != PendingRangeResetStatus.Restoring
+                        }
+                        continue
+                    }
+
+                    PendingRangeResetStatus.Restored -> {
+                        val completed =
+                            viewModel.completePendingRangeResetRestore(id) {
+                                bestEffortWidgetRefresh { transactionWidgetRefresh(context.applicationContext) }
+                            }
+                        if (completed) snackbarHostState.showSnackbar("Restored $rangeLabel")
+                        break
+                    }
+
+                    PendingRangeResetStatus.RestoreFailed -> {
+                        retryMessage = "Could not restore $rangeLabel."
+                    }
+
+                    PendingRangeResetStatus.Available -> {
+                        Unit
+                    }
+                }
+                val itemLabel = if (current.count.affectedCount == 1L) "item" else "items"
+                val result =
+                    snackbarHostState.showSnackbar(
+                        message = retryMessage ?: "Reset $rangeLabel: ${current.count.affectedCount} $itemLabel removed",
+                        actionLabel = if (retryMessage == null) "Undo" else "Retry",
+                        withDismissAction = true,
+                        duration = SnackbarDuration.Indefinite,
+                    )
+                if (result != SnackbarResult.ActionPerformed) {
+                    if (viewModel.dismissPendingRangeReset(id)) break
+                    continue
+                }
+                retryMessage =
+                    when (viewModel.restorePendingRangeReset(id)) {
+                        PendingRangeResetRestoreResult.Restored -> {
+                            null
+                        }
+
+                        PendingRangeResetRestoreResult.Failed -> {
+                            "Could not restore $rangeLabel."
+                        }
+
+                        PendingRangeResetRestoreResult.Busy -> {
+                            "Could not restore $rangeLabel while another transaction change is running."
+                        }
+
+                        PendingRangeResetRestoreResult.AlreadyHandled -> {
+                            break
+                        }
+                    }
+            }
+        }
     }
 
     LaunchedEffect(openAddSheetRequest, uiState.isLoading) {
@@ -534,6 +598,7 @@ fun FlowMoneyApp(
                     editorId = null
                     editorDraft = widgetQuickAddDraft(uiState.suggestionHistory)
                     originalEditorDraft = editorDraft
+                    editorSessionId += 1
                     showSheet = true
                 }
             }
@@ -604,61 +669,11 @@ fun FlowMoneyApp(
         }
     }
 
-    fun showResetDaysUndo(
-        snapshot: TransactionRangeResetSnapshot,
-        range: PennyLocalDateRange,
-    ) {
-        val rangeLabel = resetDaysRangeLabel(range)
-        val itemLabel = if (snapshot.affectedCount == 1L) "item" else "items"
-        scope.launch {
-            var message = "Reset $rangeLabel: ${snapshot.affectedCount} $itemLabel removed"
-            var actionLabel = "Undo"
-            while (true) {
-                val result =
-                    snackbarHostState.showSnackbar(
-                        message = message,
-                        actionLabel = actionLabel,
-                        withDismissAction = true,
-                        duration = SnackbarDuration.Indefinite,
-                    )
-                if (result != SnackbarResult.ActionPerformed) return@launch
-                if (dataOperation != null) {
-                    message = "Could not restore $rangeLabel while another data operation is running."
-                    actionLabel = "Retry"
-                    continue
-                }
-
-                dataOperation = DataOperation.RestoreDays
-                val restored =
-                    try {
-                        check(viewModel.restoreRange(snapshot) == snapshot.count) {
-                            "Range restore count did not match its snapshot"
-                        }
-                        true
-                    } catch (failure: CancellationException) {
-                        throw failure
-                    } catch (_: Throwable) {
-                        false
-                    } finally {
-                        dataOperation = null
-                    }
-                if (!restored) {
-                    message = "Could not restore $rangeLabel."
-                    actionLabel = "Retry"
-                    continue
-                }
-
-                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
-                snackbarHostState.showSnackbar("Restored $rangeLabel")
-                return@launch
-            }
-        }
-    }
-
     fun openNewTransactionEditor() {
         editorId = null
         editorDraft = newEditorDraft()
         originalEditorDraft = editorDraft
+        editorSessionId += 1
         showSheet = true
     }
 
@@ -666,11 +681,12 @@ fun FlowMoneyApp(
         editorId = transaction.id
         editorDraft = transaction.toEditorDraft()
         originalEditorDraft = editorDraft
+        editorSessionId += 1
         showSheet = true
     }
 
     fun requestEditorDismissal() {
-        if (persistenceBusy) return
+        if (persistenceBusy || viewModel.mutationBusy.value) return
         if (editorDirty) showDiscardDialog = true else showSheet = false
     }
 
@@ -678,18 +694,10 @@ fun FlowMoneyApp(
         transaction: Transaction,
         closeEditor: Boolean = false,
     ) {
-        if (persistenceBusy) return
+        if (persistenceBusy || viewModel.mutationBusy.value) return
         persistenceBusy = true
         deleteWithUndo(transaction) {
-            if (closeEditor) {
-                allowBusyEditorHide = true
-                try {
-                    editorSheetState.hide()
-                    showSheet = false
-                } finally {
-                    allowBusyEditorHide = false
-                }
-            }
+            if (closeEditor) showSheet = false
         }
     }
 
@@ -799,56 +807,74 @@ fun FlowMoneyApp(
     }
 
     if (showSheet) {
-        ModalBottomSheet(
-            onDismissRequest = ::requestEditorDismissal,
-            sheetState = editorSheetState,
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-            modifier = Modifier.testTag("editor_sheet"),
-        ) {
-            TransactionEditor(
-                transaction = editorId?.let { id -> uiState.sortedTransactions.firstOrNull { it.id == id } },
-                draft = editorDraft,
-                suggestionHistory = uiState.suggestionHistory,
-                onDraftChange = { editorDraft = it },
-                onSave = { transaction ->
-                    if (!persistenceBusy) {
-                        val candidateId = editorDraft.id ?: transaction.id
-                        val candidateDraft = editorDraft.copy(id = candidateId)
-                        persistenceBusy = true
-                        scope.launch {
-                            var saveFailureMessage: String? = null
-                            try {
-                                try {
-                                    viewModel.upsert(candidateDraft.toTransaction())
-                                } catch (failure: CancellationException) {
-                                    throw failure
-                                } catch (_: Throwable) {
-                                    saveFailureMessage = "Could not save transaction."
-                                }
-                                if (saveFailureMessage == null) {
-                                    editorId = candidateId
-                                    editorDraft = candidateDraft
-                                    originalEditorDraft = candidateDraft
-                                    showSheet = false
-                                    bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
-                                }
-                            } finally {
-                                persistenceBusy = false
-                            }
-                            saveFailureMessage?.let { snackbarHostState.showSnackbar(it) }
-                        }
-                    }
-                },
-                onDelete =
-                    editorId?.let { id ->
-                        uiState.sortedTransactions.firstOrNull { it.id == id }?.let { transaction ->
-                            { deleteImmediately(transaction, closeEditor = true) }
+        key(editorSessionId) {
+            val editorSheetState =
+                rememberModalBottomSheetState(
+                    skipPartiallyExpanded = true,
+                    confirmValueChange = { target ->
+                        if (
+                            target == androidx.compose.material3.SheetValue.Hidden &&
+                            latestEditorDirty &&
+                            !latestEditorMutationBusy
+                        ) {
+                            showDiscardDialog = true
+                            false
+                        } else {
+                            !latestEditorMutationBusy
                         }
                     },
-                onCancel = ::requestEditorDismissal,
-                persistenceBusy = persistenceBusy,
-                modifier = Modifier,
-            )
+                )
+            ModalBottomSheet(
+                onDismissRequest = ::requestEditorDismissal,
+                sheetState = editorSheetState,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                modifier = Modifier.testTag("editor_sheet"),
+            ) {
+                TransactionEditor(
+                    transaction = editorId?.let { id -> uiState.sortedTransactions.firstOrNull { it.id == id } },
+                    draft = editorDraft,
+                    suggestionHistory = uiState.suggestionHistory,
+                    onDraftChange = { editorDraft = it },
+                    onSave = { transaction ->
+                        if (!persistenceBusy && !viewModel.mutationBusy.value) {
+                            val candidateId = editorDraft.id ?: transaction.id
+                            val candidateDraft = editorDraft.copy(id = candidateId)
+                            persistenceBusy = true
+                            scope.launch {
+                                var saveFailureMessage: String? = null
+                                try {
+                                    try {
+                                        viewModel.upsert(candidateDraft.toTransaction())
+                                    } catch (failure: CancellationException) {
+                                        throw failure
+                                    } catch (_: Throwable) {
+                                        saveFailureMessage = "Could not save transaction."
+                                    }
+                                    if (saveFailureMessage == null) {
+                                        editorId = candidateId
+                                        editorDraft = candidateDraft
+                                        originalEditorDraft = candidateDraft
+                                        showSheet = false
+                                        bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+                                    }
+                                } finally {
+                                    persistenceBusy = false
+                                }
+                                saveFailureMessage?.let { snackbarHostState.showSnackbar(it) }
+                            }
+                        }
+                    },
+                    onDelete =
+                        editorId?.let { id ->
+                            uiState.sortedTransactions.firstOrNull { it.id == id }?.let { transaction ->
+                                { deleteImmediately(transaction, closeEditor = true) }
+                            }
+                        },
+                    onCancel = ::requestEditorDismissal,
+                    persistenceBusy = editorMutationBusy,
+                    modifier = Modifier,
+                )
+            }
         }
     }
 
@@ -869,6 +895,7 @@ fun FlowMoneyApp(
                             editorId = null
                             editorDraft = widgetQuickAddDraft(uiState.suggestionHistory)
                             originalEditorDraft = editorDraft
+                            editorSessionId += 1
                             showSheet = true
                         } else {
                             showSheet = false
@@ -1000,14 +1027,17 @@ fun FlowMoneyApp(
                     }
                 },
                 onCountResetDays = viewModel::countRange,
-                onResetDays = { range, count ->
-                    if (dataOperation == null) {
+                onResetDays = { range, zoneId, count ->
+                    if (dataOperation == null && pendingRangeReset == null) {
                         resetDaysFailure = null
-                        resetDaysConfirmation = ResetDaysRequest(range, count)
+                        resetDaysConfirmation = ResetDaysRequest(range, zoneId, count)
                     }
                 },
                 resetDaysClock = resetDaysClock,
                 resetDaysZoneId = resetDaysZoneId,
+                rangeResetPending = pendingRangeReset != null,
+                resetDaysRecountRequest = resetDaysRecountRequest,
+                resetDaysReselectRequest = resetDaysReselectRequest,
                 onImport = {
                     if (dataOperation == null) {
                         dataOperation = DataOperation.Import
@@ -1048,26 +1078,58 @@ fun FlowMoneyApp(
             failureMessage = resetDaysFailure,
             onConfirm = {
                 if (dataOperation != null) return@ResetDaysConfirmationDialog
+                if (!isSimpleFinResetRangeCurrent(request.range, resetDaysClock, request.zoneId)) {
+                    resetDaysConfirmation = null
+                    resetDaysFailure = null
+                    resetDaysReselectRequest += 1
+                    scope.launch {
+                        dataSnackbarHostState.showSnackbar(
+                            "These days moved outside SimpleFIN's current 45-day window. Choose the days again.",
+                        )
+                    }
+                    return@ResetDaysConfirmationDialog
+                }
                 resetDaysFailure = null
                 dataOperation = DataOperation.ResetDays
                 scope.launch {
-                    val snapshot =
+                    var recoveryMessage: String? = null
+                    var recount = false
+                    var reselect = false
+                    val committed =
                         try {
-                            viewModel.resetRange(request.range, resetDaysZoneId)
+                            viewModel.resetRange(
+                                range = request.range,
+                                zoneId = request.zoneId,
+                                expectedCount = request.count,
+                                clock = resetDaysClock,
+                            )
                         } catch (failure: CancellationException) {
                             throw failure
+                        } catch (_: TransactionRangeChangedException) {
+                            recount = true
+                            recoveryMessage = "Penny data changed. Review the updated count and confirm again."
+                            null
+                        } catch (_: SimpleFinResetRangeOutOfWindowException) {
+                            reselect = true
+                            recoveryMessage =
+                                "These days moved outside SimpleFIN's current 45-day window. Choose the days again."
+                            null
                         } catch (_: Throwable) {
                             resetDaysFailure = "Could not reset these days. Your Penny data was not changed."
                             null
                         } finally {
                             dataOperation = null
                         }
-                    snapshot?.let {
+                    if (committed != null) {
                         resetDaysConfirmation = null
                         resetDaysFailure = null
                         showDataSheet = false
-                        showResetDaysUndo(it, request.range)
-                        bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+                    } else if (recoveryMessage != null) {
+                        resetDaysConfirmation = null
+                        resetDaysFailure = null
+                        if (recount) resetDaysRecountRequest += 1
+                        if (reselect) resetDaysReselectRequest += 1
+                        dataSnackbarHostState.showSnackbar(recoveryMessage!!)
                     }
                 }
             },
@@ -2125,9 +2187,12 @@ internal fun DataSheet(
     onCountResetDays: suspend (PennyLocalDateRange, ZoneId) -> TransactionRangeCount = { _, _ ->
         TransactionRangeCount(transactionCount = 0, tombstoneCount = 0)
     },
-    onResetDays: (PennyLocalDateRange, TransactionRangeCount) -> Unit = { _, _ -> },
+    onResetDays: (PennyLocalDateRange, ZoneId, TransactionRangeCount) -> Unit = { _, _, _ -> },
     resetDaysClock: Clock = Clock.systemDefaultZone(),
     resetDaysZoneId: ZoneId = ZoneId.systemDefault(),
+    rangeResetPending: Boolean = false,
+    resetDaysRecountRequest: Int = 0,
+    resetDaysReselectRequest: Int = 0,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onDisconnect: () -> Unit,
@@ -2198,6 +2263,18 @@ internal fun DataSheet(
             DataSheetSectionHeader("Bank sync")
             SimpleFinConnectionStatus(simpleFin = simpleFin)
         }
+    }
+    val resetDaysCard: @Composable () -> Unit = {
+        SimpleFinResetDaysCard(
+            operation = operation,
+            onCountResetDays = onCountResetDays,
+            onResetDays = onResetDays,
+            clock = resetDaysClock,
+            zoneId = resetDaysZoneId,
+            rangeResetPending = rangeResetPending,
+            externalRecountRequest = resetDaysRecountRequest,
+            selectionGeneration = resetDaysReselectRequest,
+        )
     }
 
     Box(
@@ -2282,15 +2359,7 @@ internal fun DataSheet(
                             }
                         }
                         item { localDataSection() }
-                        item {
-                            SimpleFinResetDaysCard(
-                                operation = operation,
-                                onCountResetDays = onCountResetDays,
-                                onResetDays = onResetDays,
-                                clock = resetDaysClock,
-                                zoneId = resetDaysZoneId,
-                            )
-                        }
+                        item { resetDaysCard() }
                     }
 
                     profile == null -> {
@@ -2333,15 +2402,7 @@ internal fun DataSheet(
                                 )
                             }
                         }
-                        item {
-                            SimpleFinResetDaysCard(
-                                operation = operation,
-                                onCountResetDays = onCountResetDays,
-                                onResetDays = onResetDays,
-                                clock = resetDaysClock,
-                                zoneId = resetDaysZoneId,
-                            )
-                        }
+                        item { resetDaysCard() }
                     }
 
                     profile.isPaused -> {
@@ -2400,15 +2461,7 @@ internal fun DataSheet(
                             }
                         }
                         item { localDataSection() }
-                        item {
-                            SimpleFinResetDaysCard(
-                                operation = operation,
-                                onCountResetDays = onCountResetDays,
-                                onResetDays = onResetDays,
-                                clock = resetDaysClock,
-                                zoneId = resetDaysZoneId,
-                            )
-                        }
+                        item { resetDaysCard() }
                     }
 
                     else -> {
@@ -2523,15 +2576,7 @@ internal fun DataSheet(
                             }
                         }
                         item { localDataSection() }
-                        item {
-                            SimpleFinResetDaysCard(
-                                operation = operation,
-                                onCountResetDays = onCountResetDays,
-                                onResetDays = onResetDays,
-                                clock = resetDaysClock,
-                                zoneId = resetDaysZoneId,
-                            )
-                        }
+                        item { resetDaysCard() }
                     }
                 }
             }
@@ -2539,16 +2584,27 @@ internal fun DataSheet(
     }
 }
 
+private data class ResetDaysCountKey(
+    val range: PennyLocalDateRange,
+    val zoneId: ZoneId,
+    val localRequest: Int,
+    val externalRequest: Int,
+)
+
 private sealed interface ResetDaysCountState {
     data object Idle : ResetDaysCountState
 
-    data object Loading : ResetDaysCountState
+    data class Loading(
+        val key: ResetDaysCountKey,
+    ) : ResetDaysCountState
 
     data class Loaded(
+        val key: ResetDaysCountKey,
         val count: TransactionRangeCount,
     ) : ResetDaysCountState
 
     data class Failed(
+        val key: ResetDaysCountKey,
         val message: String,
     ) : ResetDaysCountState
 }
@@ -2558,15 +2614,18 @@ private sealed interface ResetDaysCountState {
 private fun SimpleFinResetDaysCard(
     operation: DataOperation?,
     onCountResetDays: suspend (PennyLocalDateRange, ZoneId) -> TransactionRangeCount,
-    onResetDays: (PennyLocalDateRange, TransactionRangeCount) -> Unit,
+    onResetDays: (PennyLocalDateRange, ZoneId, TransactionRangeCount) -> Unit,
     clock: Clock,
     zoneId: ZoneId,
+    rangeResetPending: Boolean,
+    externalRecountRequest: Int,
+    selectionGeneration: Int,
 ) {
-    var selectedStartEpochDay by rememberSaveable { mutableStateOf<Long?>(null) }
-    var selectedEndEpochDay by rememberSaveable { mutableStateOf<Long?>(null) }
-    var showPicker by rememberSaveable { mutableStateOf(false) }
-    var countRequest by remember { mutableStateOf(0) }
-    var countState by remember { mutableStateOf<ResetDaysCountState>(ResetDaysCountState.Idle) }
+    var selectedStartEpochDay by rememberSaveable(selectionGeneration) { mutableStateOf<Long?>(null) }
+    var selectedEndEpochDay by rememberSaveable(selectionGeneration) { mutableStateOf<Long?>(null) }
+    var showPicker by rememberSaveable(selectionGeneration) { mutableStateOf(false) }
+    var countRequest by remember(selectionGeneration) { mutableStateOf(0) }
+    var countState by remember(selectionGeneration) { mutableStateOf<ResetDaysCountState>(ResetDaysCountState.Idle) }
     val latestCountResetDays by rememberUpdatedState(onCountResetDays)
     val selectedRange =
         remember(selectedStartEpochDay, selectedEndEpochDay) {
@@ -2583,23 +2642,39 @@ private fun SimpleFinResetDaysCard(
                 }.getOrNull()
             }
         }
-    val isBusy = operation != null
-    val isCounting = countState == ResetDaysCountState.Loading
+    val countKey =
+        selectedRange?.let { range ->
+            ResetDaysCountKey(
+                range = range,
+                zoneId = zoneId,
+                localRequest = countRequest,
+                externalRequest = externalRecountRequest,
+            )
+        }
+    val visibleCountState =
+        when (val state = countState) {
+            ResetDaysCountState.Idle -> countKey?.let { ResetDaysCountState.Loading(it) } ?: ResetDaysCountState.Idle
+            is ResetDaysCountState.Loading -> if (state.key == countKey) state else countKey?.let { ResetDaysCountState.Loading(it) }
+            is ResetDaysCountState.Loaded -> if (state.key == countKey) state else countKey?.let { ResetDaysCountState.Loading(it) }
+            is ResetDaysCountState.Failed -> if (state.key == countKey) state else countKey?.let { ResetDaysCountState.Loading(it) }
+        } ?: ResetDaysCountState.Idle
+    val isBusy = operation != null || rangeResetPending
+    val isCounting = visibleCountState is ResetDaysCountState.Loading
 
-    LaunchedEffect(selectedRange, countRequest, zoneId) {
-        val range = selectedRange
-        if (range == null) {
+    LaunchedEffect(countKey) {
+        val key = countKey
+        if (key == null) {
             countState = ResetDaysCountState.Idle
             return@LaunchedEffect
         }
-        countState = ResetDaysCountState.Loading
+        countState = ResetDaysCountState.Loading(key)
         countState =
             try {
-                ResetDaysCountState.Loaded(latestCountResetDays(range, zoneId))
+                ResetDaysCountState.Loaded(key, latestCountResetDays(key.range, key.zoneId))
             } catch (failure: CancellationException) {
                 throw failure
             } catch (_: Throwable) {
-                ResetDaysCountState.Failed("Could not count affected data. Try again.")
+                ResetDaysCountState.Failed(key, "Could not count affected data. Try again.")
             }
     }
 
@@ -2621,6 +2696,15 @@ private fun SimpleFinResetDaysCard(
             color = MaterialTheme.colorScheme.onErrorContainer,
             style = MaterialTheme.typography.bodyMedium,
         )
+        if (rangeResetPending) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Undo or dismiss the current reset before resetting more days.",
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag("simplefin_reset_days_pending_message"),
+            )
+        }
         Spacer(Modifier.height(12.dp))
         selectedRange?.let { range ->
             Text(
@@ -2633,7 +2717,7 @@ private fun SimpleFinResetDaysCard(
             Spacer(Modifier.height(6.dp))
         }
         Column(modifier = Modifier.fillMaxWidth()) {
-            when (val state = countState) {
+            when (val state = visibleCountState) {
                 ResetDaysCountState.Idle -> {
                     Text(
                         "Choose a range to see how many items are affected.",
@@ -2646,7 +2730,7 @@ private fun SimpleFinResetDaysCard(
                     )
                 }
 
-                ResetDaysCountState.Loading -> {
+                is ResetDaysCountState.Loading -> {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -2720,16 +2804,21 @@ private fun SimpleFinResetDaysCard(
                         .heightIn(min = 48.dp)
                         .testTag("simplefin_reset_days_picker_button"),
             ) { Text(if (selectedRange == null) "Choose days" else "Change days") }
-            val loadedCount = (countState as? ResetDaysCountState.Loaded)?.count
+            val loadedCount = (visibleCountState as? ResetDaysCountState.Loaded)?.count
             Button(
                 onClick = {
                     val range = selectedRange ?: return@Button
                     val count = loadedCount ?: return@Button
-                    if (!simpleFinResyncPickerRange(clock).contains(range)) {
-                        countState = ResetDaysCountState.Failed("These days are outside SimpleFIN's current 45-day window. Choose again.")
+                    val key = countKey ?: return@Button
+                    if (!isSimpleFinResetRangeCurrent(range, clock, zoneId)) {
+                        countState =
+                            ResetDaysCountState.Failed(
+                                key,
+                                "These days are outside SimpleFIN's current 45-day window. Choose again.",
+                            )
                         return@Button
                     }
-                    onResetDays(range, count)
+                    onResetDays(range, zoneId, count)
                 },
                 enabled = !isBusy && selectedRange != null && loadedCount != null,
                 colors =
@@ -2749,7 +2838,7 @@ private fun SimpleFinResetDaysCard(
 
     if (showPicker) {
         val initialRange =
-            selectedRange ?: simpleFinResyncPickerRange(clock).let { selectableRange ->
+            selectedRange ?: simpleFinResyncPickerRange(clock, zoneId).let { selectableRange ->
                 PennyLocalDateRange(selectableRange.lastInclusive, selectableRange.endExclusive)
             }
         PennySimpleFinDateRangePickerDialog(
@@ -2766,7 +2855,7 @@ private fun SimpleFinResetDaysCard(
                 }
             },
             modifier = Modifier.testTag("simplefin_reset_days_picker_dialog"),
-            clock = clock,
+            clock = clock.withZone(zoneId),
         )
     }
 }

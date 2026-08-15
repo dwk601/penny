@@ -3,13 +3,19 @@ package com.dwk.flowmoney
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
@@ -18,10 +24,13 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import java.time.Clock
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
+import java.util.concurrent.atomic.AtomicLong
 
 data class MainUiState(
     val isLoading: Boolean = true,
@@ -46,6 +55,34 @@ data class SimpleFinUiState(
     val isConnectionPending: Boolean = false,
 )
 
+enum class PendingRangeResetStatus {
+    Available,
+    Restoring,
+    RestoreFailed,
+    Restored,
+}
+
+data class PendingRangeResetState(
+    val id: Long,
+    val range: PennyLocalDateRange,
+    val zoneId: ZoneId,
+    val count: TransactionRangeCount,
+    val status: PendingRangeResetStatus,
+)
+
+enum class PendingRangeResetRestoreResult {
+    Restored,
+    Failed,
+    Busy,
+    AlreadyHandled,
+}
+
+class TransactionMutationBusyException : IllegalStateException("Another transaction mutation is already running")
+
+class PendingRangeResetExistsException : IllegalStateException("A range reset is already pending")
+
+class SimpleFinResetRangeOutOfWindowException : IllegalArgumentException("Range is outside SimpleFIN's current 45-day window")
+
 class MainViewModel(
     private val repository: TransactionGateway,
     private val simpleFinRepository: SimpleFinSyncRepository,
@@ -56,6 +93,12 @@ class MainViewModel(
     private val initializationReady = MutableStateFlow(false)
     private val initializationErrors = Channel<String>(Channel.BUFFERED)
     private val chartRangeMode = MutableStateFlow(ChartRangeMode.Week)
+    private val mutationMutex = Mutex()
+    private val mutableMutationBusy = MutableStateFlow(false)
+    private val pendingRangeResetLock = Any()
+    private val nextRangeResetId = AtomicLong()
+    private val mutablePendingRangeReset = MutableStateFlow<PendingRangeResetState?>(null)
+    private var pendingRangeResetRecord: PendingRangeResetRecord? = null
     private val selectedMonth = MutableStateFlow(YearMonth.now())
     private val pendingConnectionRecovery =
         viewModelScope.async(ioDispatcher) {
@@ -106,6 +149,8 @@ class MainViewModel(
         }
 
     val initializationErrorEvents = initializationErrors.receiveAsFlow()
+    val mutationBusy: StateFlow<Boolean> = mutableMutationBusy.asStateFlow()
+    val pendingRangeReset: StateFlow<PendingRangeResetState?> = mutablePendingRangeReset.asStateFlow()
 
     val uiState =
         flow {
@@ -150,11 +195,11 @@ class MainViewModel(
     }
 
     suspend fun upsert(transaction: Transaction) {
-        repository.upsert(transaction)
+        mutateTransactions { repository.upsert(transaction) }
     }
 
     suspend fun delete(id: String) {
-        repository.delete(id)
+        mutateTransactions { repository.delete(id) }
     }
 
     suspend fun countRange(
@@ -165,18 +210,205 @@ class MainViewModel(
     suspend fun resetRange(
         range: PennyLocalDateRange,
         zoneId: ZoneId,
-    ): TransactionRangeResetSnapshot = repository.resetRange(range, zoneId)
+        expectedCount: TransactionRangeCount,
+        clock: Clock = Clock.system(zoneId),
+    ): PendingRangeResetState {
+        if (!isSimpleFinResetRangeCurrent(range, clock, zoneId)) {
+            throw SimpleFinResetRangeOutOfWindowException()
+        }
+        return mutateTransactions {
+            synchronized(pendingRangeResetLock) {
+                if (pendingRangeResetRecord != null) throw PendingRangeResetExistsException()
+            }
+            val snapshot = repository.resetRange(range, zoneId, expectedCount)
+            val state =
+                PendingRangeResetState(
+                    id = nextRangeResetId.incrementAndGet(),
+                    range = range,
+                    zoneId = zoneId,
+                    count = snapshot.count,
+                    status = PendingRangeResetStatus.Available,
+                )
+            synchronized(pendingRangeResetLock) {
+                check(pendingRangeResetRecord == null) { "A range reset became pending during reset" }
+                pendingRangeResetRecord = PendingRangeResetRecord(state = state, snapshot = snapshot)
+                mutablePendingRangeReset.value = state
+            }
+            state
+        }
+    }
 
-    suspend fun restoreRange(snapshot: TransactionRangeResetSnapshot): TransactionRangeCount = repository.restoreRange(snapshot)
+    suspend fun refreshWidgetsAfterRangeReset(
+        id: Long,
+        refresh: suspend () -> Unit,
+    ): Boolean {
+        val claimed =
+            synchronized(pendingRangeResetLock) {
+                val record = pendingRangeResetRecord
+                if (
+                    record == null ||
+                    record.state.id != id ||
+                    record.resetWidgetRefreshCompleted ||
+                    record.resetWidgetRefreshClaimed
+                ) {
+                    false
+                } else {
+                    record.resetWidgetRefreshClaimed = true
+                    true
+                }
+            }
+        if (!claimed) return false
+        withContext(NonCancellable) {
+            try {
+                refresh()
+            } finally {
+                synchronized(pendingRangeResetLock) {
+                    pendingRangeResetRecord
+                        ?.takeIf { it.state.id == id }
+                        ?.let { record ->
+                            record.resetWidgetRefreshClaimed = false
+                            record.resetWidgetRefreshCompleted = true
+                        }
+                }
+            }
+        }
+        return true
+    }
+
+    suspend fun restorePendingRangeReset(id: Long): PendingRangeResetRestoreResult {
+        var immediateResult: PendingRangeResetRestoreResult? = null
+        val operation: Deferred<PendingRangeResetRestoreResult>? =
+            synchronized(pendingRangeResetLock) {
+                val record = pendingRangeResetRecord
+                when {
+                    record == null || record.state.id != id -> {
+                        immediateResult = PendingRangeResetRestoreResult.AlreadyHandled
+                        null
+                    }
+
+                    record.state.status == PendingRangeResetStatus.Restored -> {
+                        immediateResult = PendingRangeResetRestoreResult.Restored
+                        null
+                    }
+
+                    record.restoreOperation != null -> {
+                        record.restoreOperation
+                    }
+
+                    !mutationMutex.tryLock() -> {
+                        immediateResult = PendingRangeResetRestoreResult.Busy
+                        null
+                    }
+
+                    else -> {
+                        mutableMutationBusy.value = true
+                        updatePendingRangeResetStatusLocked(record, PendingRangeResetStatus.Restoring)
+                        viewModelScope
+                            .async(ioDispatcher, start = CoroutineStart.LAZY) {
+                                try {
+                                    check(repository.restoreRange(record.snapshot) == record.snapshot.count) {
+                                        "Range restore count did not match its snapshot"
+                                    }
+                                    synchronized(pendingRangeResetLock) {
+                                        pendingRangeResetRecord
+                                            ?.takeIf { it === record }
+                                            ?.let { updatePendingRangeResetStatusLocked(it, PendingRangeResetStatus.Restored) }
+                                    }
+                                    PendingRangeResetRestoreResult.Restored
+                                } catch (cancelled: CancellationException) {
+                                    synchronized(pendingRangeResetLock) {
+                                        pendingRangeResetRecord
+                                            ?.takeIf { it === record }
+                                            ?.let {
+                                                it.restoreOperation = null
+                                                updatePendingRangeResetStatusLocked(it, PendingRangeResetStatus.RestoreFailed)
+                                            }
+                                    }
+                                    throw cancelled
+                                } catch (_: Throwable) {
+                                    synchronized(pendingRangeResetLock) {
+                                        pendingRangeResetRecord
+                                            ?.takeIf { it === record }
+                                            ?.let {
+                                                it.restoreOperation = null
+                                                updatePendingRangeResetStatusLocked(it, PendingRangeResetStatus.RestoreFailed)
+                                            }
+                                    }
+                                    PendingRangeResetRestoreResult.Failed
+                                } finally {
+                                    mutableMutationBusy.value = false
+                                    mutationMutex.unlock()
+                                }
+                            }.also {
+                                record.restoreOperation = it
+                                it.start()
+                            }
+                    }
+                }
+            }
+        return immediateResult ?: checkNotNull(operation).await()
+    }
+
+    fun dismissPendingRangeReset(id: Long): Boolean =
+        synchronized(pendingRangeResetLock) {
+            val record = pendingRangeResetRecord
+            if (
+                record == null ||
+                record.state.id != id ||
+                record.state.status == PendingRangeResetStatus.Restoring ||
+                record.state.status == PendingRangeResetStatus.Restored
+            ) {
+                false
+            } else {
+                pendingRangeResetRecord = null
+                mutablePendingRangeReset.value = null
+                true
+            }
+        }
+
+    suspend fun completePendingRangeResetRestore(
+        id: Long,
+        refresh: suspend () -> Unit,
+    ): Boolean {
+        val claimed =
+            synchronized(pendingRangeResetLock) {
+                val record = pendingRangeResetRecord
+                if (
+                    record == null ||
+                    record.state.id != id ||
+                    record.state.status != PendingRangeResetStatus.Restored ||
+                    record.restoreWidgetRefreshClaimed
+                ) {
+                    false
+                } else {
+                    record.restoreWidgetRefreshClaimed = true
+                    true
+                }
+            }
+        if (!claimed) return false
+        withContext(NonCancellable) {
+            try {
+                refresh()
+            } finally {
+                synchronized(pendingRangeResetLock) {
+                    if (pendingRangeResetRecord?.state?.id == id) {
+                        pendingRangeResetRecord = null
+                        mutablePendingRangeReset.value = null
+                    }
+                }
+            }
+        }
+        return true
+    }
 
     suspend fun importCsv(csv: String): Int {
         val transactions = withContext(defaultDispatcher) { CsvCodec.decode(csv) }
-        return repository.importTransactions(transactions)
+        return mutateTransactions { repository.importTransactions(transactions) }
     }
 
     suspend fun importTrustedLegacyCsv(csv: String): Int {
         val transactions = withContext(defaultDispatcher) { CsvCodec.decode(csv) }
-        return repository.importTrustedLegacyTransactions(transactions)
+        return mutateTransactions { repository.importTrustedLegacyTransactions(transactions) }
     }
 
     suspend fun exportCsv(): String {
@@ -242,6 +474,25 @@ class MainViewModel(
         }
     }
 
+    private suspend fun <T> mutateTransactions(block: suspend () -> T): T {
+        if (!mutationMutex.tryLock()) throw TransactionMutationBusyException()
+        mutableMutationBusy.value = true
+        return try {
+            block()
+        } finally {
+            mutableMutationBusy.value = false
+            mutationMutex.unlock()
+        }
+    }
+
+    private fun updatePendingRangeResetStatusLocked(
+        record: PendingRangeResetRecord,
+        status: PendingRangeResetStatus,
+    ) {
+        record.state = record.state.copy(status = status)
+        mutablePendingRangeReset.value = record.state
+    }
+
     class Factory(
         private val repository: TransactionGateway,
         private val simpleFinRepository: SimpleFinSyncRepository,
@@ -256,6 +507,15 @@ class MainViewModel(
         }
     }
 }
+
+private data class PendingRangeResetRecord(
+    var state: PendingRangeResetState,
+    val snapshot: TransactionRangeResetSnapshot,
+    var resetWidgetRefreshClaimed: Boolean = false,
+    var resetWidgetRefreshCompleted: Boolean = false,
+    var restoreWidgetRefreshClaimed: Boolean = false,
+    var restoreOperation: Deferred<PendingRangeResetRestoreResult>? = null,
+)
 
 private data class TransactionSnapshot(
     val sortedTransactions: List<Transaction>,

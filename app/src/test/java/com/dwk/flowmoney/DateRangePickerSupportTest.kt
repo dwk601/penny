@@ -75,6 +75,17 @@ class DateRangePickerSupportTest {
     }
 
     @Test
+    fun resetRangeFallsOutOfCurrentWindowAcrossMidnightInExplicitZone() {
+        val zoneId = ZoneId.of("UTC")
+        val range = PennyLocalDateRange(LocalDate.of(2026, 1, 30), LocalDate.of(2026, 1, 31))
+        val beforeMidnight = Clock.fixed(Instant.parse("2026-03-15T23:59:59Z"), zoneId)
+        val afterMidnight = Clock.fixed(Instant.parse("2026-03-16T00:00:00Z"), zoneId)
+
+        assertThat(isSimpleFinResetRangeCurrent(range, beforeMidnight, zoneId)).isTrue()
+        assertThat(isSimpleFinResetRangeCurrent(range, afterMidnight, zoneId)).isFalse()
+    }
+
+    @Test
     fun localDateInstantBoundsUseDstSafeCalendarMidnights() {
         val newYork = ZoneId.of("America/New_York")
         val springForward = PennyLocalDateRange(LocalDate.of(2024, 3, 10), LocalDate.of(2024, 3, 11)).toInstantRange(newYork)

@@ -229,7 +229,7 @@ class DataOperationUiTest {
                         countStarted.complete(Unit)
                         releaseCount.await()
                     },
-                    onResetDays = { range, count -> resetRequest = range to count },
+                    onResetDays = { range, _, count -> resetRequest = range to count },
                     resetDaysClock = Clock.fixed(Instant.parse("2026-03-15T12:00:00Z"), ZoneOffset.UTC),
                     resetDaysZoneId = ZoneOffset.UTC,
                     onImport = {},
@@ -298,7 +298,7 @@ class DataOperationUiTest {
                         if (attempts == 1) error("synthetic count failure")
                         TransactionRangeCount(transactionCount = 0, tombstoneCount = 0)
                     },
-                    onResetDays = { _, count -> resetCount = count },
+                    onResetDays = { _, _, count -> resetCount = count },
                     resetDaysClock = Clock.fixed(Instant.parse("2026-03-15T12:00:00Z"), ZoneOffset.UTC),
                     resetDaysZoneId = ZoneOffset.UTC,
                     onImport = {},
