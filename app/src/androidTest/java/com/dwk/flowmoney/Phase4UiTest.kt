@@ -24,6 +24,8 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
@@ -372,7 +374,7 @@ class Phase4UiTest {
     }
 
     @Test
-    fun transactionDaysShowSeparateTotalsAndResponsiveOverflowActions() {
+    fun transactionDaysShowSeparateTotalsAndSupportSwipeDelete() {
         val date = java.time.LocalDate.of(2026, 7, 10)
         val occurredAt = date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
         val expense = Transaction("expense", occurredAt, "Cafe", "Food", "", -1_250)
@@ -406,13 +408,14 @@ class Phase4UiTest {
         composeRule.onNodeWithTag("transaction_day_received_$date").assertTextContains("Received \$50.00")
         composeRule
             .onNodeWithTag("transactions_list")
-            .performScrollToNode(hasTestTag("transaction_actions_expense"))
-        val overflow = composeRule.onNodeWithTag("transaction_actions_expense").assertIsDisplayed().fetchSemanticsNode()
-        assertTrue(overflow.boundsInRoot.height / composeRule.density.density >= 48f)
-        composeRule.onNodeWithTag("transaction_actions_expense").performClick()
-        val delete = composeRule.onNodeWithTag("transaction_action_delete_expense").assertIsDisplayed().fetchSemanticsNode()
-        assertTrue(delete.boundsInRoot.height / composeRule.density.density >= 48f)
-        composeRule.onNodeWithTag("transaction_action_delete_expense").performClick()
+            .performScrollToNode(hasTestTag("transaction_content_expense"))
+        val expenseRow =
+            composeRule
+                .onNodeWithTag("transaction_content_expense")
+                .assertIsDisplayed()
+                .fetchSemanticsNode()
+        assertTrue(expenseRow.boundsInRoot.height / composeRule.density.density >= 48f)
+        composeRule.onNodeWithTag("transaction_content_expense").performTouchInput { swipeLeft() }
         assertEquals(0, edits)
         assertEquals(1, deletes)
     }

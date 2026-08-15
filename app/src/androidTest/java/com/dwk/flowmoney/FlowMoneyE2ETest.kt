@@ -188,10 +188,10 @@ class FlowMoneyE2ETest {
         waitForMerchant(merchant)
         composeRule.activityRule.scenario.recreate()
         waitForMerchant(merchant)
+        composeRule.onNodeWithTag("transaction_where_filter").assertIsDisplayed().performTextInput(merchant)
         composeRule.onNodeWithTag("transaction_filter_toggle").performClick()
         composeRule.onNodeWithTag("transaction_filter_week").performClick()
         composeRule.onNodeWithTag("transaction_category_filter_food").performClick()
-        composeRule.onNodeWithTag("transaction_where_filter").performTextInput(merchant)
 
         composeRule.onAllNodesWithText(merchant).onFirst().assertIsDisplayed()
     }

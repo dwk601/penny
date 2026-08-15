@@ -41,7 +41,6 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 
 @RunWith(AndroidJUnit4::class)
 class Phase2E2ETest {
@@ -268,7 +267,7 @@ class Phase2E2ETest {
     }
 
     @Test
-    fun exactDeleteConfirmationDeletesAndUndoRestoresExactRow() {
+    fun editorDeleteImmediatelyDeletesAndUndoRestoresExactRow() {
         val dateTime = LocalDateTime.of(LocalDate.of(2026, 7, 10), LocalTime.of(9, 30))
         val original =
             transaction(
@@ -282,11 +281,7 @@ class Phase2E2ETest {
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
-        val expected =
-            "Delete expense of ${MoneyFormatter.formatUsd(1_234)} at Delete Cafe, Food on " +
-                "${dateTime.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))}?"
-        composeRule.onNodeWithText(expected).assertIsDisplayed()
-        composeRule.onNodeWithTag("confirm_delete_button").performClick()
+        composeRule.onNodeWithText("Undo").assertIsDisplayed()
         awaitRows { it.isEmpty() }
 
         composeRule.onNodeWithText("Undo").performClick()
@@ -295,7 +290,7 @@ class Phase2E2ETest {
     }
 
     @Test
-    fun talkBackDeleteActionOpensExactConfirmation() {
+    fun talkBackDeleteActionDeletesExactRowAndOffersUndo() {
         val dateTime = LocalDateTime.of(LocalDate.of(2026, 7, 11), LocalTime.of(10, 45))
         val original =
             transaction(
@@ -316,11 +311,8 @@ class Phase2E2ETest {
 
         composeRule.runOnIdle { action() }
 
-        composeRule
-            .onNodeWithText(
-                "Delete expense of ${MoneyFormatter.formatUsd(2_345)} at Accessible Cafe, Food on " +
-                    "${dateTime.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))}?",
-            ).assertIsDisplayed()
+        composeRule.onNodeWithText("Undo").assertIsDisplayed()
+        awaitRows { it.isEmpty() }
     }
 
     private fun seed(vararg transactions: Transaction) {

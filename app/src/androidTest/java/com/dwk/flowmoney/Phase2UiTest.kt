@@ -8,6 +8,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -40,6 +41,7 @@ class Phase2UiTest {
     @Test
     fun filtersExposeExpandedSemantics() {
         setScreen(DashboardTab.Transactions)
+        composeRule.onNodeWithTag("transaction_where_filter").assertIsDisplayed()
         composeRule.onNodeWithTag("transaction_filter_toggle").performClick().assert(
             SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Expanded"),
         )
