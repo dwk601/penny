@@ -29,6 +29,11 @@ data class TransactionRangeCount(
 val TransactionRangeCount.affectedCount: Long
     get() = Math.addExact(transactionCount, tombstoneCount)
 
+class TransactionRangeChangedException(
+    val expected: TransactionRangeCount,
+    val actual: TransactionRangeCount,
+) : IllegalStateException("Transaction range changed after confirmation")
+
 /** Opaque, exact database rows removed by one atomic range reset. */
 class TransactionRangeResetSnapshot internal constructor(
     transactionRows: List<TransactionEntity>,
@@ -123,12 +128,19 @@ interface TransactionDao {
     suspend fun snapshotAndDeleteInRange(
         startInclusiveEpochMillis: Long,
         endExclusiveEpochMillis: Long,
+        expectedCount: TransactionRangeCount,
     ): TransactionRangeResetSnapshot {
         require(startInclusiveEpochMillis <= endExclusiveEpochMillis) {
             "Range end must not precede range start"
         }
         val transactions = getInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
         val tombstones = tombstonesInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
+        val actualCount =
+            TransactionRangeCount(
+                transactionCount = transactions.size.toLong(),
+                tombstoneCount = tombstones.size.toLong(),
+            )
+        if (actualCount != expectedCount) throw TransactionRangeChangedException(expectedCount, actualCount)
         val deletedTransactions = deleteTransactionsInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
         val deletedTombstones = deleteTombstonesInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
         check(deletedTransactions == transactions.size) { "Transaction range changed during reset" }

@@ -30,6 +30,7 @@ interface TransactionGateway {
     suspend fun resetRange(
         range: PennyLocalDateRange,
         zoneId: ZoneId,
+        expectedCount: TransactionRangeCount,
     ): TransactionRangeResetSnapshot = throw UnsupportedOperationException("Range reset is not supported by this gateway")
 
     suspend fun restoreRange(snapshot: TransactionRangeResetSnapshot): TransactionRangeCount =
@@ -79,11 +80,13 @@ class TransactionRepository(
     override suspend fun resetRange(
         range: PennyLocalDateRange,
         zoneId: ZoneId,
+        expectedCount: TransactionRangeCount,
     ): TransactionRangeResetSnapshot {
         val instantRange = range.toInstantRange(zoneId)
         return dao.snapshotAndDeleteInRange(
             startInclusiveEpochMillis = instantRange.startInclusive.toEpochMilli(),
             endExclusiveEpochMillis = instantRange.endExclusive.toEpochMilli(),
+            expectedCount = expectedCount,
         )
     }
 

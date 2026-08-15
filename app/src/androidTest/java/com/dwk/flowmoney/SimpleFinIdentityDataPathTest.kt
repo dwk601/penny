@@ -83,6 +83,96 @@ class SimpleFinIdentityDataPathTest {
         }
 
     @Test
+    fun firstSuccessfulSyncDatesMigratedTombstoneOnlyRowAndMarksCompletionOnlyOnSuccess() =
+        runBlocking {
+            val name = "simplefin-v6-tombstone-${UUID.randomUUID()}.db"
+            val file = context.getDatabasePath(name)
+            context.deleteDatabase(name)
+            val legacyTombstoneId = legacyTransactionId(CONNECTION_ONE, DELETED_TRANSACTION_ID)
+            SQLiteDatabase.openOrCreateDatabase(file, null).use { raw ->
+                createVersion6Schema(raw)
+                raw.execSQL(
+                    "INSERT INTO simplefin_profile (id, connectionId, automaticSyncsPerDay) " +
+                        "VALUES ('default', '$CONNECTION_ONE', 1)",
+                )
+                raw.execSQL(
+                    "INSERT INTO simplefin_ignored_transactions (transactionId, ignoredAtEpochMillis) " +
+                        "VALUES ('$legacyTombstoneId', 88)",
+                )
+                raw.version = 6
+            }
+            val migrated =
+                Room
+                    .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_6_7)
+                    .build()
+            val fake = FakeFunctions()
+            fake.credential = CONNECTION_ONE to FIRST_ACCESS_URL
+            fake.accountsResult = accountsResult(DELETED_TRANSACTION_ID)
+            val repository = SimpleFinSyncRepository(migrated, fake.bundle())
+            try {
+                assertEquals(emptyList<TransactionEntity>(), migrated.transactionDao().getAll())
+                assertNull(
+                    migrated
+                        .simpleFinIdentityDao()
+                        .tombstones()
+                        .single()
+                        .occurredAtEpochMillis,
+                )
+                assertFalse(migrated.simpleFinIdentityDao().isReconciliationComplete()!!)
+                migrated.openHelper.writableDatabase.execSQL(
+                    "CREATE TRIGGER fail_tombstone_marker BEFORE INSERT ON simplefin_identity_state " +
+                        "BEGIN SELECT RAISE(ABORT, 'synthetic marker failure'); END",
+                )
+
+                assertTrue(repository.syncNow() is SimpleFinSyncResult.Failure)
+                assertFalse(migrated.simpleFinIdentityDao().isReconciliationComplete()!!)
+                assertEquals(
+                    legacyTombstoneId,
+                    migrated
+                        .simpleFinIdentityDao()
+                        .tombstones()
+                        .single()
+                        .transactionId,
+                )
+                assertNull(
+                    migrated
+                        .simpleFinIdentityDao()
+                        .tombstones()
+                        .single()
+                        .occurredAtEpochMillis,
+                )
+                assertEquals(emptyList<TransactionEntity>(), migrated.transactionDao().getAll())
+
+                migrated.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_tombstone_marker")
+                fake.currentTime += SIMPLEFIN_RETRY_INTERVAL_MILLIS
+                assertTrue(repository.syncNow() is SimpleFinSyncResult.Success)
+
+                val origin = SimpleFinServerOrigin.fromAccessUrl(FIRST_ACCESS_URL)
+                val stableTombstoneId =
+                    SimpleFinIdentity.transactionId(
+                        origin,
+                        PROVIDER_CONNECTION_ID,
+                        REMOTE_ACCOUNT_ID,
+                        DELETED_TRANSACTION_ID,
+                    )
+                assertEquals(
+                    SimpleFinIgnoredTransactionEntity(
+                        transactionId = stableTombstoneId,
+                        ignoredAtEpochMillis = 88,
+                        occurredAtEpochMillis = DELETED_OCCURRED_AT,
+                    ),
+                    migrated.simpleFinIdentityDao().tombstones().single(),
+                )
+                assertEquals(emptyList<TransactionEntity>(), migrated.transactionDao().getAll())
+                assertTrue(migrated.simpleFinIdentityDao().isReconciliationComplete()!!)
+            } finally {
+                migrated.close()
+                context.deleteDatabase(name)
+            }
+        }
+
+    @Test
     fun firstSuccessfulSyncReconcilesCollisionsAccountsAndTombstonesBeforePayloadUpsert() =
         runBlocking {
             withRepository { db, fake, repository ->

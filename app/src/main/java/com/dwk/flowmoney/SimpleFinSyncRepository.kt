@@ -240,6 +240,7 @@ class SimpleFinSyncRepository internal constructor(
             if (result.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
             val mapped = SimpleFinMapper.map(origin, result.accounts)
+            val payloadOccurrences = mapped.payloadOccurrences()
             val error =
                 (mapped.warnings + listOfNotNull(nonUsdMessage(result.accounts)))
                     .joinToString("; ")
@@ -248,7 +249,9 @@ class SimpleFinSyncRepository internal constructor(
             db.withTransaction {
                 val identityDao = db.simpleFinIdentityDao()
                 val reconciliationRequired = identityDao.isReconciliationComplete() != true
-                if (reconciliationRequired) SimpleFinIdentityReconciler.reconcile(identityDao, origin)
+                if (reconciliationRequired) {
+                    SimpleFinIdentityReconciler.reconcile(identityDao, origin, payloadOccurrences)
+                }
                 writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
                 dao.upsertAccounts(mapped.accounts)
                 check(dao.recordSuccess(profile.connectionId, now(), error) == 1) {
@@ -339,6 +342,7 @@ class SimpleFinSyncRepository internal constructor(
             if (initial.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
             val mapped = SimpleFinMapper.map(origin, initial.accounts)
+            val payloadOccurrences = mapped.payloadOccurrences()
             val warning =
                 (mapped.warnings + listOfNotNull(nonUsdMessage(initial.accounts)))
                     .joinToString("; ")
@@ -370,7 +374,9 @@ class SimpleFinSyncRepository internal constructor(
                 db.withTransaction {
                     val identityDao = db.simpleFinIdentityDao()
                     val reconciliationRequired = identityDao.isReconciliationComplete() != true
-                    if (reconciliationRequired) SimpleFinIdentityReconciler.reconcile(identityDao, origin)
+                    if (reconciliationRequired) {
+                        SimpleFinIdentityReconciler.reconcile(identityDao, origin, payloadOccurrences)
+                    }
                     db.simpleFinDao().clearProfile()
                     db.simpleFinDao().clearAccounts()
                     writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
@@ -640,6 +646,14 @@ class SimpleFinSyncRepository internal constructor(
         )
 
     private fun now() = functions.now()
+
+    private fun SimpleFinMappingResult.payloadOccurrences(): List<SimpleFinPayloadOccurrence> =
+        transactions.map { transaction ->
+            SimpleFinPayloadOccurrence(
+                transactionId = transaction.id,
+                occurredAtEpochMillis = transaction.occurredAtEpochMillis,
+            )
+        }
 
     private companion object {
         val lifecycleMutex = Mutex()

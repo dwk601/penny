@@ -277,7 +277,8 @@ class TransactionRepositoryTest {
             assertThat(repository.countRange(range, zoneId))
                 .isEqualTo(TransactionRangeCount(transactionCount = 2, tombstoneCount = 2))
 
-            val snapshot = repository.resetRange(range, zoneId)
+            val expectedCount = TransactionRangeCount(transactionCount = 2, tombstoneCount = 2)
+            val snapshot = repository.resetRange(range, zoneId, expectedCount)
 
             assertThat(snapshot.count).isEqualTo(TransactionRangeCount(transactionCount = 2, tombstoneCount = 2))
             assertThat(snapshot.affectedCount).isEqualTo(4)

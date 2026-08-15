@@ -13,12 +13,18 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.time.Clock
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZoneOffset
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class MainViewModelDataPathTest {
@@ -68,11 +74,58 @@ class MainViewModelDataPathTest {
                     )[MainViewModel::class.java]
                 try {
                     assertEquals(count, viewModel.countRange(range, zoneId))
-                    assertSame(snapshot, viewModel.resetRange(range, zoneId))
-                    assertEquals(snapshot.count, viewModel.restoreRange(snapshot))
+                    val clock = Clock.fixed(Instant.parse("2024-11-03T12:00:00Z"), ZoneOffset.UTC)
+                    val pending = viewModel.resetRange(range, zoneId, count, clock)
+                    assertEquals(snapshot.count, pending.count)
+                    assertEquals(count, gateway.resetExpectedCount)
+                    val resetRefreshes = AtomicInteger()
+                    assertTrue(viewModel.refreshWidgetsAfterRangeReset(pending.id) { resetRefreshes.incrementAndGet() })
+                    assertFalse(viewModel.refreshWidgetsAfterRangeReset(pending.id) { resetRefreshes.incrementAndGet() })
+                    assertEquals(PendingRangeResetRestoreResult.Restored, viewModel.restorePendingRangeReset(pending.id))
+                    assertEquals(PendingRangeResetRestoreResult.Restored, viewModel.restorePendingRangeReset(pending.id))
+                    val restoreRefreshes = AtomicInteger()
+                    assertTrue(viewModel.completePendingRangeResetRestore(pending.id) { restoreRefreshes.incrementAndGet() })
+                    assertFalse(viewModel.completePendingRangeResetRestore(pending.id) { restoreRefreshes.incrementAndGet() })
+                    assertEquals(1, resetRefreshes.get())
+                    assertEquals(1, restoreRefreshes.get())
                     assertEquals(listOf("count", "reset", "restore"), gateway.rangeCalls)
                     assertEquals(listOf(range to zoneId, range to zoneId), gateway.rangeRequests)
                     assertSame(snapshot, gateway.restoredSnapshot)
+                    assertEquals(null, viewModel.pendingRangeReset.value)
+                } finally {
+                    store.clear()
+                }
+            }
+        }
+
+    @Test fun resetRangeDefensivelyRejectsSelectionThatAgedOutAcrossMidnight() =
+        runBlocking {
+            val gateway = FakeGateway(MutableStateFlow(emptyList()))
+            val zoneId = ZoneOffset.UTC
+            val range = PennyLocalDateRange(LocalDate.of(2026, 1, 30), LocalDate.of(2026, 1, 31))
+            val expected = TransactionRangeCount(transactionCount = 0, tombstoneCount = 0)
+            val afterMidnight = Clock.fixed(Instant.parse("2026-03-16T00:00:00Z"), zoneId)
+
+            withContext(Dispatchers.Main) {
+                val store = ViewModelStore()
+                val viewModel =
+                    ViewModelProvider(
+                        store,
+                        MainViewModel.Factory(
+                            repository = gateway,
+                            simpleFinRepository = SimpleFinSyncRepository(context),
+                            simpleFinAccounts = MutableStateFlow(emptyList()),
+                        ),
+                    )[MainViewModel::class.java]
+                try {
+                    val failure =
+                        runCatching {
+                            viewModel.resetRange(range, zoneId, expected, afterMidnight)
+                        }.exceptionOrNull()
+
+                    assertTrue(failure is SimpleFinResetRangeOutOfWindowException)
+                    assertEquals(emptyList<String>(), gateway.rangeCalls)
+                    assertEquals(null, viewModel.pendingRangeReset.value)
                 } finally {
                     store.clear()
                 }
@@ -130,6 +183,7 @@ class MainViewModelDataPathTest {
         val rangeCalls = mutableListOf<String>()
         val rangeRequests = mutableListOf<Pair<PennyLocalDateRange, ZoneId>>()
         var restoredSnapshot: TransactionRangeResetSnapshot? = null
+        var resetExpectedCount: TransactionRangeCount? = null
 
         override suspend fun load() = emptyList<Transaction>()
 
@@ -153,9 +207,11 @@ class MainViewModelDataPathTest {
         override suspend fun resetRange(
             range: PennyLocalDateRange,
             zoneId: ZoneId,
+            expectedCount: TransactionRangeCount,
         ): TransactionRangeResetSnapshot {
             rangeCalls += "reset"
             rangeRequests += range to zoneId
+            resetExpectedCount = expectedCount
             return resetResult
         }
 

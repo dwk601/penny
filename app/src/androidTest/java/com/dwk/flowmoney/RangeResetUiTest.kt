@@ -4,11 +4,14 @@ import android.content.Context
 import android.view.KeyEvent
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -75,7 +78,8 @@ class RangeResetUiTest {
         val widgetRefreshes = AtomicInteger()
         val manualSyncs = AtomicInteger()
         val snackbarHostState = SnackbarHostState()
-        setApp(gateway, snackbarHostState, widgetRefreshes, manualSyncs)
+        val restoration = StateRestorationTester(composeRule)
+        setApp(gateway, snackbarHostState, widgetRefreshes, manualSyncs, restoration)
 
         openResetConfirmation(gateway, expectedAffectedCount = 3)
         composeRule.onNodeWithTag("simplefin_reset_days_confirmation_dialog").assertIsDisplayed()
@@ -113,7 +117,8 @@ class RangeResetUiTest {
         }
         assertEquals(0, manualSyncs.get())
 
-        composeRule.onNodeWithText("Undo").performClick()
+        restoration.emulateSavedInstanceStateRestore()
+        composeRule.onNodeWithText("Undo").assertIsDisplayed().performClick()
         composeRule.waitUntil(5_000) {
             gateway.rows.value == listOf(inRange, secondInRange, outside) &&
                 gateway.tombstoneCount == 1 &&
@@ -122,6 +127,74 @@ class RangeResetUiTest {
         }
         composeRule.onNodeWithText("Restored March 15, 2026").assertIsDisplayed()
         assertEquals(1, gateway.resetCalls)
+        assertEquals(0, manualSyncs.get())
+    }
+
+    @Test
+    fun inFlightRangeRestoreBlocksEditorMutationsAndRunsOneRestoreAndRefresh() {
+        val today = LocalDate.of(2026, 3, 15)
+        val resetRow = transaction("range-restore-row", today, 12, -500)
+        val editorTarget = transaction("range-editor-target", today.minusDays(1), 12, -600)
+        val gateway = FakeRangeGateway(listOf(resetRow, editorTarget), initialTombstoneCount = 0)
+        val restoreStarted = CompletableDeferred<Unit>()
+        val releaseRestore = CompletableDeferred<Unit>()
+        gateway.beforeRestore = {
+            restoreStarted.complete(Unit)
+            releaseRestore.await()
+        }
+        val widgetRefreshes = AtomicInteger()
+        val manualSyncs = AtomicInteger()
+        setApp(gateway, SnackbarHostState(), widgetRefreshes, manualSyncs)
+
+        openResetConfirmation(gateway, expectedAffectedCount = 1)
+        composeRule.onNodeWithTag("simplefin_reset_days_confirm_button").performClick()
+        composeRule.waitUntil(5_000) {
+            gateway.rows.value == listOf(editorTarget) && widgetRefreshes.get() == 1
+        }
+        val undoAction =
+            composeRule
+                .onNodeWithText("Undo")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+        composeRule.onNodeWithTag("transaction_content_${editorTarget.id}").performClick()
+        composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
+        val saveAction =
+            composeRule
+                .onNodeWithTag("save_transaction_button")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+        val deleteAction =
+            composeRule
+                .onNodeWithTag("delete_transaction_button")
+                .fetchSemanticsNode()
+                .config[SemanticsActions.OnClick]
+                .action!!
+
+        composeRule.runOnIdle {
+            undoAction()
+            undoAction()
+        }
+        composeRule.waitUntil(5_000) { restoreStarted.isCompleted }
+        composeRule.onNodeWithTag("save_transaction_button").assertIsNotEnabled()
+        composeRule.onNodeWithTag("delete_transaction_button").assertIsNotEnabled()
+        composeRule.runOnIdle {
+            saveAction()
+            deleteAction()
+        }
+        assertEquals(0, gateway.upsertCalls)
+        assertEquals(0, gateway.deleteCalls)
+        assertEquals(1, gateway.restoreCalls)
+
+        releaseRestore.complete(Unit)
+        composeRule.waitUntil(5_000) {
+            gateway.rows.value.toSet() == setOf(resetRow, editorTarget) && widgetRefreshes.get() == 2
+        }
+        composeRule.onNodeWithTag("save_transaction_button").assertIsEnabled()
+        composeRule.onNodeWithTag("delete_transaction_button").assertIsEnabled()
+        assertEquals(1, gateway.restoreCalls)
+        assertEquals(2, widgetRefreshes.get())
         assertEquals(0, manualSyncs.get())
     }
 
@@ -147,6 +220,83 @@ class RangeResetUiTest {
         assertEquals(listOf(outside), gateway.rows.value)
         assertEquals(0, gateway.restoreCalls)
         assertEquals(1, widgetRefreshes.get())
+        assertEquals(0, manualSyncs.get())
+    }
+
+    @Test
+    fun countMismatchClosesConfirmationAndRecountsWithoutDeleting() {
+        val today = LocalDate.of(2026, 3, 15)
+        val counted = transaction("counted-before-confirmation", today, 12, -500)
+        val inserted = transaction("inserted-before-delete", today, 13, -600)
+        val gateway = FakeRangeGateway(listOf(counted), initialTombstoneCount = 0)
+        gateway.beforeReset = {
+            gateway.rows.value = gateway.rows.value + inserted
+            gateway.beforeReset = {}
+        }
+        val widgetRefreshes = AtomicInteger()
+        val manualSyncs = AtomicInteger()
+        setApp(gateway, SnackbarHostState(), widgetRefreshes, manualSyncs)
+
+        openResetConfirmation(gateway, expectedAffectedCount = 1)
+        composeRule.onNodeWithTag("simplefin_reset_days_confirm_button").performClick()
+
+        composeRule.onNodeWithText("Penny data changed. Review the updated count and confirm again.").assertIsDisplayed()
+        composeRule.onNodeWithTag("simplefin_reset_days_confirmation_dialog").assertDoesNotExist()
+        composeRule.onNodeWithTag("data_sheet_modal").assertIsDisplayed()
+        composeRule.waitUntil(5_000) { gateway.lastCountResult?.affectedCount == 2L }
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("simplefin_reset_days_count"))
+        composeRule.onNodeWithTag("simplefin_reset_days_count").assertTextContains("2 items affected", substring = true)
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("simplefin_reset_days_reset_button"))
+        composeRule.onNodeWithTag("simplefin_reset_days_reset_button").assertIsEnabled()
+
+        assertEquals(listOf(counted, inserted), gateway.rows.value)
+        assertEquals(1, gateway.resetCalls)
+        assertEquals(0, widgetRefreshes.get())
+        assertEquals(0, manualSyncs.get())
+    }
+
+    @Test
+    fun currentWindowFailureClosesConfirmationAndClearsStaleSelection() {
+        val selectedDay = LocalDate.of(2026, 3, 15)
+        val inRange = transaction("aged-out-reset", selectedDay, 12, -500)
+        val gateway = FakeRangeGateway(listOf(inRange), initialTombstoneCount = 0)
+        val clock = MutableClock(Instant.parse("2026-03-15T23:59:59Z"), ZoneOffset.UTC)
+        val widgetRefreshes = AtomicInteger()
+        val manualSyncs = AtomicInteger()
+        setApp(
+            gateway = gateway,
+            snackbarHostState = SnackbarHostState(),
+            widgetRefreshes = widgetRefreshes,
+            manualSyncs = manualSyncs,
+            resetDaysClock = clock,
+        )
+
+        openResetConfirmation(gateway, expectedAffectedCount = 1)
+        clock.currentInstant = Instant.parse("2026-04-29T00:00:00Z")
+        composeRule.onNodeWithTag("simplefin_reset_days_confirm_button").performClick()
+
+        composeRule
+            .onNodeWithText("These days moved outside SimpleFIN's current 45-day window. Choose the days again.")
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag("simplefin_reset_days_confirmation_dialog").assertDoesNotExist()
+        composeRule.onNodeWithTag("data_sheet_modal").assertIsDisplayed()
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("simplefin_reset_days_count"))
+        composeRule.onNodeWithTag("simplefin_reset_days_count").assertTextContains("Choose a range", substring = true)
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("simplefin_reset_days_picker_button"))
+        composeRule.onNodeWithTag("simplefin_reset_days_picker_button").assertIsEnabled()
+        composeRule.onNodeWithTag("simplefin_reset_days_reset_button").assertIsNotEnabled()
+
+        assertEquals(listOf(inRange), gateway.rows.value)
+        assertEquals(0, gateway.resetCalls)
+        assertEquals(0, widgetRefreshes.get())
         assertEquals(0, manualSyncs.get())
     }
 
@@ -183,6 +333,8 @@ class RangeResetUiTest {
         snackbarHostState: SnackbarHostState,
         widgetRefreshes: AtomicInteger,
         manualSyncs: AtomicInteger,
+        restoration: StateRestorationTester? = null,
+        resetDaysClock: Clock = FixedClock,
     ) {
         val db = FlowMoneyDatabase.get(context)
         runBlocking {
@@ -198,7 +350,7 @@ class RangeResetUiTest {
                 ),
             )[MainViewModel::class.java]
         viewModel.reportInitializationComplete()
-        composeRule.setContent {
+        val content: @Composable () -> Unit = {
             FlowMoneyTheme(dynamicColor = false) {
                 FlowMoneyApp(
                     viewModel = viewModel,
@@ -209,11 +361,12 @@ class RangeResetUiTest {
                         SimpleFinSyncResult.Success(inserted = 0, updated = 0, skipped = 0)
                     },
                     appSnackbarHostState = snackbarHostState,
-                    resetDaysClock = FixedClock,
+                    resetDaysClock = resetDaysClock,
                     resetDaysZoneId = ZoneOffset.UTC,
                 )
             }
         }
+        if (restoration == null) composeRule.setContent(content) else restoration.setContent(content)
         composeRule.waitUntil(5_000) {
             runCatching { composeRule.onNodeWithText("Penny").assertIsDisplayed() }.isSuccess
         }
@@ -256,12 +409,16 @@ class RangeResetUiTest {
         var tombstoneCount = initialTombstoneCount
         var resetCalls = 0
         var restoreCalls = 0
+        var upsertCalls = 0
+        var deleteCalls = 0
         var lastCountResult: TransactionRangeCount? = null
         var beforeReset: suspend () -> Unit = {}
+        var beforeRestore: suspend () -> Unit = {}
 
         override suspend fun load(): List<Transaction> = rows.value
 
         override suspend fun upsert(transaction: Transaction) {
+            upsertCalls += 1
             rows.value = rows.value.filterNot { it.id == transaction.id } + transaction
         }
 
@@ -270,6 +427,7 @@ class RangeResetUiTest {
         override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>): Int = transactions.size
 
         override suspend fun delete(id: String) {
+            deleteCalls += 1
             rows.value = rows.value.filterNot { it.id == id }
         }
 
@@ -285,10 +443,17 @@ class RangeResetUiTest {
         override suspend fun resetRange(
             range: PennyLocalDateRange,
             zoneId: ZoneId,
+            expectedCount: TransactionRangeCount,
         ): TransactionRangeResetSnapshot {
             resetCalls += 1
             beforeReset()
             val transactions = transactionsInRange(range, zoneId)
+            val actualCount =
+                TransactionRangeCount(
+                    transactionCount = transactions.size.toLong(),
+                    tombstoneCount = tombstoneCount.toLong(),
+                )
+            if (actualCount != expectedCount) throw TransactionRangeChangedException(expectedCount, actualCount)
             val instantRange = range.toInstantRange(zoneId)
             val tombstones =
                 List(tombstoneCount) { index ->
@@ -311,6 +476,7 @@ class RangeResetUiTest {
 
         override suspend fun restoreRange(snapshot: TransactionRangeResetSnapshot): TransactionRangeCount {
             restoreCalls += 1
+            beforeRestore()
             val restoredTransactions = snapshot.transactionRows.map(TransactionEntity::toTransaction)
             val restoredIds = restoredTransactions.mapTo(mutableSetOf()) { it.id }
             rows.value = restoredTransactions + rows.value.filterNot { it.id in restoredIds }
@@ -347,6 +513,24 @@ class RangeResetUiTest {
             note = "",
             cents = cents,
         )
+
+    private class MutableClock(
+        var currentInstant: Instant,
+        private val zoneId: ZoneId,
+    ) : Clock() {
+        override fun getZone(): ZoneId = zoneId
+
+        override fun withZone(zone: ZoneId): Clock =
+            object : Clock() {
+                override fun getZone(): ZoneId = zone
+
+                override fun withZone(newZone: ZoneId): Clock = this@MutableClock.withZone(newZone)
+
+                override fun instant(): Instant = currentInstant
+            }
+
+        override fun instant(): Instant = currentInstant
+    }
 
     private companion object {
         val FixedClock: Clock = Clock.fixed(Instant.parse("2026-03-15T12:00:00Z"), ZoneOffset.UTC)
