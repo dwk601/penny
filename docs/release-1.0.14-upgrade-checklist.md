@@ -268,6 +268,18 @@ Restore automatic time/timezone and the original locale when finished.
   runtime summary or the runtime `Unavailable` state. Retain named evidence of
   the picker, initial frame, and replacement frame within the same aggregate-only
   privacy boundary.
+- [ ] On API 26–30, capture the launcher's widget-picker fallback and a screen
+  recording or frame sequence of a new placement before its first provider
+  update, using synthetic data only. Depending on the launcher, the expected
+  picker fallback is Penny's app icon or the neutral initial frame—not the API
+  31+ sample preview. After placement, capture the neutral/loading, actionable
+  initial frame. Neither the picker fallback nor the initial frame may expose a
+  merchant, note, account, individual transaction, or credential detail or
+  present `$0.00` or `Unavailable` as a real state. Capture the initial frame's
+  prompt replacement by the real aggregate runtime summary or the runtime
+  `Unavailable` state. Retain named evidence for the picker fallback, initial
+  frame, and replacement frame within the same aggregate-only privacy
+  boundary.
 - [ ] On API 31+, place one bound Penny widget with known current-month seeded
   spending, then use the launcher resize handles/options to exercise all three
   advertised responsive sizes: compact/short `2x1`, standard `2x2`, and wide
