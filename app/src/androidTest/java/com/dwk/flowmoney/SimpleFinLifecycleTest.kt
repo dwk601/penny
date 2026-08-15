@@ -101,6 +101,26 @@ class SimpleFinLifecycleTest {
         }
 
     @Test
+    fun retryPendingConnectionRequestsRecommendedWindow() =
+        runBlocking {
+            withRepository { _, fake, repository ->
+                fake.currentTime = 1_700_000_000_000L
+                fake.pendingCredential = SimpleFinPendingCredential("pending-window", NEW_URL)
+                var requestedWindow: Pair<Long, Long>? = null
+                fake.accounts = { _, start, end ->
+                    requestedWindow = start to end
+                    SimpleFinAccountsResult(emptyList())
+                }
+
+                assertTrue(repository.retryPendingConnection() is SimpleFinSyncResult.Success)
+
+                val (start, end) = checkNotNull(requestedWindow)
+                assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
+                assertEquals(TimeUnit.DAYS.toSeconds(45), end - start)
+            }
+        }
+
+    @Test
     fun ambiguousClaimFailureDoesNotReplayTokenOrOfferPendingRetry() =
         runBlocking {
             withRepository { _, fake, repository ->
@@ -373,6 +393,27 @@ class SimpleFinLifecycleTest {
                     SimpleFinSyncWorker.runSync(repository).javaClass,
                 )
                 assertEquals(0, requests)
+            }
+        }
+
+    @Test
+    fun syncNowRequestsRecommendedWindow() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 1_700_000_000_000L
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current-window"))
+                fake.credential = "current-window" to OLD_URL
+                var requestedWindow: Pair<Long, Long>? = null
+                fake.accounts = { _, start, end ->
+                    requestedWindow = start to end
+                    SimpleFinAccountsResult(emptyList())
+                }
+
+                assertTrue(repository.syncNow() is SimpleFinSyncResult.Success)
+
+                val (start, end) = checkNotNull(requestedWindow)
+                assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
+                assertEquals(TimeUnit.DAYS.toSeconds(45), end - start)
             }
         }
 
