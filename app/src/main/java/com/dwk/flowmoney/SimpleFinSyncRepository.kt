@@ -21,6 +21,7 @@ import javax.net.ssl.SSLException
 internal const val MIN_AUTOMATIC_SYNCS_PER_DAY = 1
 internal const val MAX_AUTOMATIC_SYNCS_PER_DAY = 12
 internal val SIMPLEFIN_RETRY_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(2)
+internal val SIMPLEFIN_SYNC_WINDOW_SECONDS = TimeUnit.DAYS.toSeconds(45)
 
 internal fun isValidAutomaticSyncsPerDay(count: Int) = count in MIN_AUTOMATIC_SYNCS_PER_DAY..MAX_AUTOMATIC_SYNCS_PER_DAY
 
@@ -234,7 +235,7 @@ class SimpleFinSyncRepository internal constructor(
         return try {
             val accessUrl = readCredential(profile.connectionId)
             val end = TimeUnit.MILLISECONDS.toSeconds(time)
-            val start = end - TimeUnit.DAYS.toSeconds(90)
+            val start = end - SIMPLEFIN_SYNC_WINDOW_SECONDS
             val result = functions.accounts(accessUrl, start, end)
             if (result.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val mapped = SimpleFinMapper.map(profile.connectionId, result.accounts)
@@ -327,7 +328,7 @@ class SimpleFinSyncRepository internal constructor(
         try {
             val fetchedAt = now()
             val end = TimeUnit.MILLISECONDS.toSeconds(fetchedAt)
-            val initial = functions.accounts(accessUrl, end - TimeUnit.DAYS.toSeconds(90), end)
+            val initial = functions.accounts(accessUrl, end - SIMPLEFIN_SYNC_WINDOW_SECONDS, end)
             if (initial.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val mapped = SimpleFinMapper.map(connectionId, initial.accounts)
             val warning =
