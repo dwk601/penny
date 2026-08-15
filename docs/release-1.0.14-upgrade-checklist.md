@@ -263,18 +263,20 @@ Restore automatic time/timezone and the original locale when finished.
   synthetic data only. The picker preview must show clearly sample or neutral
   aggregate content, never `$0.00` or `Unavailable`, and must not expose a
   merchant, note, account, individual transaction, or credential detail. The
-  initial launcher frame must be neutral/loading rather than a fabricated zero,
-  stale value, or picker sample, then be promptly replaced by the real aggregate
-  runtime summary or the runtime `Unavailable` state. Retain named evidence of
+  shared initial launcher frame must be neutral/loading, actionable—matching
+  `Open Penny to load`—rather than a fabricated zero, stale value, or picker
+  sample, then be promptly replaced by the real aggregate runtime summary or the
+  runtime `Unavailable` state. Retain named evidence of
   the picker, initial frame, and replacement frame within the same aggregate-only
   privacy boundary.
 - [ ] On API 26–30, capture the launcher's widget-picker fallback and a screen
   recording or frame sequence of a new placement before its first provider
   update, using synthetic data only. Depending on the launcher, the expected
-  picker fallback is Penny's app icon or the neutral initial frame—not the API
-  31+ sample preview. After placement, capture the neutral/loading, actionable
-  initial frame. Neither the picker fallback nor the initial frame may expose a
-  merchant, note, account, individual transaction, or credential detail or
+  picker fallback is Penny's app icon or the shared neutral/loading, actionable
+  initial frame matching `Open Penny to load`—not the API 31+ sample preview.
+  After placement, capture that initial frame. Neither the picker fallback nor
+  the initial frame may expose a merchant, note, account, individual
+  transaction, or credential detail or
   present `$0.00` or `Unavailable` as a real state. Capture the initial frame's
   prompt replacement by the real aggregate runtime summary or the runtime
   `Unavailable` state. Retain named evidence for the picker fallback, initial
