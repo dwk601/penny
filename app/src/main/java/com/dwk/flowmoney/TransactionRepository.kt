@@ -1,6 +1,5 @@
 package com.dwk.flowmoney
 
-import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -27,13 +26,14 @@ class TransactionRepository(private val dao: TransactionDao) : TransactionGatewa
     }
 
     override suspend fun importTransactions(transactions: List<Transaction>): Int {
+        require(transactions.all { CsvCodec.isImportId(it.id) }) { "CSV import identity required" }
         return dao.importIgnoringConflicts(transactions.map {
-            it.copy(id = UUID.randomUUID().toString(), source = "local", accountKey = null, accountName = null).toEntity()
+            it.copy(source = "local", accountKey = null, accountName = null).toEntity()
         })
     }
 
     override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>): Int {
-        return dao.importIgnoringConflicts(transactions.map { it.toEntity() })
+        return importTransactions(transactions)
     }
 
     override suspend fun delete(id: String) {

@@ -160,6 +160,28 @@ class TransactionDaoDataPathTest {
             }
         }
 
+    @Test fun realRepositoryReimportIsIdempotentAndRetainsDuplicateRows() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val repository = TransactionRepository(database.transactionDao())
+                val csv =
+                    """
+                    id,occurredAtEpochMillis,merchant,category,note,cents
+                    forged,1766145600000,Coffee,Food,duplicate,-625
+                    forged,1766145600000,Coffee,Food,duplicate,-625
+                    """.trimIndent()
+                val imported = CsvCodec.decode(csv)
+
+                assertEquals(2, imported.map { it.id }.toSet().size)
+                assertEquals(2, repository.importTransactions(imported))
+                assertEquals(0, repository.importTransactions(CsvCodec.decode(csv)))
+                assertEquals(imported.map { it.id }.toSet(), repository.load().map { it.id }.toSet())
+            } finally {
+                database.close()
+            }
+        }
+
     private fun entity(
         id: String,
         occurredAtEpochMillis: Long,

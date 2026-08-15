@@ -26,29 +26,34 @@ object CsvCodec {
         val isMonarch = first.map(::normalizeHeader).containsAll(monarchRequiredColumns)
         val dataRows = if (first == header || first == legacyHeader || isMonarch) rows.drop(1) else rows
         require(dataRows.size <= MAX_TRANSACTIONS) { "CSV has too many transactions" }
-        val decoded = when {
+        val decodedRows = when {
             first == header -> decodeFlowMoney(dataRows, header.size)
             first == legacyHeader -> decodeFlowMoney(dataRows, legacyHeader.size)
             isMonarch -> decodeMonarch(first, dataRows)
             else -> decodeFlowMoney(dataRows, legacyHeader.size)
         }
-        return decoded
+        return assignStableImportIds(decodedRows)
     }
 
     fun localDate(transaction: Transaction) = Instant.ofEpochMilli(transaction.occurredAtEpochMillis).atZone(ZoneId.systemDefault()).toLocalDate().toString()
 
     private fun decodeFlowMoney(rows: List<List<String>>, columns: Int) = rows.map { row ->
         require(row.size == columns) { "Malformed FlowMoney row" }
-        Transaction(
-            id = row[0],
-            occurredAtEpochMillis = row[1].trim().toLongOrNull() ?: error("Malformed FlowMoney timestamp"),
-            merchant = row[2], category = row[3], note = row[4],
-            cents = row[5].trim().toIntOrNull() ?: error("Malformed FlowMoney amount"),
-            recurringInterval = if (columns == header.size) parseRecurring(row[6]) else null,
+        val occurredAtEpochMillis = row[1].trim().toLongOrNull() ?: error("Malformed FlowMoney timestamp")
+        val cents = row[5].trim().toIntOrNull() ?: error("Malformed FlowMoney amount")
+        DecodedCsvRow(
+            transaction = Transaction(
+                id = "",
+                occurredAtEpochMillis = occurredAtEpochMillis,
+                merchant = row[2], category = row[3], note = row[4], cents = cents,
+                recurringInterval = if (columns == header.size) parseRecurring(row[6]) else null,
+            ),
+            temporalKind = "epoch-millis",
+            temporalValue = occurredAtEpochMillis.toString(),
         )
     }
 
-    private fun decodeMonarch(headerRow: List<String>, rows: List<List<String>>): List<Transaction> {
+    private fun decodeMonarch(headerRow: List<String>, rows: List<List<String>>): List<DecodedCsvRow> {
         val normalized = headerRow.map(::normalizeHeader)
         require(normalized.containsAll(monarchRequiredColumns) && normalized.distinct().size == normalized.size) { "Invalid Monarch header" }
         val indexes = normalized.withIndex().associate { it.value to it.index }
@@ -59,13 +64,17 @@ object CsvCodec {
             val person = column("person"); val date = column("date"); val amount = column("amount"); val recurring = column("recurring")
             val localDate = parseMonarchDate(date) ?: error("Malformed Monarch date")
             require(MONARCH_AMOUNT.matches(amount)) { "Malformed Monarch amount" }
-            Transaction(
-                // ponytail: stable Monarch hash is only a decode-time placeholder; repository remaps document imports.
-                id = stableImportId("monarch", listOf(account, category, description, person, date, amount, recurring)),
-                occurredAtEpochMillis = localDate.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli(),
-                merchant = description.ifBlank { category }, category = category,
-                note = listOfNotNull(account.takeIf(String::isNotBlank)?.let { "Account: $it" }, person.takeIf(String::isNotBlank)?.let { "Person: $it" }, recurring.takeIf(String::isNotBlank)?.let { "Recurring: $it" }).joinToString("; "),
-                cents = MoneyFormatter.parseAmountToCents(amount), recurringInterval = parseRecurring(recurring),
+            DecodedCsvRow(
+                transaction = Transaction(
+                    id = "",
+                    occurredAtEpochMillis = localDate.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli(),
+                    merchant = description.ifBlank { category }, category = category,
+                    note = listOfNotNull(account.takeIf(String::isNotBlank)?.let { "Account: $it" }, person.takeIf(String::isNotBlank)?.let { "Person: $it" }, recurring.takeIf(String::isNotBlank)?.let { "Recurring: $it" }).joinToString("; "),
+                    cents = MoneyFormatter.parseAmountToCents(amount), recurringInterval = parseRecurring(recurring),
+                ),
+                // Keep the source-local date stable even though the displayed epoch uses the device zone.
+                temporalKind = "local-date",
+                temporalValue = localDate.toString(),
             )
         }
     }
@@ -73,10 +82,55 @@ object CsvCodec {
     private fun parseMonarchDate(value: String): LocalDate? = monarchDateFormatters.firstNotNullOfOrNull { formatter -> try { LocalDate.parse(value, formatter) } catch (_: DateTimeParseException) { null } }
     private fun parseRecurring(value: String) = when (value.trim().lowercase(Locale.US)) { "weekly", "week" -> RecurrenceInterval.Weekly; "yes", "monthly", "month", "recurring" -> RecurrenceInterval.Monthly; "yearly", "year", "annual", "annually" -> RecurrenceInterval.Yearly; else -> null }
     private fun normalizeHeader(value: String) = value.trim().lowercase(Locale.US)
-    private fun stableImportId(prefix: String, values: List<String>): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(values.joinToString("\u001F") { it.trim() }.toByteArray(Charsets.UTF_8))
-        return "$prefix:" + digest.take(12).joinToString("") { "%02x".format(Locale.US, it.toInt() and 0xff) }
+
+    private fun assignStableImportIds(rows: List<DecodedCsvRow>): List<Transaction> {
+        val occurrences = mutableMapOf<CsvRowIdentity, Int>()
+        return rows.map { row ->
+            val identity = row.identity()
+            val occurrenceOrdinal = occurrences.getOrDefault(identity, 0) + 1
+            occurrences[identity] = occurrenceOrdinal
+            row.transaction.copy(id = stableImportId(identity, occurrenceOrdinal))
+        }
     }
+
+    private fun stableImportId(identity: CsvRowIdentity, occurrenceOrdinal: Int): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        listOf(
+            CSV_ID_VERSION,
+            identity.temporalKind,
+            identity.temporalValue,
+            identity.merchant,
+            identity.category,
+            identity.note,
+            identity.cents.toString(),
+            identity.recurringIntervalName,
+            occurrenceOrdinal.toString(),
+        ).forEach { value -> digest.updateField(value) }
+        return CSV_ID_PREFIX + digest.digest().toLowerHex()
+    }
+
+    private fun MessageDigest.updateField(value: String?) {
+        if (value == null) {
+            update(0.toByte())
+            return
+        }
+        update(1.toByte())
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        val size = bytes.size
+        update(byteArrayOf((size ushr 24).toByte(), (size ushr 16).toByte(), (size ushr 8).toByte(), size.toByte()))
+        update(bytes)
+    }
+
+    private fun ByteArray.toLowerHex(): String = buildString(size * 2) {
+        this@toLowerHex.forEach { byte ->
+            val value = byte.toInt() and 0xff
+            append(HEX_DIGITS[value ushr 4])
+            append(HEX_DIGITS[value and 0x0f])
+        }
+    }
+
+    internal fun isImportId(id: String): Boolean = CSV_ID.matches(id)
+
     private fun escape(value: String): String {
         val safe = if (value.firstOrNull { !it.isWhitespace() && !Character.isSpaceChar(it) && !it.isISOControl() && it != '\uFEFF' } in FORMULA_PREFIXES) "'$value" else value
         val escaped = safe.replace("\"", "\"\"")
@@ -107,8 +161,34 @@ object CsvCodec {
         return rows
     }
 
+    private data class DecodedCsvRow(val transaction: Transaction, val temporalKind: String, val temporalValue: String) {
+        fun identity() = CsvRowIdentity(
+            temporalKind = temporalKind,
+            temporalValue = temporalValue,
+            merchant = transaction.merchant,
+            category = transaction.category,
+            note = transaction.note,
+            cents = transaction.cents,
+            recurringIntervalName = transaction.recurringInterval?.name,
+        )
+    }
+
+    private data class CsvRowIdentity(
+        val temporalKind: String,
+        val temporalValue: String,
+        val merchant: String,
+        val category: String,
+        val note: String,
+        val cents: Int,
+        val recurringIntervalName: String?,
+    )
+
     private enum class FieldState { Unquoted, Quoted, AfterQuote }
     private const val MAX_NONBLANK_ROWS = 20_001; private const val MAX_COLUMNS = 64; private const val MAX_CELL_CHARS = 16_384; private const val MAX_TRANSACTIONS = 20_000
+    private const val CSV_ID_PREFIX = "csv:"
+    private const val CSV_ID_VERSION = "penny-csv-row-v1"
+    private val CSV_ID = Regex("csv:[0-9a-f]{64}")
+    private val HEX_DIGITS = "0123456789abcdef".toCharArray()
     private val FORMULA_PREFIXES = setOf('=', '+', '-', '@')
     private val MONARCH_AMOUNT = Regex("[+-]?\\$?(?:\\d{1,3}(?:,\\d{3})*|\\d+)(?:\\.\\d{1,2})?")
 }

@@ -156,10 +156,10 @@ class MainViewModelReadinessTest {
             composeRule.onAllNodesWithText(legacy.merchant).onFirst().assertIsDisplayed()
             composeRule.onNodeWithTag("app_loading_state").assertDoesNotExist()
             composeRule.onNodeWithTag("empty_add_transaction").assertDoesNotExist()
-            assertEquals(
-                listOf(legacy.id),
-                runBlocking { database.transactionDao().getAll() }.map { it.id },
-            )
+            val importedIds = runBlocking { database.transactionDao().getAll() }.map { it.id }
+            assertEquals(1, importedIds.size)
+            assertTrue(importedIds.single().matches(Regex("csv:[0-9a-f]{64}")))
+            assertFalse(importedIds.single() == legacy.id)
             assertTrue(preferences.getBoolean("room_migrated", false))
         } finally {
             if (transactionOpen) sqlDatabase.endTransaction()
