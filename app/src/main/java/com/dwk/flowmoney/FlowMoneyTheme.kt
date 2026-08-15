@@ -1,6 +1,8 @@
 package com.dwk.flowmoney
 
 import android.os.Build
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Easing
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
@@ -28,6 +30,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
 import kotlin.math.sqrt
+
+internal object PennyMotion {
+    const val DurationShort = 150
+    const val DurationMedium = 250
+    const val DurationLong = 300
+
+    val StandardEasing: Easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+    val StandardAccelerateEasing: Easing = CubicBezierEasing(0.3f, 0f, 1f, 1f)
+    val StandardDecelerateEasing: Easing = CubicBezierEasing(0f, 0f, 0f, 1f)
+}
 
 @Immutable
 internal data class FinanceColors(

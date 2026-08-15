@@ -17,6 +17,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -89,8 +98,8 @@ import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
@@ -98,6 +107,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -115,6 +125,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -1057,6 +1068,7 @@ internal fun AdaptiveFlowMoneyShell(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FlowMoneyScaffold(
     selectedTab: DashboardTab,
@@ -1068,9 +1080,16 @@ private fun FlowMoneyScaffold(
     modifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
-        modifier = modifier,
-        topBar = { FlowMoneyTopAppBar(selectedTab = selectedTab, onData = onData) },
+        modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        topBar = {
+            FlowMoneyTopAppBar(
+                selectedTab = selectedTab,
+                onData = onData,
+                scrollBehavior = scrollBehavior,
+            )
+        },
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         bottomBar = {
             if (!isWide) {
@@ -1095,7 +1114,10 @@ private fun FlowMoneyScaffold(
                             .testTag("add_transaction_fab")
                             .semantics { contentDescription = "Add transaction" },
                 ) {
-                    Text("+", fontSize = 30.sp, fontWeight = FontWeight.Light)
+                    Icon(
+                        painter = painterResource(R.drawable.ic_add),
+                        contentDescription = null,
+                    )
                 }
             }
         },
@@ -1114,44 +1136,31 @@ private fun FlowMoneyScaffold(
 internal fun FlowMoneyTopAppBar(
     selectedTab: DashboardTab,
     onData: () -> Unit,
+    scrollBehavior: TopAppBarScrollBehavior? = null,
 ) {
-    TopAppBar(
+    PennyOverviewTopAppBar(
         title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Image(
                     painter = painterResource(R.drawable.penny_logo),
                     contentDescription = "Penny logo",
-                    modifier = Modifier.size(36.dp),
+                    modifier = Modifier.size(32.dp),
                 )
                 Spacer(Modifier.width(10.dp))
                 Text("Penny", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = selectedTab.label,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
             }
         },
-        actions = {
-            TextButton(
-                onClick = onData,
-                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
-            ) { Text("Data") }
+        subtitle = {
+            Text(
+                text = selectedTab.label,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         },
-        colors =
-            TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-                titleContentColor = MaterialTheme.colorScheme.onSurface,
-                actionIconContentColor = MaterialTheme.colorScheme.onSurface,
-            ),
-        windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top),
+        onData = onData,
+        scrollBehavior = scrollBehavior,
     )
 }
 
@@ -1224,55 +1233,88 @@ internal fun FlowMoneyScreen(
         return
     }
 
-    when (selectedTab) {
-        DashboardTab.Overview -> {
-            OverviewPage(
-                sortedTransactions = uiState.sortedTransactions,
-                recentTransactions = uiState.recentTransactions,
-                rangeTransactions = uiState.rangeTransactions,
-                metrics = uiState.metrics,
-                dateRange = uiState.dateRange,
-                chartRangeMode = uiState.chartRangeMode,
-                selectedMonth = uiState.selectedMonth,
-                availableMonths = uiState.availableMonths,
-                onChartRangeModeSelected = onChartRangeModeSelected,
-                onSelectedMonthChange = onSelectedMonthChange,
-                onEdit = onEdit,
-                onViewAllTransactions = onViewAllTransactions,
-                onDelete = onDelete,
-                onAddTransaction = onAddTransaction,
-                onData = onData,
-                modifier = modifier,
+    AnimatedContent(
+        targetState = selectedTab,
+        modifier = modifier,
+        transitionSpec = {
+            (
+                fadeIn(
+                    animationSpec =
+                        tween(
+                            durationMillis = PennyMotion.DurationMedium,
+                            easing = PennyMotion.StandardDecelerateEasing,
+                        ),
+                ) +
+                    slideInVertically(
+                        animationSpec =
+                            tween(
+                                durationMillis = PennyMotion.DurationMedium,
+                                easing = PennyMotion.StandardEasing,
+                            ),
+                        initialOffsetY = { fullHeight -> fullHeight / 24 },
+                    )
+            ).togetherWith(
+                fadeOut(
+                    animationSpec =
+                        tween(
+                            durationMillis = PennyMotion.DurationShort,
+                            easing = PennyMotion.StandardAccelerateEasing,
+                        ),
+                ),
             )
-        }
+        },
+        label = "dashboard_tab",
+    ) { tab ->
+        when (tab) {
+            DashboardTab.Overview -> {
+                OverviewPage(
+                    sortedTransactions = uiState.sortedTransactions,
+                    recentTransactions = uiState.recentTransactions,
+                    rangeTransactions = uiState.rangeTransactions,
+                    metrics = uiState.metrics,
+                    dateRange = uiState.dateRange,
+                    chartRangeMode = uiState.chartRangeMode,
+                    selectedMonth = uiState.selectedMonth,
+                    availableMonths = uiState.availableMonths,
+                    onChartRangeModeSelected = onChartRangeModeSelected,
+                    onSelectedMonthChange = onSelectedMonthChange,
+                    onEdit = onEdit,
+                    onViewAllTransactions = onViewAllTransactions,
+                    onDelete = onDelete,
+                    onAddTransaction = onAddTransaction,
+                    onData = onData,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
 
-        DashboardTab.Transactions -> {
-            TransactionsPage(
-                sortedTransactions = uiState.sortedTransactions,
-                onEdit = onEdit,
-                onDelete = onDelete,
-                onAddTransaction = onAddTransaction,
-                onData = onData,
-                modifier = modifier,
-            )
-        }
+            DashboardTab.Transactions -> {
+                TransactionsPage(
+                    sortedTransactions = uiState.sortedTransactions,
+                    onEdit = onEdit,
+                    onDelete = onDelete,
+                    onAddTransaction = onAddTransaction,
+                    onData = onData,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
 
-        DashboardTab.Insights -> {
-            InsightsPage(
-                dailySpending = uiState.dailySpending,
-                categoryTotals = uiState.categoryTotals,
-                rangeTransactions = uiState.rangeTransactions,
-                dateRange = uiState.dateRange,
-                chartRangeMode = uiState.chartRangeMode,
-                selectedMonth = uiState.selectedMonth,
-                availableMonths = uiState.availableMonths,
-                onChartRangeModeSelected = onChartRangeModeSelected,
-                onSelectedMonthChange = onSelectedMonthChange,
-                onEdit = onEdit,
-                onAddTransaction = onAddTransaction,
-                onData = onData,
-                modifier = modifier,
-            )
+            DashboardTab.Insights -> {
+                InsightsPage(
+                    dailySpending = uiState.dailySpending,
+                    categoryTotals = uiState.categoryTotals,
+                    rangeTransactions = uiState.rangeTransactions,
+                    dateRange = uiState.dateRange,
+                    chartRangeMode = uiState.chartRangeMode,
+                    selectedMonth = uiState.selectedMonth,
+                    availableMonths = uiState.availableMonths,
+                    onChartRangeModeSelected = onChartRangeModeSelected,
+                    onSelectedMonthChange = onSelectedMonthChange,
+                    onEdit = onEdit,
+                    onAddTransaction = onAddTransaction,
+                    onData = onData,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
     }
 }
@@ -1373,12 +1415,31 @@ private fun OverviewPage(
                         onAction = onViewAllTransactions,
                     )
                 }
-                items(recentTransactions, key = { it.id }) { transaction ->
-                    SwipeTransactionRow(
-                        transaction = transaction,
-                        onEdit = { onEdit(transaction) },
-                        onDelete = { onDelete(transaction) },
-                    )
+                item {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        shape = MaterialTheme.shapes.large,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column {
+                            recentTransactions.forEachIndexed { index, transaction ->
+                                key(transaction.id) {
+                                    SwipeTransactionRow(
+                                        transaction = transaction,
+                                        onEdit = { onEdit(transaction) },
+                                        onDelete = { onDelete(transaction) },
+                                    )
+                                }
+                                if (index < recentTransactions.lastIndex) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(start = 68.dp),
+                                        thickness = 1.dp,
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2363,7 +2424,35 @@ private fun DateRangeControls(
                 }
             }
         }
-        if (mode == ChartRangeMode.Month && monthPickerExpanded) {
+        AnimatedVisibility(
+            visible = mode == ChartRangeMode.Month && monthPickerExpanded,
+            enter =
+                fadeIn(
+                    tween(
+                        durationMillis = PennyMotion.DurationShort,
+                        easing = PennyMotion.StandardDecelerateEasing,
+                    ),
+                ) +
+                    expandVertically(
+                        tween(
+                            durationMillis = PennyMotion.DurationMedium,
+                            easing = PennyMotion.StandardEasing,
+                        ),
+                    ),
+            exit =
+                fadeOut(
+                    tween(
+                        durationMillis = PennyMotion.DurationShort,
+                        easing = PennyMotion.StandardAccelerateEasing,
+                    ),
+                ) +
+                    shrinkVertically(
+                        tween(
+                            durationMillis = PennyMotion.DurationMedium,
+                            easing = PennyMotion.StandardEasing,
+                        ),
+                    ),
+        ) {
             MonthYearPicker(
                 selectedMonth = selectedMonth,
                 availableMonths = availableMonths,
@@ -2538,14 +2627,36 @@ private fun SummaryBand(
                 color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.72f),
                 style = MaterialTheme.typography.bodyMedium,
             )
-            Text(
-                text = MoneyFormatter.formatUsd(metrics.spentCents),
-                color = MaterialTheme.colorScheme.inverseOnSurface,
-                style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
-                letterSpacing = 0.sp,
-                textAlign = TextAlign.End,
+            AnimatedContent(
+                targetState = MoneyFormatter.formatUsd(metrics.spentCents),
+                transitionSpec = {
+                    fadeIn(
+                        tween(
+                            durationMillis = PennyMotion.DurationMedium,
+                            easing = PennyMotion.StandardDecelerateEasing,
+                        ),
+                    ).togetherWith(
+                        fadeOut(
+                            tween(
+                                durationMillis = PennyMotion.DurationShort,
+                                easing = PennyMotion.StandardAccelerateEasing,
+                            ),
+                        ),
+                    )
+                },
+                contentAlignment = Alignment.CenterEnd,
                 modifier = Modifier.fillMaxWidth(),
-            )
+                label = "summary_spending_amount",
+            ) { amount ->
+                Text(
+                    text = amount,
+                    color = MaterialTheme.colorScheme.inverseOnSurface,
+                    style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
+                    letterSpacing = 0.sp,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -2568,22 +2679,44 @@ private fun SummaryPill(
     Column(
         modifier =
             modifier
-                .clip(MaterialTheme.shapes.medium)
-                .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.08f))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .clip(MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.06f))
+                .padding(horizontal = 10.dp, vertical = 7.dp),
     ) {
         Text(
             label,
-            color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.72f),
-            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.64f),
+            style = MaterialTheme.typography.labelSmall,
         )
-        Text(
-            value,
-            color = MaterialTheme.colorScheme.inverseOnSurface,
-            style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
-            textAlign = TextAlign.End,
+        AnimatedContent(
+            targetState = value,
+            transitionSpec = {
+                fadeIn(
+                    tween(
+                        durationMillis = PennyMotion.DurationMedium,
+                        easing = PennyMotion.StandardDecelerateEasing,
+                    ),
+                ).togetherWith(
+                    fadeOut(
+                        tween(
+                            durationMillis = PennyMotion.DurationShort,
+                            easing = PennyMotion.StandardAccelerateEasing,
+                        ),
+                    ),
+                )
+            },
+            contentAlignment = Alignment.CenterEnd,
             modifier = Modifier.fillMaxWidth(),
-        )
+            label = "summary_$label",
+        ) { animatedValue ->
+            Text(
+                animatedValue,
+                color = MaterialTheme.colorScheme.inverseOnSurface,
+                style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                textAlign = TextAlign.End,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 
@@ -3061,7 +3194,6 @@ private fun SwipeActionBackground() {
         modifier =
             Modifier
                 .fillMaxSize()
-                .clip(MaterialTheme.shapes.medium)
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest),
     ) {
         Text(
@@ -3093,8 +3225,7 @@ private fun TransactionRow(
     onDelete: (() -> Unit)? = null,
 ) {
     val fontScale = LocalDensity.current.fontScale
-    var menuExpanded by remember { mutableStateOf(false) }
-    Card(
+    BoxWithConstraints(
         modifier =
             modifier
                 .fillMaxWidth()
@@ -3119,52 +3250,33 @@ private fun TransactionRow(
                             }
                         }
                 },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        shape = MaterialTheme.shapes.medium,
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val shouldStack = maxWidth < 420.dp || fontScale >= 1.3f
-            if (shouldStack) {
-                Column(modifier = Modifier.padding(start = 14.dp, top = 8.dp, end = 8.dp, bottom = 12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TransactionCategoryBadge(transaction.category)
-                        Spacer(Modifier.width(12.dp))
-                        TransactionIdentity(transaction, Modifier.weight(1f))
-                        TransactionOverflowMenu(
-                            transactionId = transaction.id,
-                            expanded = menuExpanded,
-                            onExpandedChange = { menuExpanded = it },
-                            onEdit = onClick,
-                            onDelete = onDelete,
-                        )
-                    }
-                    TransactionAmount(
-                        transaction = transaction,
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(start = 54.dp, end = 6.dp),
-                    )
-                }
-            } else {
-                Row(
-                    modifier = Modifier.padding(start = 14.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+        val shouldStack = maxWidth < 420.dp || fontScale >= 1.3f
+        if (shouldStack) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     TransactionCategoryBadge(transaction.category)
                     Spacer(Modifier.width(12.dp))
                     TransactionIdentity(transaction, Modifier.weight(1f))
-                    Spacer(Modifier.width(10.dp))
-                    TransactionAmount(transaction, Modifier.widthIn(min = 96.dp))
-                    TransactionOverflowMenu(
-                        transactionId = transaction.id,
-                        expanded = menuExpanded,
-                        onExpandedChange = { menuExpanded = it },
-                        onEdit = onClick,
-                        onDelete = onDelete,
-                    )
                 }
+                TransactionAmount(
+                    transaction = transaction,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 54.dp, top = 2.dp),
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TransactionCategoryBadge(transaction.category)
+                Spacer(Modifier.width(12.dp))
+                TransactionIdentity(transaction, Modifier.weight(1f))
+                Spacer(Modifier.width(10.dp))
+                TransactionAmount(transaction, Modifier.widthIn(min = 96.dp))
             }
         }
     }
@@ -3230,60 +3342,6 @@ private fun TransactionAmount(
         textAlign = TextAlign.End,
         modifier = modifier,
     )
-}
-
-@Composable
-private fun TransactionOverflowMenu(
-    transactionId: String,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    onEdit: () -> Unit,
-    onDelete: (() -> Unit)?,
-) {
-    Box {
-        Box(
-            modifier =
-                Modifier
-                    .size(48.dp)
-                    .testTag("transaction_actions_$transactionId")
-                    .semantics {
-                        contentDescription = if (onDelete == null) "Edit transaction" else "Edit or delete transaction"
-                    }.clip(CircleShape)
-                    .clickable(role = Role.Button) { onExpandedChange(true) },
-            contentAlignment = Alignment.Center,
-        ) {
-            Text("⋮", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { onExpandedChange(false) },
-        ) {
-            DropdownMenuItem(
-                text = { Text("Edit") },
-                onClick = {
-                    onExpandedChange(false)
-                    onEdit()
-                },
-                modifier =
-                    Modifier
-                        .heightIn(min = 48.dp)
-                        .testTag("transaction_action_edit_$transactionId"),
-            )
-            onDelete?.let { delete ->
-                DropdownMenuItem(
-                    text = { Text("Delete", color = LocalFinanceColors.current.expense) },
-                    onClick = {
-                        onExpandedChange(false)
-                        delete()
-                    },
-                    modifier =
-                        Modifier
-                            .heightIn(min = 48.dp)
-                            .testTag("transaction_action_delete_$transactionId"),
-                )
-            }
-        }
-    }
 }
 
 @Composable
