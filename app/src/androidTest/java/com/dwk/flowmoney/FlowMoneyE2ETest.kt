@@ -16,38 +16,43 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.rules.TestRule
 import org.junit.runner.Description
-import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class FlowMoneyE2ETest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
-    private val cleanPreLaunchState = TestRule { base, _: Description ->
-        object : Statement() {
-            override fun evaluate() {
-                val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-                FlowMoneyDatabase.resetForTest()
-                context.deleteDatabase("flow_money.db")
-                File(context.noBackupFilesDir, "simplefin_access_url.bin").deleteRecursively()
-                clearPreferences(context, "flow_money")
-                clearPreferences(context, SimpleFinMigrationCleanup.PREFERENCES)
-                check(!context.getDatabasePath("flow_money.db").exists())
-                check(!File(context.noBackupFilesDir, "simplefin_access_url.bin").exists())
-                base.evaluate()
+    private val cleanPreLaunchState =
+        TestRule { base, _: Description ->
+            object : Statement() {
+                override fun evaluate() {
+                    val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+                    FlowMoneyDatabase.resetForTest()
+                    context.deleteDatabase("flow_money.db")
+                    File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME).deleteRecursively()
+                    File(context.noBackupFilesDir, SimpleFinCredentialStore.PENDING_FILE_NAME).deleteRecursively()
+                    File(context.noBackupFilesDir, SimpleFinCredentialStore.ROLLBACK_FILE_NAME).deleteRecursively()
+                    clearPreferences(context, "flow_money")
+                    clearPreferences(context, SimpleFinMigrationCleanup.PREFERENCES)
+                    check(!context.getDatabasePath("flow_money.db").exists())
+                    check(!File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME).exists())
+                    check(!File(context.noBackupFilesDir, SimpleFinCredentialStore.PENDING_FILE_NAME).exists())
+                    check(!File(context.noBackupFilesDir, SimpleFinCredentialStore.ROLLBACK_FILE_NAME).exists())
+                    base.evaluate()
+                }
             }
         }
-    }
 
     @get:Rule
     val rules: RuleChain = RuleChain.outerRule(cleanPreLaunchState).around(composeRule)
@@ -132,7 +137,8 @@ class FlowMoneyE2ETest {
         composeRule.activityRule.scenario.recreate()
 
         composeRule.onNodeWithText("Data").performClick()
-        composeRule.onNodeWithTag("simplefin_auto_sync_frequency_value")
+        composeRule
+            .onNodeWithTag("simplefin_auto_sync_frequency_value")
             .performScrollTo()
             .assertTextEquals("4 syncs per day")
         composeRule.onNodeWithTag("simplefin_auto_sync_frequency_action").performClick()
@@ -140,10 +146,15 @@ class FlowMoneyE2ETest {
 
         composeRule.waitUntil(5_000) {
             runBlocking {
-                FlowMoneyDatabase.get(context).simpleFinDao().getProfile()?.automaticSyncsPerDay == 7
+                FlowMoneyDatabase
+                    .get(context)
+                    .simpleFinDao()
+                    .getProfile()
+                    ?.automaticSyncsPerDay == 7
             }
         }
-        composeRule.onNodeWithTag("simplefin_auto_sync_frequency_value")
+        composeRule
+            .onNodeWithTag("simplefin_auto_sync_frequency_value")
             .assertTextEquals("7 syncs per day")
     }
 
@@ -234,7 +245,10 @@ class FlowMoneyE2ETest {
     private companion object {
         const val PackageName = "com.dwk.flowmoney"
 
-        fun clearPreferences(context: Context, name: String) {
+        fun clearPreferences(
+            context: Context,
+            name: String,
+        ) {
             val preferences = context.getSharedPreferences(name, Context.MODE_PRIVATE)
             check(preferences.edit().clear().commit()) { "Could not clear $name preferences" }
             check(preferences.all.isEmpty()) { "$name preferences were not cleared" }

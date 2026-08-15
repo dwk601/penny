@@ -26,10 +26,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import java.io.File
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -42,6 +44,9 @@ class Phase2AsyncEdgeTest {
     fun resetDatabase() {
         FlowMoneyDatabase.resetForTest()
         context.deleteDatabase("flow_money.db")
+        File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME).deleteRecursively()
+        File(context.noBackupFilesDir, SimpleFinCredentialStore.PENDING_FILE_NAME).deleteRecursively()
+        File(context.noBackupFilesDir, SimpleFinCredentialStore.ROLLBACK_FILE_NAME).deleteRecursively()
         store = ViewModelStore()
     }
 
@@ -106,10 +111,79 @@ class Phase2AsyncEdgeTest {
         composeRule.onNodeWithTag("simplefin_setup_token").performScrollTo().performTextInput("setup-token")
         composeRule.onNodeWithText("Connect").performClick()
 
-        composeRule.onNodeWithText("Synced 1 new transaction, 2 updated transactions").assertIsDisplayed()
+        composeRule.onNodeWithText("SimpleFIN connected").assertIsDisplayed()
         assertEquals("setup-token", receivedToken)
         assertEquals(1, widgetRefreshCalls.get())
         assertTrue(composeRule.onAllNodesWithText("Bank connection failed").fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
+    fun recoveredPendingConnectionUsesProductionRetryCallbackAndSnackbar() {
+        val backend = PendingSimpleFinBackend()
+        backend.accountsResult =
+            SimpleFinAccountsResult(
+                accounts =
+                    listOf(
+                        SimpleFinAccount(
+                            providerConnectionId = "synthetic-provider",
+                            id = "synthetic-account",
+                            name = "Synthetic checking",
+                            orgName = "Synthetic bank",
+                            currency = "USD",
+                            balance = "1.00",
+                            availableBalance = "1.00",
+                            transactions =
+                                listOf(
+                                    SimpleFinTransaction(
+                                        id = "synthetic-transaction",
+                                        posted = 1_700_000_000L,
+                                        amount = "-1.00",
+                                        description = "Synthetic merchant",
+                                        pending = false,
+                                    ),
+                                ),
+                        ),
+                    ),
+            )
+        val widgetRefreshCalls = AtomicInteger()
+        setApp(
+            gateway = FakeGateway(),
+            simpleFinRepository = backend.repository(FlowMoneyDatabase.get(context)),
+            transactionWidgetRefresh = { widgetRefreshCalls.incrementAndGet() },
+        )
+
+        composeRule.onNodeWithText("Data").performClick()
+        composeRule.waitUntil(5_000) {
+            composeRule.onAllNodesWithTag("simplefin_retry_connection_button").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("simplefin_setup_token").assertDoesNotExist()
+        composeRule.onNodeWithTag("simplefin_retry_connection_button").performScrollTo().performClick()
+
+        composeRule.onNodeWithText("SimpleFIN connected").assertIsDisplayed()
+        assertEquals(0, backend.claimCalls)
+        assertEquals(1, backend.accountCalls)
+        assertNull(backend.pendingCredential)
+        assertEquals(1, widgetRefreshCalls.get())
+    }
+
+    @Test
+    fun recoveredPendingConnectionUsesProductionStartOverCallback() {
+        val backend = PendingSimpleFinBackend()
+        setApp(
+            gateway = FakeGateway(),
+            simpleFinRepository = backend.repository(FlowMoneyDatabase.get(context)),
+        )
+
+        composeRule.onNodeWithText("Data").performClick()
+        composeRule.waitUntil(5_000) {
+            composeRule.onAllNodesWithTag("simplefin_cancel_pending_button").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("simplefin_cancel_pending_button").performScrollTo().performClick()
+
+        composeRule.onNodeWithText("SimpleFIN connection canceled").assertIsDisplayed()
+        composeRule.onNodeWithTag("simplefin_setup_token").performScrollTo().assertIsDisplayed()
+        assertNull(backend.pendingCredential)
+        assertEquals(0, backend.accountCalls)
     }
 
     @Test
@@ -486,17 +560,18 @@ class Phase2AsyncEdgeTest {
         connectSimpleFin: (suspend (String) -> SimpleFinSyncResult)? = null,
         manualSimpleFinSync: (suspend () -> SimpleFinSyncResult)? = null,
         simpleFinProfile: SimpleFinProfileEntity? = null,
+        simpleFinRepository: SimpleFinSyncRepository? = null,
     ) {
         val expectedTransactionIds = gateway.rows.value.map { it.id }
         val db = FlowMoneyDatabase.get(context)
         simpleFinProfile?.let { profile ->
             runBlocking { db.simpleFinDao().upsertProfile(profile) }
         }
-        val simpleFinRepository = SimpleFinSyncRepository(context)
+        val bankRepository = simpleFinRepository ?: SimpleFinSyncRepository(context)
         val viewModel =
             ViewModelProvider(
                 store,
-                MainViewModel.Factory(gateway, simpleFinRepository, MutableStateFlow(emptyList())),
+                MainViewModel.Factory(gateway, bankRepository, MutableStateFlow(emptyList())),
             )[MainViewModel::class.java]
         viewModel.reportInitializationComplete()
         val syncOnColdStart = coldStartSimpleFinSync ?: viewModel::syncSimpleFinIfStale
@@ -562,6 +637,63 @@ class Phase2AsyncEdgeTest {
         override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>) = importTransactions(transactions)
 
         override suspend fun delete(id: String) = onDelete(id)
+    }
+
+    private class PendingSimpleFinBackend {
+        var pendingCredential: SimpleFinPendingCredential? =
+            SimpleFinPendingCredential("synthetic-pending", NEW_ACCESS_URL)
+        var credential: Pair<String, String>? = null
+        var rollbackCredential: Pair<String, String>? = null
+        var accountsResult = SimpleFinAccountsResult(emptyList())
+        var claimCalls = 0
+        var accountCalls = 0
+
+        fun repository(db: FlowMoneyDatabase): SimpleFinSyncRepository =
+            SimpleFinSyncRepository(
+                db,
+                SimpleFinSyncFunctions(
+                    claim = {
+                        claimCalls++
+                        NEW_ACCESS_URL
+                    },
+                    accounts = { _, _, _ ->
+                        accountCalls++
+                        accountsResult
+                    },
+                    saveCredential = { connectionId, accessUrl -> credential = connectionId to accessUrl },
+                    readCredential = { expected -> credential?.takeIf { it.first == expected }?.second },
+                    deleteCredential = { credential = null },
+                    stagePendingCredential = { connectionId, accessUrl ->
+                        pendingCredential = SimpleFinPendingCredential(connectionId, accessUrl)
+                    },
+                    readPendingCredential = { pendingCredential },
+                    promotePendingCredential = { expected, previousConnectionId, previousAccessUrl ->
+                        val staged = checkNotNull(pendingCredential)
+                        check(staged.connectionId == expected)
+                        if (rollbackCredential == null && previousConnectionId != null && previousAccessUrl != null) {
+                            rollbackCredential = previousConnectionId to previousAccessUrl
+                        }
+                        credential = staged.connectionId to staged.accessUrl
+                    },
+                    restoreRollbackCredential = { expected ->
+                        rollbackCredential
+                            ?.takeIf { it.first == expected }
+                            ?.let {
+                                credential = it
+                                true
+                            } ?: false
+                    },
+                    deletePendingCredential = { pendingCredential = null },
+                    deleteRollbackCredential = { rollbackCredential = null },
+                    scheduleWork = {},
+                    cancelWork = {},
+                    now = { 1_800_000_000_000L },
+                ),
+            )
+
+        private companion object {
+            const val NEW_ACCESS_URL = "https://synthetic-user:synthetic-password@bridge.simplefin.org/simplefin"
+        }
     }
 
     private fun transaction(

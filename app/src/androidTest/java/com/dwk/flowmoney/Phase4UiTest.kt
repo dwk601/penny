@@ -110,6 +110,8 @@ class Phase4UiTest {
                             onExport = {},
                             onDisconnect = {},
                             onClose = { showData = false },
+                            onRetryConnection = {},
+                            onCancelPendingConnection = {},
                         )
                     } else {
                         FlowMoneyScreen(
@@ -174,6 +176,8 @@ class Phase4UiTest {
                         onExport = {},
                         onDisconnect = {},
                         onClose = {},
+                        onRetryConnection = {},
+                        onCancelPendingConnection = {},
                     )
                 }
             }

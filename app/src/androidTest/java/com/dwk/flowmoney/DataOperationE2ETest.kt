@@ -55,7 +55,9 @@ class DataOperationE2ETest {
                     cleanPickerHierarchyArtifacts(instrumentationContext)
                     FlowMoneyDatabase.resetForTest()
                     context.deleteDatabase("flow_money.db")
-                    File(context.noBackupFilesDir, "simplefin_access_url.bin").deleteRecursively()
+                    File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME).deleteRecursively()
+                    File(context.noBackupFilesDir, SimpleFinCredentialStore.PENDING_FILE_NAME).deleteRecursively()
+                    File(context.noBackupFilesDir, SimpleFinCredentialStore.ROLLBACK_FILE_NAME).deleteRecursively()
                     context
                         .getSharedPreferences("flow_money", Context.MODE_PRIVATE)
                         .edit()

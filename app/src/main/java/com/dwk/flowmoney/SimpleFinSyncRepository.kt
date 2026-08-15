@@ -69,8 +69,10 @@ internal class SimpleFinSyncFunctions(
     val deleteCredential: suspend () -> Unit,
     val stagePendingCredential: suspend (String, String) -> Unit,
     val readPendingCredential: suspend () -> SimpleFinPendingCredential?,
-    val promotePendingCredential: suspend (String) -> Unit,
+    val promotePendingCredential: suspend (String, String?, String?) -> Unit,
+    val restoreRollbackCredential: suspend (String) -> Boolean,
     val deletePendingCredential: suspend () -> Unit,
+    val deleteRollbackCredential: suspend () -> Unit,
     val scheduleWork: suspend (Int) -> Unit,
     val cancelWork: suspend () -> Unit,
     val now: () -> Long,
@@ -89,28 +91,26 @@ class SimpleFinSyncRepository internal constructor(
 
     suspend fun recoverPendingConnection(): SimpleFinPendingConnectionState =
         lifecycleMutex.withLock {
-            val pending =
-                try {
-                    functions.readPendingCredential()
-                } catch (_: Throwable) {
-                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.UNKNOWN
-                    return@withLock mutablePendingConnectionState.value
-                }
-            if (pending == null) {
-                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
-                return@withLock mutablePendingConnectionState.value
-            }
-
-            // A crash after database publication but before cleanup leaves a harmless completed stage.
-            if (db.simpleFinDao().getProfile()?.connectionId == pending.connectionId) {
-                try {
-                    functions.deletePendingCredential()
+            try {
+                val pending = functions.readPendingCredential()
+                val publishedProfile = db.simpleFinDao().getProfile()
+                if (pending == null) {
+                    publishedProfile?.let { restorePublishedCredential(it) }
+                    functions.deleteRollbackCredential()
                     mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
-                } catch (_: Throwable) {
-                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.UNKNOWN
+                } else if (publishedProfile?.connectionId == pending.connectionId) {
+                    // Publication completed before a crash; only recovery artifacts remain.
+                    deletePublishedConnectionRecoveryArtifacts()
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
+                } else {
+                    // Promotion can overwrite the active slot before Room publishes the new identity.
+                    publishedProfile?.let { restorePublishedCredential(it) }
+                    mutablePendingConnectionState.value = SimpleFinPendingConnectionState.RETRY_AVAILABLE
                 }
-            } else {
-                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.RETRY_AVAILABLE
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.UNKNOWN
             }
             mutablePendingConnectionState.value
         }
@@ -195,7 +195,20 @@ class SimpleFinSyncRepository internal constructor(
         lifecycleMutex.withLock {
             withContext(NonCancellable) {
                 activeConnectionId = null
-                functions.deletePendingCredential()
+                val pending = functions.readPendingCredential()
+                val publishedProfile = db.simpleFinDao().getProfile()
+                when {
+                    publishedProfile == null -> {
+                        // A first-time promotion may have reached the active slot before publication.
+                        functions.deleteCredential()
+                        functions.cancelWork()
+                    }
+
+                    pending == null || publishedProfile.connectionId != pending.connectionId -> {
+                        restorePublishedCredential(publishedProfile)
+                    }
+                }
+                deleteCanceledConnectionRecoveryArtifacts()
                 mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
             }
         }
@@ -280,6 +293,7 @@ class SimpleFinSyncRepository internal constructor(
                     db.simpleFinDao().clearAccounts()
                 }
                 functions.deleteCredential()
+                functions.deleteRollbackCredential()
                 functions.deletePendingCredential()
                 mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
                 functions.cancelWork()
@@ -327,7 +341,11 @@ class SimpleFinSyncRepository internal constructor(
                 check(staged?.connectionId == connectionId && staged.accessUrl == accessUrl) {
                     "SimpleFIN pending credential changed"
                 }
-                functions.promotePendingCredential(connectionId)
+                functions.promotePendingCredential(
+                    connectionId,
+                    previous.profile?.connectionId,
+                    previous.credential,
+                )
                 check(functions.readCredential(connectionId) == accessUrl) {
                     "SimpleFIN credential promotion failed verification"
                 }
@@ -350,7 +368,7 @@ class SimpleFinSyncRepository internal constructor(
 
                 // Publication is complete. A cleanup failure is recovered on the next repository start.
                 try {
-                    functions.deletePendingCredential()
+                    deletePublishedConnectionRecoveryArtifacts()
                     mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
                 } catch (_: Throwable) {
                     mutablePendingConnectionState.value = SimpleFinPendingConnectionState.UNKNOWN
@@ -441,10 +459,37 @@ class SimpleFinSyncRepository internal constructor(
             lifecycleMutex.withLock {
                 val pending = runCatching { functions.readPendingCredential() }.getOrNull()
                 if (pending?.connectionId != connectionId) return@withLock
-                runCatching { functions.deletePendingCredential() }
-                mutablePendingConnectionState.value = SimpleFinPendingConnectionState.NONE
+                val cleaned =
+                    runCatching {
+                        db.simpleFinDao().getProfile()?.let { publishedProfile ->
+                            if (publishedProfile.connectionId != connectionId) {
+                                restorePublishedCredential(publishedProfile)
+                            }
+                        }
+                        deleteCanceledConnectionRecoveryArtifacts()
+                    }.isSuccess
+                mutablePendingConnectionState.value =
+                    if (cleaned) SimpleFinPendingConnectionState.NONE else SimpleFinPendingConnectionState.UNKNOWN
             }
         }
+
+    private suspend fun restorePublishedCredential(profile: SimpleFinProfileEntity) {
+        if (functions.restoreRollbackCredential(profile.connectionId)) {
+            functions.scheduleWork(profile.automaticSyncsPerDay)
+        }
+    }
+
+    private suspend fun deletePublishedConnectionRecoveryArtifacts() {
+        // Delete rollback first so a pending record always remains if success cleanup is interrupted.
+        functions.deleteRollbackCredential()
+        functions.deletePendingCredential()
+    }
+
+    private suspend fun deleteCanceledConnectionRecoveryArtifacts() {
+        // The published credential is already restored, so remove the rejected stage before its backup.
+        functions.deletePendingCredential()
+        functions.deleteRollbackCredential()
+    }
 
     private suspend fun clearActiveConnection(connectionId: String) =
         withContext(NonCancellable) {
@@ -606,11 +651,19 @@ class SimpleFinSyncRepository internal constructor(
                 readPendingCredential = {
                     withContext(Dispatchers.IO) { credentialStore.readPending() }
                 },
-                promotePendingCredential = { connectionId ->
-                    withContext(Dispatchers.IO) { credentialStore.promotePending(connectionId) }
+                promotePendingCredential = { connectionId, previousConnectionId, previousAccessUrl ->
+                    withContext(Dispatchers.IO) {
+                        credentialStore.promotePending(connectionId, previousConnectionId, previousAccessUrl)
+                    }
+                },
+                restoreRollbackCredential = { connectionId ->
+                    withContext(Dispatchers.IO) { credentialStore.restoreRollback(connectionId) }
                 },
                 deletePendingCredential = {
                     withContext(Dispatchers.IO) { credentialStore.deletePending() }
+                },
+                deleteRollbackCredential = {
+                    withContext(Dispatchers.IO) { credentialStore.deleteRollback() }
                 },
                 scheduleWork = { SimpleFinSyncWorker.schedule(appContext, it) },
                 cancelWork = { SimpleFinSyncWorker.cancel(appContext) },

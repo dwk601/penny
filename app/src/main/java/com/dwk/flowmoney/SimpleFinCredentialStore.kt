@@ -26,6 +26,7 @@ class SimpleFinCredentialStore(
 ) {
     private val credentialFile get() = File(context.noBackupFilesDir, CREDENTIAL_FILE_NAME)
     private val pendingFile get() = File(context.noBackupFilesDir, PENDING_FILE_NAME)
+    private val rollbackFile get() = File(context.noBackupFilesDir, ROLLBACK_FILE_NAME)
 
     fun save(
         connectionId: String,
@@ -66,16 +67,47 @@ class SimpleFinCredentialStore(
         return SimpleFinPendingCredential(credential.connectionId, credential.accessUrl)
     }
 
-    /** Copies the staged credential into the established slot without deleting the recovery record. */
-    internal fun promotePending(expectedConnectionId: String) {
+    /** Copies the staged credential into the established slot without deleting recovery records. */
+    internal fun promotePending(
+        expectedConnectionId: String,
+        previousConnectionId: String?,
+        previousAccessUrl: String?,
+    ) {
         val pending =
             readPending()?.takeIf { it.connectionId == expectedConnectionId }
                 ?: error("SimpleFIN pending credential is unavailable")
+        if (previousConnectionId != null && previousAccessUrl != null) {
+            val existingRollback = readRollback()
+            if (existingRollback == null) {
+                writeCredential(rollbackFile, ROLLBACK_RECORD, previousConnectionId, previousAccessUrl)
+            }
+            check(
+                readRollback()?.let {
+                    it.connectionId == previousConnectionId && it.accessUrl == previousAccessUrl
+                } == true,
+            ) { "SimpleFIN rollback credential backup failed verification" }
+        }
         save(pending.connectionId, pending.accessUrl)
+    }
+
+    internal fun restoreRollback(expectedConnectionId: String): Boolean {
+        val rollback = readRollback()?.takeIf { it.connectionId == expectedConnectionId } ?: return false
+        save(rollback.connectionId, rollback.accessUrl)
+        return true
     }
 
     internal fun deletePending() {
         deleteFile(pendingFile, "SimpleFIN pending credential deletion failed")
+    }
+
+    internal fun deleteRollback() {
+        deleteFile(rollbackFile, "SimpleFIN rollback credential deletion failed")
+    }
+
+    private fun readRollback(): SimpleFinPendingCredential? {
+        val payload = readPayload(rollbackFile, allowLegacyWithoutAad = false) ?: return null
+        val credential = parseCredential(payload)?.takeIf { it.recordType == ROLLBACK_RECORD } ?: return null
+        return SimpleFinPendingCredential(credential.connectionId, credential.accessUrl)
     }
 
     private fun writeCredential(
@@ -194,8 +226,10 @@ class SimpleFinCredentialStore(
     internal companion object {
         const val CREDENTIAL_FILE_NAME = "simplefin_access_url.bin"
         const val PENDING_FILE_NAME = "simplefin_pending_access_url.bin"
+        const val ROLLBACK_FILE_NAME = "simplefin_rollback_access_url.bin"
         private const val ESTABLISHED_RECORD = "established"
         private const val PENDING_RECORD = "pending"
+        private const val ROLLBACK_RECORD = "rollback"
         private const val KEY_ALIAS = "flowmoney_simplefin_access_url"
         private const val TRANSFORM = "AES/GCM/NoPadding"
         private const val IV_BYTES = 12

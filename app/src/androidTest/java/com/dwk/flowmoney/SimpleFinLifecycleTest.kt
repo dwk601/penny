@@ -2,6 +2,8 @@ package com.dwk.flowmoney
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -18,8 +20,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -140,6 +145,85 @@ class SimpleFinLifecycleTest {
                 assertTrue(recreated.retryPendingConnection() is SimpleFinSyncResult.Success)
                 assertEquals(1, claims)
                 assertNull(fake.pendingCredential)
+            }
+        }
+
+    @Test
+    fun promotedReplacementRecoversPublishedCredentialAcrossRepositoryRecreation() =
+        runBlocking {
+            withRepository { db, fake, _ ->
+                val published = SimpleFinProfileEntity(connectionId = "published", automaticSyncsPerDay = 4)
+                db.simpleFinDao().upsertProfile(published)
+                fake.pendingCredential = SimpleFinPendingCredential("pending", NEW_URL)
+                fake.rollbackCredential = "published" to OLD_URL
+                fake.credential = "pending" to NEW_URL
+
+                val recreated = SimpleFinSyncRepository(db, fake.bundle())
+                assertEquals(SimpleFinPendingConnectionState.RETRY_AVAILABLE, recreated.recoverPendingConnection())
+                assertEquals(published, db.simpleFinDao().getProfile())
+                assertEquals("published" to OLD_URL, fake.credential)
+                assertEquals(SimpleFinPendingCredential("pending", NEW_URL), fake.pendingCredential)
+                assertEquals(listOf(4), fake.scheduledCounts)
+                assertTrue(recreated.syncNow() is SimpleFinSyncResult.Success)
+
+                fake.accounts = { _, _, _ -> throw SimpleFinTransientException("synthetic provider failure") }
+                val retry = recreated.retryPendingConnection() as SimpleFinSyncResult.Failure
+
+                assertEquals(SimpleFinFailureKind.PROVIDER_5XX, retry.kind)
+                assertEquals("published", db.simpleFinDao().getProfile()!!.connectionId)
+                assertEquals("published" to OLD_URL, fake.credential)
+                assertEquals("published" to OLD_URL, fake.rollbackCredential)
+                assertEquals(SimpleFinPendingCredential("pending", NEW_URL), fake.pendingCredential)
+                assertEquals(SimpleFinPendingConnectionState.RETRY_AVAILABLE, recreated.pendingConnectionState.value)
+            }
+        }
+
+    @Test
+    fun viewModelRecoveryPublishesPendingStateAndRoutesRetryAndStartOver() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.pendingCredential = SimpleFinPendingCredential("pending-view-model", NEW_URL)
+                val store = ViewModelStore()
+                try {
+                    withContext(Dispatchers.Main) {
+                        val viewModel =
+                            ViewModelProvider(
+                                store,
+                                MainViewModel.Factory(EmptyGateway(), repository, db.simpleFinDao().observeAccounts()),
+                            )[MainViewModel::class.java]
+                        viewModel.reportInitializationComplete()
+
+                        val recovered = viewModel.uiState.first { !it.isLoading && it.simpleFin.isConnectionPending }
+                        assertTrue(recovered.simpleFin.isConnectionPending)
+                        assertTrue(viewModel.retryPendingSimpleFinConnection() is SimpleFinSyncResult.Success)
+                        assertEquals(0, fake.claimCount)
+                        assertFalse(
+                            viewModel.uiState
+                                .first { !it.simpleFin.isConnectionPending }
+                                .simpleFin.isConnectionPending,
+                        )
+
+                        fake.accounts = { _, _, _ -> throw IOException("synthetic network failure") }
+                        assertTrue(viewModel.connectSimpleFin("synthetic-new-token") is SimpleFinSyncResult.Failure)
+                        assertTrue(
+                            viewModel.uiState
+                                .first { it.simpleFin.isConnectionPending }
+                                .simpleFin.isConnectionPending,
+                        )
+                        assertEquals(1, fake.claimCount)
+
+                        viewModel.cancelPendingSimpleFinConnection()
+                        assertFalse(
+                            viewModel.uiState
+                                .first { !it.simpleFin.isConnectionPending }
+                                .simpleFin.isConnectionPending,
+                        )
+                        assertNull(fake.pendingCredential)
+                        assertNull(fake.rollbackCredential)
+                    }
+                } finally {
+                    store.clear()
+                }
             }
         }
 
@@ -364,31 +448,41 @@ class SimpleFinLifecycleTest {
         }
 
     @Test
-    fun workerRetriesOnlyRetryableFailures() =
+    fun workerRetriesOnlyNetworkTimeoutAndProvider5xxFailures() =
         runBlocking {
             withRepository { db, fake, repository ->
                 fake.currentTime = 5_000_000_000L
-                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
-                fake.credential = "current" to OLD_URL
-                fake.accounts = { _, _, _ -> throw SimpleFinTransientException("temporary") }
+                val cases =
+                    listOf(
+                        SocketTimeoutException("synthetic timeout") to true,
+                        IOException("synthetic network failure") to true,
+                        SimpleFinTransientException("synthetic provider failure") to true,
+                        SimpleFinMalformedTokenException() to false,
+                        SimpleFinReconnectException() to false,
+                        SSLHandshakeException("synthetic TLS failure") to false,
+                        SimpleFinRateLimitException() to false,
+                        SimpleFinException("synthetic protocol failure") to false,
+                        IllegalStateException("synthetic unknown failure") to false,
+                    )
 
-                val retryable = SimpleFinSyncWorker.runSync(repository)
+                cases.forEachIndexed { index, (failure, shouldRetry) ->
+                    val connectionId = "worker-$index"
+                    fake.currentTime += SIMPLEFIN_RETRY_INTERVAL_MILLIS
+                    db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = connectionId))
+                    fake.credential = connectionId to OLD_URL
+                    fake.accounts = { _, _, _ -> throw failure }
 
-                assertEquals(
-                    androidx.work.ListenableWorker.Result
-                        .retry()
-                        .javaClass,
-                    retryable.javaClass,
-                )
-                fake.currentTime += SIMPLEFIN_RETRY_INTERVAL_MILLIS
-                fake.accounts = { _, _, _ -> throw SimpleFinException("permanent") }
-                val permanent = SimpleFinSyncWorker.runSync(repository)
-                assertEquals(
-                    androidx.work.ListenableWorker.Result
-                        .success()
-                        .javaClass,
-                    permanent.javaClass,
-                )
+                    val actual = SimpleFinSyncWorker.runSync(repository)
+                    val expected =
+                        if (shouldRetry) {
+                            androidx.work.ListenableWorker.Result
+                                .retry()
+                        } else {
+                            androidx.work.ListenableWorker.Result
+                                .success()
+                        }
+                    assertEquals(expected.javaClass, actual.javaClass)
+                }
             }
         }
 
@@ -398,10 +492,12 @@ class SimpleFinLifecycleTest {
             withRepository { db, fake, repository ->
                 val cases =
                     listOf(
+                        Triple(SimpleFinMalformedTokenException(), SimpleFinFailureKind.MALFORMED_TOKEN, false),
+                        Triple(SimpleFinReconnectException(), SimpleFinFailureKind.AUTHENTICATION, false),
                         Triple(SocketTimeoutException("secret timeout $OLD_URL"), SimpleFinFailureKind.TIMEOUT, true),
                         Triple(IOException("secret network $OLD_URL"), SimpleFinFailureKind.NETWORK, true),
                         Triple(SSLHandshakeException("secret TLS $OLD_URL"), SimpleFinFailureKind.TLS, false),
-                        Triple(SimpleFinRateLimitException(), SimpleFinFailureKind.RATE_LIMIT, true),
+                        Triple(SimpleFinRateLimitException(), SimpleFinFailureKind.RATE_LIMIT, false),
                         Triple(SimpleFinTransientException("secret 5xx body"), SimpleFinFailureKind.PROVIDER_5XX, true),
                         Triple(SimpleFinException("secret protocol body"), SimpleFinFailureKind.PROTOCOL, false),
                         Triple(IllegalStateException("secret unknown body"), SimpleFinFailureKind.UNKNOWN, false),
@@ -1216,9 +1312,12 @@ class SimpleFinLifecycleTest {
     private class FakeFunctions {
         var credential: Pair<String, String>? = null
         var pendingCredential: SimpleFinPendingCredential? = null
+        var rollbackCredential: Pair<String, String>? = null
         var deleteCount = 0
         var pendingDeleteCount = 0
+        var rollbackDeleteCount = 0
         var promotionCount = 0
+        var claimCount = 0
         var cancelCount = 0
         var currentTime = System.currentTimeMillis()
         val scheduledCounts = mutableListOf<Int>()
@@ -1236,7 +1335,10 @@ class SimpleFinLifecycleTest {
 
         fun bundle() =
             SimpleFinSyncFunctions(
-                claim = { claim(it) },
+                claim = {
+                    claimCount++
+                    claim(it)
+                },
                 accounts = { url, start, end -> accounts(url, start, end) },
                 saveCredential = { connectionId, accessUrl -> save(connectionId, accessUrl) },
                 readCredential = { expected -> credential?.takeIf { it.first == expected }?.second },
@@ -1249,20 +1351,49 @@ class SimpleFinLifecycleTest {
                     pendingCredential = SimpleFinPendingCredential(connectionId, accessUrl)
                 },
                 readPendingCredential = { pendingCredential },
-                promotePendingCredential = { expectedConnectionId ->
+                promotePendingCredential = { expectedConnectionId, previousConnectionId, previousAccessUrl ->
                     val staged = checkNotNull(pendingCredential)
                     check(staged.connectionId == expectedConnectionId)
+                    if (rollbackCredential == null && previousConnectionId != null && previousAccessUrl != null) {
+                        rollbackCredential = previousConnectionId to previousAccessUrl
+                    }
                     promotionCount++
                     save(staged.connectionId, staged.accessUrl)
+                },
+                restoreRollbackCredential = { expectedConnectionId ->
+                    rollbackCredential
+                        ?.takeIf { it.first == expectedConnectionId }
+                        ?.let {
+                            save(it.first, it.second)
+                            true
+                        } ?: false
                 },
                 deletePendingCredential = {
                     pendingDeleteCount++
                     pendingCredential = null
                 },
+                deleteRollbackCredential = {
+                    rollbackDeleteCount++
+                    rollbackCredential = null
+                },
                 scheduleWork = { schedule(it) },
                 cancelWork = { cancelCount++ },
                 now = { currentTime },
             )
+    }
+
+    private class EmptyGateway : TransactionGateway {
+        override val transactions: Flow<List<Transaction>> = MutableStateFlow(emptyList())
+
+        override suspend fun load() = emptyList<Transaction>()
+
+        override suspend fun upsert(transaction: Transaction) = Unit
+
+        override suspend fun importTransactions(transactions: List<Transaction>) = transactions.size
+
+        override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>) = transactions.size
+
+        override suspend fun delete(id: String) = Unit
     }
 
     private fun account(

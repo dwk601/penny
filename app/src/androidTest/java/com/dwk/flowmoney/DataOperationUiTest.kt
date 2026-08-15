@@ -48,6 +48,8 @@ class DataOperationUiTest {
                     onExport = {},
                     onDisconnect = {},
                     onClose = {},
+                    onRetryConnection = {},
+                    onCancelPendingConnection = {},
                 )
             }
         }
@@ -76,6 +78,8 @@ class DataOperationUiTest {
                     onExport = {},
                     onDisconnect = {},
                     onClose = {},
+                    onRetryConnection = {},
+                    onCancelPendingConnection = {},
                 )
             }
         }
@@ -104,6 +108,8 @@ class DataOperationUiTest {
                     onExport = {},
                     onDisconnect = {},
                     onClose = {},
+                    onRetryConnection = {},
+                    onCancelPendingConnection = {},
                 )
             }
         }
@@ -132,7 +138,15 @@ class DataOperationUiTest {
         composeRule.runOnIdle {
             simpleFin.value = SimpleFinUiState(isConnectionPending = true)
         }
-        assertStatus("Connection pending")
+        assertStatus("Not connected")
+        composeRule.runOnIdle {
+            simpleFin.value =
+                SimpleFinUiState(
+                    profile = SimpleFinProfileEntity(connectionId = "connected-pending"),
+                    isConnectionPending = true,
+                )
+        }
+        assertStatus("Connected")
     }
 
     @Test
@@ -194,13 +208,15 @@ class DataOperationUiTest {
                         onExport = {},
                         onDisconnect = {},
                         onClose = {},
+                        onRetryConnection = {},
+                        onCancelPendingConnection = {},
                         modifier = Modifier.padding(padding),
                     )
                 }
             }
         }
 
-        composeRule.onNodeWithText("SimpleFIN connected.").assertIsDisplayed()
+        composeRule.onNodeWithText("SimpleFIN connected").assertIsDisplayed()
         composeRule.onNodeWithText("Synced 2 new transactions, 1 updated transaction").assertDoesNotExist()
     }
 
@@ -221,6 +237,8 @@ class DataOperationUiTest {
                         onExport = {},
                         onDisconnect = {},
                         onClose = {},
+                        onRetryConnection = {},
+                        onCancelPendingConnection = {},
                         modifier = Modifier.padding(padding),
                     )
                 }
@@ -253,6 +271,8 @@ class DataOperationUiTest {
                         onExport = {},
                         onDisconnect = {},
                         onClose = {},
+                        onRetryConnection = {},
+                        onCancelPendingConnection = {},
                     )
                 }
             }

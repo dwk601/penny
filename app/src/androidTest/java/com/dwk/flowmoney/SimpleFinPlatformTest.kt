@@ -76,7 +76,7 @@ class SimpleFinPlatformTest {
             )
             assertNull(store.read("pending-connection"))
 
-            store.promotePending("pending-connection")
+            store.promotePending("pending-connection", previousConnectionId = null, previousAccessUrl = null)
 
             assertTrue(pendingFile.exists())
             assertEquals(ACCESS_URL, store.read("pending-connection"))
@@ -97,6 +97,43 @@ class SimpleFinPlatformTest {
         } finally {
             credentialFile.deleteRecursively()
             pendingFile.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rollbackCredentialSurvivesPromotionAndStoreRecreationEncrypted() {
+        val credentialFile = File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME)
+        val pendingFile = File(context.noBackupFilesDir, SimpleFinCredentialStore.PENDING_FILE_NAME)
+        val rollbackFile = File(context.noBackupFilesDir, SimpleFinCredentialStore.ROLLBACK_FILE_NAME)
+        credentialFile.deleteRecursively()
+        pendingFile.deleteRecursively()
+        rollbackFile.deleteRecursively()
+        val store = SimpleFinCredentialStore(context)
+        try {
+            store.save("published-connection", OLD_ACCESS_URL)
+            store.stage("pending-connection", ACCESS_URL)
+            store.promotePending("pending-connection", "published-connection", OLD_ACCESS_URL)
+
+            assertEquals(ACCESS_URL, store.read("pending-connection"))
+            assertTrue(pendingFile.isFile)
+            assertTrue(rollbackFile.isFile)
+            assertFalse(rollbackFile.readBytes().containsSubsequence(OLD_ACCESS_URL.toByteArray(StandardCharsets.UTF_8)))
+
+            val recreated = SimpleFinCredentialStore(context)
+            assertTrue(recreated.restoreRollback("published-connection"))
+            assertEquals(OLD_ACCESS_URL, recreated.read("published-connection"))
+            assertEquals(SimpleFinPendingCredential("pending-connection", ACCESS_URL), recreated.readPending())
+
+            recreated.deleteRollback()
+            recreated.deletePending()
+            recreated.delete()
+            assertFalse(rollbackFile.exists())
+            assertFalse(pendingFile.exists())
+            assertFalse(credentialFile.exists())
+        } finally {
+            credentialFile.deleteRecursively()
+            pendingFile.deleteRecursively()
+            rollbackFile.deleteRecursively()
         }
     }
 
@@ -205,5 +242,6 @@ class SimpleFinPlatformTest {
 
     private companion object {
         const val ACCESS_URL = "https://user:password@bridge.simplefin.org/simplefin"
+        const val OLD_ACCESS_URL = "https://old-user:old-password@bridge.simplefin.org/simplefin"
     }
 }

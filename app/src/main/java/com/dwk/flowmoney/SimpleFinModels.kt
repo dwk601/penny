@@ -38,7 +38,7 @@ enum class SimpleFinFailureKind(
     TIMEOUT(true),
     NETWORK(true),
     TLS(false),
-    RATE_LIMIT(true),
+    RATE_LIMIT(false),
     PROVIDER_5XX(true),
     PROTOCOL(false),
     UNKNOWN(false),

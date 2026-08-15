@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,6 +56,10 @@ class MainViewModel(
     private val initializationErrors = Channel<String>(Channel.BUFFERED)
     private val chartRangeMode = MutableStateFlow(ChartRangeMode.Week)
     private val selectedMonth = MutableStateFlow(YearMonth.now())
+    private val pendingConnectionRecovery =
+        viewModelScope.async(ioDispatcher) {
+            simpleFinRepository.recoverPendingConnection()
+        }
     private val transactionSnapshots =
         repository.transactions
             .map { transactions ->
@@ -87,8 +92,16 @@ class MainViewModel(
             )
         }.flowOn(defaultDispatcher)
     private val simpleFinState =
-        combine(simpleFinRepository.profile, simpleFinAccounts) { profile, accounts ->
-            SimpleFinUiState(profile = profile, accounts = accounts)
+        combine(
+            simpleFinRepository.profile,
+            simpleFinAccounts,
+            simpleFinRepository.pendingConnectionState,
+        ) { profile, accounts, pendingState ->
+            SimpleFinUiState(
+                profile = profile,
+                accounts = accounts,
+                isConnectionPending = pendingState == SimpleFinPendingConnectionState.RETRY_AVAILABLE,
+            )
         }
 
     val initializationErrorEvents = initializationErrors.receiveAsFlow()
@@ -163,28 +176,57 @@ class MainViewModel(
     suspend fun connectSimpleFin(setupToken: String): SimpleFinSyncResult {
         val token = setupToken.trim()
         if (token.isBlank()) return SimpleFinSyncResult.Failure("Paste a setup token")
-        return withContext(ioDispatcher) { simpleFinRepository.connect(token) }
-    }
-
-    suspend fun syncSimpleFinNow(): SimpleFinSyncResult {
-        if (simpleFinRepository.profile.first()?.isPaused == true) {
-            return SimpleFinSyncResult.Failure("Reconnect SimpleFIN to sync")
+        return withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            simpleFinRepository.connect(token)
         }
-        return withContext(ioDispatcher) { simpleFinRepository.syncNow() }
     }
 
-    suspend fun syncSimpleFinIfStale(): SimpleFinSyncResult? {
-        val profile = simpleFinRepository.profile.first()
-        if (profile == null || profile.isPaused) return null
-        return withContext(ioDispatcher) { simpleFinRepository.syncIfStale() }
+    suspend fun retryPendingSimpleFinConnection(): SimpleFinSyncResult =
+        withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            simpleFinRepository.retryPendingConnection()
+        }
+
+    suspend fun cancelPendingSimpleFinConnection() {
+        withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            simpleFinRepository.startOverPendingConnection()
+        }
     }
+
+    suspend fun syncSimpleFinNow(): SimpleFinSyncResult =
+        withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            if (simpleFinRepository.profile.first()?.isPaused == true) {
+                return@withContext SimpleFinSyncResult.Failure("Reconnect SimpleFIN to sync")
+            }
+            simpleFinRepository.syncNow()
+        }
+
+    suspend fun syncSimpleFinIfStale(): SimpleFinSyncResult? =
+        withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            if (simpleFinRepository.pendingConnectionState.value == SimpleFinPendingConnectionState.RETRY_AVAILABLE) {
+                return@withContext null
+            }
+            val profile = simpleFinRepository.profile.first()
+            if (profile == null || profile.isPaused) return@withContext null
+            simpleFinRepository.syncIfStale()
+        }
 
     suspend fun updateAutomaticSyncsPerDay(count: Int) {
-        withContext(ioDispatcher) { simpleFinRepository.updateAutomaticSyncsPerDay(count) }
+        withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            simpleFinRepository.updateAutomaticSyncsPerDay(count)
+        }
     }
 
     suspend fun disconnectSimpleFin() {
-        withContext(ioDispatcher) { simpleFinRepository.disconnect() }
+        withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            simpleFinRepository.disconnect()
+        }
     }
 
     class Factory(

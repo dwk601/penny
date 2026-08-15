@@ -279,6 +279,7 @@ internal enum class DataOperation(
     Import("Importing CSV"),
     Export("Exporting CSV"),
     Connect("Connecting bank"),
+    StartOver("Starting over"),
     Sync("Syncing bank"),
     UpdateAutomaticSyncs("Saving sync frequency"),
     Disconnect("Disconnecting bank"),
@@ -407,6 +408,8 @@ fun FlowMoneyApp(
     transactionWidgetRefresh: suspend (Context) -> Unit = ::refreshPennyWidgets,
     coldStartSimpleFinSync: suspend () -> SimpleFinSyncResult? = viewModel::syncSimpleFinIfStale,
     connectSimpleFin: suspend (String) -> SimpleFinSyncResult = viewModel::connectSimpleFin,
+    retryPendingSimpleFinConnection: suspend () -> SimpleFinSyncResult = viewModel::retryPendingSimpleFinConnection,
+    cancelPendingSimpleFinConnection: suspend () -> Unit = viewModel::cancelPendingSimpleFinConnection,
     manualSimpleFinSync: suspend () -> SimpleFinSyncResult = viewModel::syncSimpleFinNow,
 ) {
     val context = LocalContext.current
@@ -817,6 +820,45 @@ fun FlowMoneyApp(
                             throw failure
                         } catch (_: Throwable) {
                             message = "Bank connection failed"
+                        } finally {
+                            dataOperation = null
+                        }
+                        snackbarHostState.showSnackbar(message)
+                    }
+                },
+                onRetryConnection = {
+                    if (dataOperation != null) return@DataSheet
+                    dataOperation = DataOperation.Connect
+                    scope.launch {
+                        var message = "Bank connection failed"
+                        try {
+                            val result = retryPendingSimpleFinConnection()
+                            if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
+                                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+                            }
+                            message = result.connectionSnackbarMessage()
+                        } catch (failure: CancellationException) {
+                            throw failure
+                        } catch (_: Throwable) {
+                            message = "Bank connection failed"
+                        } finally {
+                            dataOperation = null
+                        }
+                        snackbarHostState.showSnackbar(message)
+                    }
+                },
+                onCancelPendingConnection = {
+                    if (dataOperation != null) return@DataSheet
+                    dataOperation = DataOperation.StartOver
+                    scope.launch {
+                        var message = "Could not start over SimpleFIN"
+                        try {
+                            cancelPendingSimpleFinConnection()
+                            message = "SimpleFIN connection canceled"
+                        } catch (failure: CancellationException) {
+                            throw failure
+                        } catch (_: Throwable) {
+                            message = "Could not start over SimpleFIN"
                         } finally {
                             dataOperation = null
                         }
@@ -1808,9 +1850,9 @@ internal fun DataSheet(
     onExport: () -> Unit,
     onDisconnect: () -> Unit,
     onClose: () -> Unit,
+    onRetryConnection: () -> Unit,
+    onCancelPendingConnection: () -> Unit,
     modifier: Modifier = Modifier,
-    onRetryConnection: () -> Unit = {},
-    onCancelPendingConnection: () -> Unit = {},
 ) {
     val profile = simpleFin.profile
     var setupToken by remember { mutableStateOf("") }
@@ -2187,7 +2229,6 @@ private fun SimpleFinConnectionStatus(
 ) {
     val status =
         when {
-            simpleFin.isConnectionPending -> "Connection pending"
             simpleFin.profile == null -> "Not connected"
             simpleFin.profile.isPaused -> "Reconnect required"
             else -> "Connected"
@@ -4106,7 +4147,7 @@ internal fun automaticSyncFrequencyUpdateFailureMessage(failure: Throwable): Str
     }
 
 internal fun SimpleFinSyncResult.connectionSnackbarMessage(): String =
-    if (this is SimpleFinSyncResult.Success) "SimpleFIN connected." else snackbarMessage()
+    if (this is SimpleFinSyncResult.Success) "SimpleFIN connected" else snackbarMessage()
 
 private fun SimpleFinSyncResult.snackbarMessage(): String =
     when (this) {
