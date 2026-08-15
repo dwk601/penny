@@ -128,6 +128,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -2814,55 +2815,85 @@ private fun SpendingTimelineCard(
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-            Canvas(
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .height(84.dp)
-                        .semantics { contentDescription = chartSummary }
-                        .testTag("spending_timeline_chart")
-                        .pointerInput(dailySpending, onDaySelected) {
-                            detectTapGestures { offset -> selectAtX(offset.x, size.width.toFloat()) }
-                        },
-            ) {
-                val topPadding = 8.dp.toPx()
-                val bottomPadding = 12.dp.toPx()
-                val chartHeight = size.height - topPadding - bottomPadding
-                val step = if (values.size > 1) size.width / (values.size - 1) else size.width
-                repeat(3) { index ->
-                    val y = topPadding + chartHeight * (index / 2f)
-                    drawLine(
-                        color = gridColor,
-                        start = Offset(0f, y),
-                        end = Offset(size.width, y),
-                        strokeWidth = 1.dp.toPx(),
-                    )
-                }
-
-                val points =
-                    values.mapIndexed { index, cents ->
-                        val x = step * index
-                        val y = topPadding + (1f - cents.toFloat() / scalePeak.toFloat()) * chartHeight
-                        Offset(x, y)
-                    }
-                val path =
-                    Path().apply {
-                        points.firstOrNull()?.let { moveTo(it.x, it.y) }
-                        points.drop(1).forEach { point -> lineTo(point.x, point.y) }
-                    }
-                drawPath(
-                    path = path,
-                    color = lineColor,
-                    style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round),
+            key(dailySpending) {
+                var startChartAnimation by remember { mutableStateOf(false) }
+                val drawProgress by animateFloatAsState(
+                    targetValue = if (startChartAnimation) 1f else 0f,
+                    animationSpec =
+                        tween(
+                            durationMillis = PennyMotion.DurationLong,
+                            easing = PennyMotion.StandardEasing,
+                        ),
+                    label = "Spending timeline draw progress",
                 )
-                points.forEachIndexed { index, point ->
-                    val selected = index == selectedIndex
-                    drawCircle(color = chartSurface, radius = if (selected) 7.dp.toPx() else 4.dp.toPx(), center = point)
-                    drawCircle(
-                        color = if (selected) selectionColor else lineColor,
-                        radius = if (selected) 4.dp.toPx() else 2.5.dp.toPx(),
-                        center = point,
-                    )
+                LaunchedEffect(Unit) { startChartAnimation = true }
+
+                Canvas(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .height(84.dp)
+                            .semantics { contentDescription = chartSummary }
+                            .testTag("spending_timeline_chart")
+                            .pointerInput(dailySpending, onDaySelected) {
+                                detectTapGestures { offset -> selectAtX(offset.x, size.width.toFloat()) }
+                            },
+                ) {
+                    val topPadding = 8.dp.toPx()
+                    val bottomPadding = 12.dp.toPx()
+                    val chartHeight = (size.height - topPadding - bottomPadding).coerceAtLeast(0f)
+                    val step = if (values.size > 1) size.width / (values.size - 1) else 0f
+                    repeat(3) { index ->
+                        val y = topPadding + chartHeight * (index / 2f)
+                        drawLine(
+                            color = gridColor,
+                            start = Offset(0f, y),
+                            end = Offset(size.width, y),
+                            strokeWidth = 1.dp.toPx(),
+                        )
+                    }
+
+                    val points =
+                        values.mapIndexed { index, cents ->
+                            val x = if (values.size == 1) size.width / 2f else step * index
+                            val scaledValue = (cents.toFloat() / scalePeak.toFloat()).coerceIn(0f, 1f)
+                            val y = topPadding + (1f - scaledValue) * chartHeight
+                            Offset(x, y)
+                        }
+                    if (points.size > 1 && drawProgress > 0f) {
+                        val fullPath =
+                            Path().apply {
+                                moveTo(points.first().x, points.first().y)
+                                points.drop(1).forEach { point -> lineTo(point.x, point.y) }
+                            }
+                        val pathMeasure = PathMeasure().apply { setPath(fullPath, false) }
+                        val trimmedPath = Path()
+                        pathMeasure.getSegment(
+                            startDistance = 0f,
+                            stopDistance = pathMeasure.length * drawProgress.coerceIn(0f, 1f),
+                            destination = trimmedPath,
+                            startWithMoveTo = true,
+                        )
+                        drawPath(
+                            path = trimmedPath,
+                            color = lineColor,
+                            style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round),
+                        )
+                    }
+                    val pointScale = drawProgress.coerceIn(0f, 1f)
+                    points.forEachIndexed { index, point ->
+                        val selected = index == selectedIndex
+                        drawCircle(
+                            color = chartSurface,
+                            radius = (if (selected) 7.dp.toPx() else 4.dp.toPx()) * pointScale,
+                            center = point,
+                        )
+                        drawCircle(
+                            color = if (selected) selectionColor else lineColor,
+                            radius = (if (selected) 4.dp.toPx() else 2.5.dp.toPx()) * pointScale,
+                            center = point,
+                        )
+                    }
                 }
             }
             val firstDate = dailySpending.firstOrNull()?.date ?: range.startInclusive
@@ -2901,8 +2932,6 @@ private fun InsightDayOption(
             Modifier
                 .testTag("insight_day_${day.date}")
                 .heightIn(min = 48.dp)
-                .clip(MaterialTheme.shapes.large)
-                .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
                 .selectable(
                     selected = selected,
                     role = Role.RadioButton,
@@ -2910,15 +2939,33 @@ private fun InsightDayOption(
                 ).semantics(mergeDescendants = true) {
                     contentDescription = "${day.date.format(ShortDateFormatter)}, $amount"
                     stateDescription = if (selected) "Selected" else "Not selected"
-                }.padding(horizontal = 12.dp, vertical = 9.dp),
+                }.padding(horizontal = 2.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "${day.date.format(ShortDateFormatter)} $amount",
-            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer,
-            style = MaterialTheme.typography.labelLarge,
-            maxLines = 1,
-        )
+        Box(
+            modifier =
+                Modifier
+                    .clip(MaterialTheme.shapes.small)
+                    .background(
+                        if (selected) {
+                            MaterialTheme.colorScheme.secondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                    ).padding(horizontal = 10.dp, vertical = 5.dp),
+        ) {
+            Text(
+                text = "${day.date.format(ShortDateFormatter)} $amount",
+                color =
+                    if (selected) {
+                        MaterialTheme.colorScheme.onSecondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -2963,54 +3010,76 @@ private fun CategoryBreakdownCard(
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
-                Canvas(
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .height(56.dp)
-                            .semantics { contentDescription = chartSummary }
-                            .testTag("category_breakdown_chart"),
-                ) {
-                    val gap = 10.dp.toPx()
-                    val barWidth = (size.width - gap * (totals.size - 1)) / totals.size
-                    totals.forEachIndexed { index, entry ->
-                        val barHeight = (entry.cents.toFloat() / peak.toFloat()) * size.height
-                        val left = index * (barWidth + gap)
-                        val topLeft = Offset(left, size.height - barHeight)
-                        val barSize = Size(barWidth, barHeight)
-                        drawRoundRect(
-                            color = chartColors[index % chartColors.size],
-                            topLeft = topLeft,
-                            size = barSize,
-                            cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
-                        )
-                        if (selectedCategory == entry.category) {
+                key(totals) {
+                    var startChartAnimation by remember { mutableStateOf(false) }
+                    val growProgress by animateFloatAsState(
+                        targetValue = if (startChartAnimation) 1f else 0f,
+                        animationSpec =
+                            tween(
+                                durationMillis = PennyMotion.DurationLong,
+                                easing = PennyMotion.StandardEasing,
+                            ),
+                        label = "Category bars grow progress",
+                    )
+                    LaunchedEffect(Unit) { startChartAnimation = true }
+
+                    Canvas(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                                .semantics { contentDescription = chartSummary }
+                                .testTag("category_breakdown_chart"),
+                    ) {
+                        val requestedGap = 10.dp.toPx()
+                        val gap =
+                            if (totals.size > 1) {
+                                requestedGap.coerceAtMost(size.width / (totals.size - 1))
+                            } else {
+                                0f
+                            }
+                        val barWidth = ((size.width - gap * (totals.size - 1)) / totals.size).coerceAtLeast(0f)
+                        totals.forEachIndexed { index, entry ->
+                            val fullHeight =
+                                (entry.cents.toFloat() / peak.toFloat())
+                                    .coerceIn(0f, 1f) * size.height
+                            val barHeight = fullHeight * growProgress.coerceIn(0f, 1f)
+                            if (barWidth <= 0f || barHeight <= 0f) return@forEachIndexed
+                            val left = index * (barWidth + gap)
+                            val topLeft = Offset(left, size.height - barHeight)
+                            val barSize = Size(barWidth, barHeight)
                             drawRoundRect(
-                                color = chartSelectionOutline,
+                                color = chartColors[index % chartColors.size],
                                 topLeft = topLeft,
                                 size = barSize,
                                 cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
-                                style = Stroke(width = 2.dp.toPx()),
                             )
+                            if (selectedCategory == entry.category) {
+                                drawRoundRect(
+                                    color = chartSelectionOutline,
+                                    topLeft = topLeft,
+                                    size = barSize,
+                                    cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
+                                    style = Stroke(width = 2.dp.toPx()),
+                                )
+                            }
                         }
                     }
                 }
                 // ponytail: legend tap target is enough; custom bar hit-testing can wait.
                 FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                     maxItemsInEachRow = 2,
                     modifier = Modifier.fillMaxWidth().selectableGroup(),
                 ) {
                     totals.forEachIndexed { index, entry ->
                         val selected = selectedCategory == entry.category
-                        Column(
+                        Box(
                             modifier =
                                 Modifier
                                     .testTag("insight_category_${entry.category.toCategoryChipTagSuffix()}")
                                     .weight(1f)
-                                    .clip(MaterialTheme.shapes.small)
-                                    .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
                                     .heightIn(min = 48.dp)
                                     .selectable(
                                         selected = selected,
@@ -3019,27 +3088,55 @@ private fun CategoryBreakdownCard(
                                     ).semantics(mergeDescendants = true) {
                                         contentDescription = "${entry.category}, ${MoneyFormatter.formatUsd(entry.cents)}"
                                         stateDescription = if (selected) "Selected" else "Not selected"
-                                    }.padding(6.dp),
+                                    }.padding(vertical = 3.dp),
+                            contentAlignment = Alignment.CenterStart,
                         ) {
-                            Box(
+                            Column(
                                 modifier =
                                     Modifier
-                                        .size(8.dp)
-                                        .clip(CircleShape)
-                                        .background(chartColors[index % chartColors.size]),
-                            )
-                            Text(
-                                text = entry.category,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                fontSize = 12.sp,
-                            )
-                            Text(
-                                text = MoneyFormatter.formatUsd(entry.cents),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.End,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
+                                        .fillMaxWidth()
+                                        .clip(MaterialTheme.shapes.small)
+                                        .background(
+                                            if (selected) {
+                                                MaterialTheme.colorScheme.secondaryContainer
+                                            } else {
+                                                Color.Transparent
+                                            },
+                                        ).padding(horizontal = 6.dp, vertical = 4.dp),
+                            ) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Box(
+                                        modifier =
+                                            Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(chartColors[index % chartColors.size]),
+                                    )
+                                    Text(
+                                        text = entry.category,
+                                        color =
+                                            if (selected) {
+                                                MaterialTheme.colorScheme.onSecondaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text(
+                                    text = MoneyFormatter.formatUsd(entry.cents),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    textAlign = TextAlign.End,
+                                    maxLines = 1,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
                         }
                     }
                 }
