@@ -35,6 +35,45 @@ class SimpleFinMapperTest {
     }
 
     @Test
+    fun payeeIsProviderMerchantAndBlankPayeeFallsBackWhileDescriptionStaysRaw() {
+        val result =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(
+                    account(
+                        id = "payees",
+                        transactions =
+                            listOf(
+                                SimpleFinTransaction(
+                                    id = "payee",
+                                    posted = 1,
+                                    amount = "-1.00",
+                                    description = "RAW BANK DESCRIPTION 123",
+                                    pending = false,
+                                    payee = "  Local  Market #42  ",
+                                ),
+                                SimpleFinTransaction(
+                                    id = "fallback",
+                                    posted = 2,
+                                    amount = "-2.00",
+                                    description = "Fallback Store 99",
+                                    pending = false,
+                                    payee = "  \t ",
+                                ),
+                            ),
+                    ),
+                ),
+            )
+
+        val payee = result.transactions.single { it.merchant.contains("Market") }
+        assertThat(payee.merchant).isEqualTo("  Local  Market #42  ")
+        assertThat(normalizedProviderMerchantKey(payee.merchant)).isEqualTo("local market #42")
+        assertThat(payee.providerDescription).isEqualTo("RAW BANK DESCRIPTION 123")
+        assertThat(result.transactions.single { it.id.endsWith(":ZmFsbGJhY2s") }.merchant)
+            .isEqualTo("Fallback Store 99")
+    }
+
+    @Test
     fun mapsSecondsToMillisAndKeepsSameTransactionIdDistinctByAccount() {
         val result =
             SimpleFinMapper.map(

@@ -1,6 +1,7 @@
 package com.dwk.flowmoney
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import java.time.ZoneId
 
@@ -10,6 +11,17 @@ interface TransactionGateway {
 
     suspend fun load(): List<Transaction>
 
+    val unreviewedCount: Flow<Int>
+        get() = flowOf(0)
+
+    val unreviewedTransactions: Flow<List<Transaction>>
+        get() = flowOf(emptyList())
+
+    val merchantRules: Flow<List<MerchantRuleEntity>>
+        get() = flowOf(emptyList())
+
+    suspend fun getUnreviewedTransactions(): List<Transaction> = emptyList()
+
     suspend fun upsert(transaction: Transaction)
 
     suspend fun importTransactions(transactions: List<Transaction>): Int
@@ -17,6 +29,31 @@ interface TransactionGateway {
     suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>): Int
 
     suspend fun delete(id: String)
+
+    suspend fun categorizeAndReview(
+        ids: List<String>,
+        category: String,
+    ): ReviewUndoToken = throw UnsupportedOperationException("Review is not supported by this gateway")
+
+    suspend fun acceptAsOther(ids: List<String>): ReviewUndoToken = categorizeAndReview(ids, "Other")
+
+    suspend fun restoreReview(token: ReviewUndoToken): Unit =
+        throw UnsupportedOperationException("Review undo is not supported by this gateway")
+
+    suspend fun getMerchantRules(): List<MerchantRuleEntity> = emptyList()
+
+    suspend fun deleteMerchantRule(normalizedKey: String): MerchantRuleEntity? =
+        throw UnsupportedOperationException("Merchant rules are not supported by this gateway")
+
+    suspend fun saveAndApplyMerchantRule(
+        originatingTransactionId: String,
+        category: String,
+        merchantOverride: String?,
+        overwriteConflict: Boolean = false,
+    ): MerchantRuleSaveResult = throw UnsupportedOperationException("Merchant rules are not supported by this gateway")
+
+    suspend fun undoMerchantRuleSave(token: MerchantRuleUndoToken): Unit =
+        throw UnsupportedOperationException("Merchant rule undo is not supported by this gateway")
 
     /**
      * Range defaults keep transaction-only test gateways source-compatible. Gateways used for
@@ -39,6 +76,7 @@ interface TransactionGateway {
 
 class TransactionRepository(
     private val dao: TransactionDao,
+    private val now: () -> Long = System::currentTimeMillis,
 ) : TransactionGateway {
     override val transactions: Flow<List<Transaction>> =
         dao
@@ -47,15 +85,39 @@ class TransactionRepository(
 
     override suspend fun load(): List<Transaction> = dao.getAll().map { it.toTransaction() }
 
+    override val unreviewedCount: Flow<Int> = dao.observeUnreviewedCount()
+
+    override val unreviewedTransactions: Flow<List<Transaction>> =
+        dao.observeUnreviewedTransactions().map { rows -> rows.map { it.toTransaction() } }
+
+    override val merchantRules: Flow<List<MerchantRuleEntity>> = dao.observeMerchantRules()
+
+    override suspend fun getUnreviewedTransactions(): List<Transaction> = dao.getUnreviewedTransactions().map { it.toTransaction() }
+
     override suspend fun upsert(transaction: Transaction) {
-        dao.upsertAndClearIgnored(transaction.toEntity())
+        val reviewed =
+            if (transaction.source != "simplefin" && transaction.reviewedAtEpochMillis == null) {
+                transaction.copy(reviewedAtEpochMillis = now())
+            } else {
+                transaction
+            }
+        dao.upsertAndClearIgnored(reviewed.toEntity())
     }
 
     override suspend fun importTransactions(transactions: List<Transaction>): Int {
         require(transactions.all { CsvCodec.isImportId(it.id) }) { "CSV import identity required" }
         return dao.importIgnoringConflicts(
             transactions.map {
-                it.copy(source = "local", accountKey = null, accountName = null).toEntity()
+                it
+                    .copy(
+                        source = "local",
+                        accountKey = null,
+                        accountName = null,
+                        reviewedAtEpochMillis = it.reviewedAtEpochMillis ?: now(),
+                        providerDescription = null,
+                        merchantOverride = null,
+                        providerMerchant = null,
+                    ).toEntity()
             },
         )
     }
@@ -65,6 +127,35 @@ class TransactionRepository(
     override suspend fun delete(id: String) {
         dao.deleteWithSimpleFinTombstone(id)
     }
+
+    override suspend fun categorizeAndReview(
+        ids: List<String>,
+        category: String,
+    ): ReviewUndoToken = dao.categorizeAndReview(ids, category, now())
+
+    override suspend fun acceptAsOther(ids: List<String>): ReviewUndoToken = dao.categorizeAndReview(ids, "Other", now())
+
+    override suspend fun restoreReview(token: ReviewUndoToken) = dao.restoreReview(token)
+
+    override suspend fun getMerchantRules(): List<MerchantRuleEntity> = dao.getMerchantRules()
+
+    override suspend fun deleteMerchantRule(normalizedKey: String): MerchantRuleEntity? = dao.deleteMerchantRule(normalizedKey)
+
+    override suspend fun saveAndApplyMerchantRule(
+        originatingTransactionId: String,
+        category: String,
+        merchantOverride: String?,
+        overwriteConflict: Boolean,
+    ): MerchantRuleSaveResult =
+        dao.saveAndApplyMerchantRule(
+            originatingTransactionId = originatingTransactionId,
+            category = category,
+            merchantOverride = merchantOverride,
+            reviewedAtEpochMillis = now(),
+            overwriteConflict = overwriteConflict,
+        )
+
+    override suspend fun undoMerchantRuleSave(token: MerchantRuleUndoToken) = dao.undoMerchantRuleSave(token)
 
     override suspend fun countRange(
         range: PennyLocalDateRange,

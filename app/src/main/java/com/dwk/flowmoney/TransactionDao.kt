@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 
 private const val SYNCED_TRANSACTION_QUERY_BATCH_SIZE = 900
 private const val IMPORT_TRANSACTION_BATCH_SIZE = 500
+private const val REVIEW_TRANSACTION_BATCH_SIZE = 500
 
 data class SyncedTransactionWriteResult(
     val inserted: Int,
@@ -58,6 +59,53 @@ interface TransactionDao {
 
     @Query("SELECT * FROM transactions ORDER BY occurredAtEpochMillis DESC")
     suspend fun getAll(): List<TransactionEntity>
+
+    @Query("SELECT COUNT(*) FROM transactions WHERE source = 'simplefin' AND reviewedAtEpochMillis IS NULL")
+    fun observeUnreviewedCount(): Flow<Int>
+
+    @Query(
+        "SELECT * FROM transactions WHERE source = 'simplefin' " +
+            "AND reviewedAtEpochMillis IS NULL ORDER BY occurredAtEpochMillis DESC",
+    )
+    fun observeUnreviewedTransactions(): Flow<List<TransactionEntity>>
+
+    @Query(
+        "SELECT * FROM transactions WHERE source = 'simplefin' " +
+            "AND reviewedAtEpochMillis IS NULL ORDER BY occurredAtEpochMillis DESC",
+    )
+    suspend fun getUnreviewedTransactions(): List<TransactionEntity>
+
+    @Query("SELECT * FROM merchant_rules ORDER BY normalizedProviderMerchant")
+    fun observeMerchantRules(): Flow<List<MerchantRuleEntity>>
+
+    @Query("SELECT * FROM merchant_rules ORDER BY normalizedProviderMerchant")
+    suspend fun getMerchantRules(): List<MerchantRuleEntity>
+
+    @Query("SELECT * FROM merchant_rules WHERE normalizedProviderMerchant = :key")
+    suspend fun merchantRuleForKey(key: String): MerchantRuleEntity?
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertMerchantRule(rule: MerchantRuleEntity)
+
+    @Query(
+        "UPDATE merchant_rules SET category = :category, merchantOverride = :merchantOverride " +
+            "WHERE normalizedProviderMerchant = :key",
+    )
+    suspend fun updateMerchantRule(
+        key: String,
+        category: String,
+        merchantOverride: String?,
+    ): Int
+
+    @Query("DELETE FROM merchant_rules WHERE normalizedProviderMerchant = :key")
+    suspend fun deleteMerchantRuleByKey(key: String): Int
+
+    @Transaction
+    suspend fun deleteMerchantRule(key: String): MerchantRuleEntity? {
+        val rule = merchantRuleForKey(key) ?: return null
+        check(deleteMerchantRuleByKey(key) == 1) { "Merchant rule changed during deletion" }
+        return rule
+    }
 
     @Query(
         "SELECT * FROM transactions " +
@@ -180,8 +228,148 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE id IN (:ids)")
     suspend fun transactionsForIds(ids: List<String>): List<TransactionEntity>
 
+    @Query(
+        "UPDATE transactions SET category = :category, reviewedAtEpochMillis = :reviewedAtEpochMillis " +
+            "WHERE id IN (:ids) AND source = 'simplefin' AND reviewedAtEpochMillis IS NULL",
+    )
+    suspend fun categorizeAndReviewBatch(
+        ids: List<String>,
+        category: String,
+        reviewedAtEpochMillis: Long,
+    ): Int
+
+    @Query(
+        "UPDATE transactions SET category = :category, reviewedAtEpochMillis = :reviewedAtEpochMillis, " +
+            "merchantOverride = :merchantOverride WHERE id = :id",
+    )
+    suspend fun restoreReviewState(
+        id: String,
+        category: String,
+        reviewedAtEpochMillis: Long?,
+        merchantOverride: String?,
+    ): Int
+
+    @Query(
+        "UPDATE transactions SET category = :category, merchantOverride = :merchantOverride, " +
+            "reviewedAtEpochMillis = COALESCE(reviewedAtEpochMillis, :reviewedAtEpochMillis) " +
+            "WHERE id = :id AND source = 'simplefin'",
+    )
+    suspend fun applyRuleToOrigin(
+        id: String,
+        category: String,
+        merchantOverride: String?,
+        reviewedAtEpochMillis: Long,
+    ): Int
+
     @Transaction
-    suspend fun upsertSyncedTransactionsIgnoringTombstones(transactions: List<TransactionEntity>): SyncedTransactionWriteResult {
+    suspend fun categorizeAndReview(
+        ids: List<String>,
+        category: String,
+        reviewedAtEpochMillis: Long,
+    ): ReviewUndoToken {
+        require(category.isNotBlank()) { "Category must not be blank" }
+        val uniqueIds = ids.distinct()
+        val rows =
+            uniqueIds
+                .chunked(REVIEW_TRANSACTION_BATCH_SIZE)
+                .flatMap { transactionsForIds(it) }
+                .filter { it.isUnreviewed }
+        val rowIds = rows.map { it.id }
+        val changed =
+            rowIds
+                .chunked(REVIEW_TRANSACTION_BATCH_SIZE)
+                .sumOf { categorizeAndReviewBatch(it, category, reviewedAtEpochMillis) }
+        check(changed == rows.size) { "Review queue changed during update" }
+        return ReviewUndoToken(rows.map { it.reviewState() })
+    }
+
+    @Transaction
+    suspend fun restoreReview(token: ReviewUndoToken) {
+        token.transactionStates.forEach { state ->
+            check(
+                restoreReviewState(
+                    id = state.id,
+                    category = state.category,
+                    reviewedAtEpochMillis = state.reviewedAtEpochMillis,
+                    merchantOverride = state.merchantOverride,
+                ) == 1,
+            ) { "Reviewed transaction no longer exists" }
+        }
+    }
+
+    /** Derives the key from the immutable provider merchant and updates the rule and origin atomically. */
+    @Transaction
+    suspend fun saveAndApplyMerchantRule(
+        originatingTransactionId: String,
+        category: String,
+        merchantOverride: String?,
+        reviewedAtEpochMillis: Long,
+        overwriteConflict: Boolean,
+    ): MerchantRuleSaveResult {
+        require(category.isNotBlank()) { "Category must not be blank" }
+        val origin =
+            transactionsForIds(listOf(originatingTransactionId)).singleOrNull()
+                ?: error("Originating transaction does not exist")
+        require(origin.source == "simplefin") { "Merchant rules require a SimpleFIN transaction" }
+        val key = normalizedProviderMerchantKey(origin.merchant)
+        require(key.isNotBlank()) { "Provider merchant must not be blank" }
+        val proposed = MerchantRuleEntity(key, category, merchantOverride)
+        val previous = merchantRuleForKey(key)
+        if (previous != null && previous != proposed && !overwriteConflict) {
+            return MerchantRuleSaveResult.Conflict(previous, proposed)
+        }
+        val transactionState = origin.reviewState()
+        if (previous == null) {
+            insertMerchantRule(proposed)
+        } else {
+            check(updateMerchantRule(key, proposed.category, proposed.merchantOverride) == 1) {
+                "Merchant rule changed while it was being saved"
+            }
+        }
+        check(applyRuleToOrigin(origin.id, category, merchantOverride, reviewedAtEpochMillis) == 1) {
+            "Originating transaction changed while saving merchant rule"
+        }
+        return MerchantRuleSaveResult.Applied(
+            rule = proposed,
+            undoToken = MerchantRuleUndoToken(transactionState, previous, proposed),
+        )
+    }
+
+    @Transaction
+    suspend fun undoMerchantRuleSave(token: MerchantRuleUndoToken) {
+        check(merchantRuleForKey(token.appliedRule.normalizedProviderMerchant) == token.appliedRule) {
+            "Merchant rule changed after it was saved"
+        }
+        token.previousRule?.let { previous ->
+            check(
+                updateMerchantRule(
+                    previous.normalizedProviderMerchant,
+                    previous.category,
+                    previous.merchantOverride,
+                ) == 1,
+            ) { "Merchant rule disappeared before undo" }
+        } ?: check(deleteMerchantRuleByKey(token.appliedRule.normalizedProviderMerchant) == 1) {
+            "Merchant rule disappeared before undo"
+        }
+        val state = token.transactionState
+        check(restoreReviewState(state.id, state.category, state.reviewedAtEpochMillis, state.merchantOverride) == 1) {
+            "Originating transaction no longer exists"
+        }
+    }
+
+    @Transaction
+    suspend fun upsertSyncedTransactionsIgnoringTombstones(
+        transactions: List<TransactionEntity>,
+        merchantRules: List<MerchantRuleEntity> = emptyList(),
+        reviewedAtEpochMillis: Long = System.currentTimeMillis(),
+    ): SyncedTransactionWriteResult {
+        val conflictingRule =
+            merchantRules
+                .groupBy { normalizedProviderMerchantKey(it.normalizedProviderMerchant) }
+                .values
+                .firstOrNull { rules -> rules.distinct().size > 1 }
+        require(conflictingRule == null) { "Conflicting normalized merchant rules" }
+        val rulesByKey = merchantRules.associateBy { it.normalizedProviderMerchant }
         val unique = transactions.distinctBy { it.id }
         val ignored =
             unique
@@ -209,7 +397,13 @@ interface TransactionDao {
                 when {
                     current == null -> {
                         inserted++
-                        incoming.copy(source = "simplefin")
+                        val rule = rulesByKey[normalizedProviderMerchantKey(incoming.merchant)]
+                        incoming.copy(
+                            category = rule?.category ?: incoming.category,
+                            source = "simplefin",
+                            reviewedAtEpochMillis = rule?.let { reviewedAtEpochMillis },
+                            merchantOverride = rule?.merchantOverride,
+                        )
                     }
 
                     current.source == "simplefin" -> {
@@ -221,6 +415,7 @@ interface TransactionDao {
                             source = "simplefin",
                             accountKey = incoming.accountKey,
                             accountName = incoming.accountName,
+                            providerDescription = incoming.providerDescription,
                         )
                     }
 
@@ -237,6 +432,14 @@ interface TransactionDao {
             skipped = unique.size - eligible.size + collisions,
         )
     }
+
+    private fun TransactionEntity.reviewState() =
+        TransactionReviewState(
+            id = id,
+            category = category,
+            reviewedAtEpochMillis = reviewedAtEpochMillis,
+            merchantOverride = merchantOverride,
+        )
 
     @Query("SELECT source FROM transactions WHERE id = :id")
     suspend fun sourceForId(id: String): String?

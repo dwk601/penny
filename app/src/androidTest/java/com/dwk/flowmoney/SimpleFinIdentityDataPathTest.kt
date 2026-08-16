@@ -51,7 +51,7 @@ class SimpleFinIdentityDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_6_7)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_6_7, FlowMoneyDatabase.MIGRATION_7_8)
                     .build()
             try {
                 assertEquals(
@@ -104,7 +104,7 @@ class SimpleFinIdentityDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_6_7)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_6_7, FlowMoneyDatabase.MIGRATION_7_8)
                     .build()
             val fake = FakeFunctions()
             fake.credential = CONNECTION_ONE to FIRST_ACCESS_URL

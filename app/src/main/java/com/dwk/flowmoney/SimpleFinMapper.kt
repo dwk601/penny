@@ -33,6 +33,7 @@ object SimpleFinMapper {
                             return@mapNotNull null
                         }
                     val accountKey = SimpleFinIdentity.accountId(origin, account.providerConnectionId, account.id)
+                    val providerMerchant = tx.payee?.takeIf { it.isNotBlank() } ?: tx.description
                     TransactionEntity(
                         id =
                             SimpleFinIdentity.transactionId(
@@ -42,13 +43,14 @@ object SimpleFinMapper {
                                 tx.id,
                             ),
                         occurredAtEpochMillis = tx.posted * 1000L,
-                        merchant = tx.description,
+                        merchant = providerMerchant,
                         category = "Other",
                         note = "",
                         cents = cents,
                         source = "simplefin",
                         accountKey = accountKey,
                         accountName = account.name,
+                        providerDescription = tx.description,
                     )
                 }
             }

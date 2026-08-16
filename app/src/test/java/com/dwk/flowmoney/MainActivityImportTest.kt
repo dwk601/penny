@@ -55,6 +55,41 @@ class MainActivityImportTest {
         assertThat(draft.id).isNull()
     }
 
+    @Test fun olderEditorDraftShapeRestoresWithSafeSyncDefaults() {
+        val restored =
+            restoreEditorDraft(
+                listOf(
+                    "simplefin:id",
+                    1234L,
+                    "Provider Merchant 17",
+                    "12.34",
+                    true,
+                    "Other",
+                    "note",
+                    "Monthly",
+                    "simplefin",
+                    "account-key",
+                    "Checking",
+                ),
+            )
+
+        assertThat(restored.id).isEqualTo("simplefin:id")
+        assertThat(restored.providerMerchant).isEqualTo("Provider Merchant 17")
+        assertThat(restored.reviewedAtEpochMillis).isNull()
+        assertThat(restored.providerDescription).isNull()
+        assertThat(restored.merchantOverride).isNull()
+    }
+
+    @Test fun truncatedEditorDraftShapeUsesSizeCheckedDefaults() {
+        val restored = restoreEditorDraft(listOf("saved-id", 42L, "Merchant"))
+
+        assertThat(restored.id).isEqualTo("saved-id")
+        assertThat(restored.occurredAtEpochMillis).isEqualTo(42L)
+        assertThat(restored.merchant).isEqualTo("Merchant")
+        assertThat(restored.source).isEqualTo("local")
+        assertThat(restored.accountKey).isNull()
+    }
+
     @Test fun transactionDayGroupsKeepSeparateSpentAndReceivedTotals() {
         val recentDate = LocalDate.of(2026, 7, 10)
         val earlierDate = LocalDate.of(2026, 7, 9)

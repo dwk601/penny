@@ -236,6 +236,8 @@ internal object SimpleFinIdentityReconciler {
             category = ranked.firstOrNull { it.category != DEFAULT_SIMPLEFIN_CATEGORY }?.category ?: base.category,
             note = ranked.firstOrNull { it.note.isNotBlank() }?.note ?: base.note,
             recurringInterval = ranked.firstOrNull { it.recurringInterval != null }?.recurringInterval,
+            reviewedAtEpochMillis = ranked.firstOrNull { it.reviewedAtEpochMillis != null }?.reviewedAtEpochMillis,
+            merchantOverride = ranked.firstOrNull { it.merchantOverride != null }?.merchantOverride,
             source = "simplefin",
             accountKey = stableAccountId,
             accountName = accountNames[stableAccountId] ?: base.accountName,

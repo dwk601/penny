@@ -151,6 +151,9 @@ class MainViewModel(
     val initializationErrorEvents = initializationErrors.receiveAsFlow()
     val mutationBusy: StateFlow<Boolean> = mutableMutationBusy.asStateFlow()
     val pendingRangeReset: StateFlow<PendingRangeResetState?> = mutablePendingRangeReset.asStateFlow()
+    val unreviewedCount: Flow<Int> = repository.unreviewedCount
+    val unreviewedTransactions: Flow<List<Transaction>> = repository.unreviewedTransactions
+    val merchantRules: Flow<List<MerchantRuleEntity>> = repository.merchantRules
 
     val uiState =
         flow {
@@ -200,6 +203,43 @@ class MainViewModel(
 
     suspend fun delete(id: String) {
         mutateTransactions { repository.delete(id) }
+    }
+
+    suspend fun getUnreviewedTransactions(): List<Transaction> = repository.getUnreviewedTransactions()
+
+    suspend fun categorizeAndReview(
+        ids: List<String>,
+        category: String,
+    ): ReviewUndoToken = mutateTransactions { repository.categorizeAndReview(ids, category) }
+
+    suspend fun acceptAsOther(ids: List<String>): ReviewUndoToken = mutateTransactions { repository.acceptAsOther(ids) }
+
+    suspend fun restoreReview(token: ReviewUndoToken) {
+        mutateTransactions { repository.restoreReview(token) }
+    }
+
+    suspend fun getMerchantRules(): List<MerchantRuleEntity> = repository.getMerchantRules()
+
+    suspend fun deleteMerchantRule(normalizedKey: String): MerchantRuleEntity? =
+        mutateTransactions { repository.deleteMerchantRule(normalizedKey) }
+
+    suspend fun saveAndApplyMerchantRule(
+        originatingTransactionId: String,
+        category: String,
+        merchantOverride: String?,
+        overwriteConflict: Boolean = false,
+    ): MerchantRuleSaveResult =
+        mutateTransactions {
+            repository.saveAndApplyMerchantRule(
+                originatingTransactionId,
+                category,
+                merchantOverride,
+                overwriteConflict,
+            )
+        }
+
+    suspend fun undoMerchantRuleSave(token: MerchantRuleUndoToken) {
+        mutateTransactions { repository.undoMerchantRuleSave(token) }
     }
 
     suspend fun countRange(

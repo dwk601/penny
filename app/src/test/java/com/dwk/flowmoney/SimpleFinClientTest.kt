@@ -85,6 +85,20 @@ class SimpleFinClientTest {
     }
 
     @Test
+    fun validatesOptionalPayeeAtProviderStringLimit() {
+        val client = SimpleFinClient()
+        val exactLimitPayee = "x".repeat(16_384)
+
+        assertNull(client.validateProviderPayee(null))
+        assertEquals(exactLimitPayee, client.validateProviderPayee(exactLimitPayee))
+        val error =
+            assertThrows(SimpleFinException::class.java) {
+                client.validateProviderPayee(exactLimitPayee + "x")
+            }
+        assertEquals("SimpleFIN response exceeds allowed limits", error.message)
+    }
+
+    @Test
     fun claim403IsTypedAsNonRetryableAuthenticationWithoutReadingBody() =
         runBlocking {
             lateinit var connection: FakeHttpsConnection

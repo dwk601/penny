@@ -11,6 +11,7 @@ import androidx.room.PrimaryKey
         Index(value = ["occurredAtEpochMillis"]),
         Index(value = ["source"]),
         Index(value = ["accountKey"]),
+        Index(value = ["source", "reviewedAtEpochMillis", "occurredAtEpochMillis"]),
     ],
 )
 data class TransactionEntity(
@@ -24,13 +25,19 @@ data class TransactionEntity(
     @ColumnInfo(defaultValue = "'local'") val source: String = "local",
     val accountKey: String? = null,
     val accountName: String? = null,
-)
+    val reviewedAtEpochMillis: Long? = null,
+    val providerDescription: String? = null,
+    val merchantOverride: String? = null,
+) {
+    val isUnreviewed: Boolean
+        get() = source == "simplefin" && reviewedAtEpochMillis == null
+}
 
-fun Transaction.toEntity(): TransactionEntity {
-    return TransactionEntity(
+fun Transaction.toEntity(): TransactionEntity =
+    TransactionEntity(
         id = id,
         occurredAtEpochMillis = occurredAtEpochMillis,
-        merchant = merchant,
+        merchant = providerMerchant ?: merchant,
         category = category,
         note = note,
         cents = cents,
@@ -38,14 +45,16 @@ fun Transaction.toEntity(): TransactionEntity {
         source = source,
         accountKey = accountKey,
         accountName = accountName,
+        reviewedAtEpochMillis = reviewedAtEpochMillis,
+        providerDescription = providerDescription,
+        merchantOverride = merchantOverride,
     )
-}
 
-fun TransactionEntity.toTransaction(): Transaction {
-    return Transaction(
+fun TransactionEntity.toTransaction(): Transaction =
+    Transaction(
         id = id,
         occurredAtEpochMillis = occurredAtEpochMillis,
-        merchant = merchant,
+        merchant = merchantOverride ?: merchant,
         category = category,
         note = note,
         cents = cents,
@@ -53,9 +62,10 @@ fun TransactionEntity.toTransaction(): Transaction {
         source = source,
         accountKey = accountKey,
         accountName = accountName,
+        reviewedAtEpochMillis = reviewedAtEpochMillis,
+        providerDescription = providerDescription,
+        merchantOverride = merchantOverride,
+        providerMerchant = merchant.takeIf { source == "simplefin" },
     )
-}
 
-private fun String.toRecurrenceIntervalOrNull(): RecurrenceInterval? {
-    return RecurrenceInterval.entries.firstOrNull { it.name == this }
-}
+private fun String.toRecurrenceIntervalOrNull(): RecurrenceInterval? = RecurrenceInterval.entries.firstOrNull { it.name == this }

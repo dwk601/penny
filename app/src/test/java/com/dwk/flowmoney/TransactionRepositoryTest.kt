@@ -109,6 +109,9 @@ class TransactionRepositoryTest {
                     category = "User category",
                     note = "User note",
                     recurringInterval = RecurrenceInterval.Monthly.name,
+                    reviewedAtEpochMillis = 123,
+                    providerDescription = "Old raw description",
+                    merchantOverride = "User merchant",
                 ),
             )
 
@@ -121,6 +124,7 @@ class TransactionRepositoryTest {
                             cents = -250,
                             accountKey = "new-acct",
                             accountName = "Savings",
+                            providerDescription = "Refreshed raw description",
                         ),
                     ),
                 )
@@ -136,6 +140,9 @@ class TransactionRepositoryTest {
                     recurringInterval = RecurrenceInterval.Monthly.name,
                     accountKey = "new-acct",
                     accountName = "Savings",
+                    reviewedAtEpochMillis = 123,
+                    providerDescription = "Refreshed raw description",
+                    merchantOverride = "User merchant",
                 ),
             )
         }
@@ -340,7 +347,11 @@ class TransactionRepositoryTest {
     private class FakeTransactionDao : TransactionDao {
         private val entities = LinkedHashMap<String, TransactionEntity>()
         private val ignored = LinkedHashMap<String, SimpleFinIgnoredTransactionEntity>()
+        private val rules = LinkedHashMap<String, MerchantRuleEntity>()
         private val rows = MutableStateFlow<List<TransactionEntity>>(emptyList())
+        private val unreviewedRows = MutableStateFlow<List<TransactionEntity>>(emptyList())
+        private val unreviewedCount = MutableStateFlow(0)
+        private val ruleRows = MutableStateFlow<List<MerchantRuleEntity>>(emptyList())
         val queriedBatchSizes = mutableListOf<Int>()
 
         fun ignoredIds(): Set<String> = ignored.keys
@@ -352,6 +363,40 @@ class TransactionRepositoryTest {
         override fun observeAll(): Flow<List<TransactionEntity>> = rows
 
         override suspend fun getAll(): List<TransactionEntity> = rows.value
+
+        override fun observeUnreviewedCount(): Flow<Int> = unreviewedCount
+
+        override fun observeUnreviewedTransactions(): Flow<List<TransactionEntity>> = unreviewedRows
+
+        override suspend fun getUnreviewedTransactions(): List<TransactionEntity> = unreviewedRows.value
+
+        override fun observeMerchantRules(): Flow<List<MerchantRuleEntity>> = ruleRows
+
+        override suspend fun getMerchantRules(): List<MerchantRuleEntity> = ruleRows.value
+
+        override suspend fun merchantRuleForKey(key: String): MerchantRuleEntity? = rules[key]
+
+        override suspend fun insertMerchantRule(rule: MerchantRuleEntity) {
+            check(rules.putIfAbsent(rule.normalizedProviderMerchant, rule) == null)
+            publishRules()
+        }
+
+        override suspend fun updateMerchantRule(
+            key: String,
+            category: String,
+            merchantOverride: String?,
+        ): Int {
+            val current = rules[key] ?: return 0
+            rules[key] = current.copy(category = category, merchantOverride = merchantOverride)
+            publishRules()
+            return 1
+        }
+
+        override suspend fun deleteMerchantRuleByKey(key: String): Int {
+            val removed = rules.remove(key) ?: return 0
+            publishRules()
+            return if (removed.normalizedProviderMerchant == key) 1 else 0
+        }
 
         override suspend fun getInRange(
             startInclusiveEpochMillis: Long,
@@ -441,6 +486,57 @@ class TransactionRepositoryTest {
             return ids.mapNotNull(entities::get)
         }
 
+        override suspend fun categorizeAndReviewBatch(
+            ids: List<String>,
+            category: String,
+            reviewedAtEpochMillis: Long,
+        ): Int {
+            var changed = 0
+            ids.forEach { id ->
+                val current = entities[id]
+                if (current?.isUnreviewed == true) {
+                    entities[id] = current.copy(category = category, reviewedAtEpochMillis = reviewedAtEpochMillis)
+                    changed++
+                }
+            }
+            publish()
+            return changed
+        }
+
+        override suspend fun restoreReviewState(
+            id: String,
+            category: String,
+            reviewedAtEpochMillis: Long?,
+            merchantOverride: String?,
+        ): Int {
+            val current = entities[id] ?: return 0
+            entities[id] =
+                current.copy(
+                    category = category,
+                    reviewedAtEpochMillis = reviewedAtEpochMillis,
+                    merchantOverride = merchantOverride,
+                )
+            publish()
+            return 1
+        }
+
+        override suspend fun applyRuleToOrigin(
+            id: String,
+            category: String,
+            merchantOverride: String?,
+            reviewedAtEpochMillis: Long,
+        ): Int {
+            val current = entities[id]?.takeIf { it.source == "simplefin" } ?: return 0
+            entities[id] =
+                current.copy(
+                    category = category,
+                    merchantOverride = merchantOverride,
+                    reviewedAtEpochMillis = current.reviewedAtEpochMillis ?: reviewedAtEpochMillis,
+                )
+            publish()
+            return 1
+        }
+
         override suspend fun sourceForId(id: String): String? = entities[id]?.source
 
         override suspend fun deleteById(id: String) {
@@ -460,6 +556,12 @@ class TransactionRepositoryTest {
 
         private fun publish() {
             rows.value = entities.values.sortedByDescending { it.occurredAtEpochMillis }
+            unreviewedRows.value = rows.value.filter { it.isUnreviewed }
+            unreviewedCount.value = unreviewedRows.value.size
+        }
+
+        private fun publishRules() {
+            ruleRows.value = rules.values.sortedBy { it.normalizedProviderMerchant }
         }
     }
 }

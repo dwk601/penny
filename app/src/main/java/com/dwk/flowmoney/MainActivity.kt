@@ -369,6 +369,10 @@ internal data class EditorDraft(
     val source: String,
     val accountKey: String?,
     val accountName: String?,
+    val reviewedAtEpochMillis: Long?,
+    val providerDescription: String?,
+    val merchantOverride: String?,
+    val providerMerchant: String?,
 )
 
 private val EditorDraftSaver =
@@ -386,24 +390,53 @@ private val EditorDraftSaver =
                 draft.source,
                 draft.accountKey.orEmpty(),
                 draft.accountName.orEmpty(),
+                draft.reviewedAtEpochMillis ?: Long.MIN_VALUE,
+                draft.providerDescription != null,
+                draft.providerDescription.orEmpty(),
+                draft.merchantOverride != null,
+                draft.merchantOverride.orEmpty(),
+                draft.providerMerchant != null,
+                draft.providerMerchant.orEmpty(),
             )
         },
-        restore = { values ->
-            EditorDraft(
-                id = values[0] as String? ?: "",
-                occurredAtEpochMillis = values[1] as Long,
-                merchant = values[2] as String,
-                amount = values[3] as String,
-                isExpense = values[4] as Boolean,
-                category = values[5] as String,
-                note = values[6] as String,
-                recurringIntervalName = values[7] as String,
-                source = values[8] as String,
-                accountKey = (values[9] as String).ifBlank { null },
-                accountName = (values[10] as String).ifBlank { null },
-            ).let { draft -> draft.copy(id = draft.id?.ifBlank { null }) }
-        },
+        restore = ::restoreEditorDraft,
     )
+
+/** Size-checked restoration keeps process state written by older app versions valid. */
+internal fun restoreEditorDraft(values: List<Any>): EditorDraft {
+    val fallback = newEditorDraft()
+    val source = values.getOrNull(8) as? String ?: fallback.source
+    val merchant = values.getOrNull(2) as? String ?: fallback.merchant
+    val providerDescriptionPresent = values.getOrNull(12) as? Boolean ?: false
+    val merchantOverridePresent = values.getOrNull(14) as? Boolean ?: false
+    val providerMerchantPresent = values.getOrNull(16) as? Boolean ?: false
+    return EditorDraft(
+        id = (values.getOrNull(0) as? String)?.ifBlank { null },
+        occurredAtEpochMillis = values.getOrNull(1) as? Long ?: fallback.occurredAtEpochMillis,
+        merchant = merchant,
+        amount = values.getOrNull(3) as? String ?: fallback.amount,
+        isExpense = values.getOrNull(4) as? Boolean ?: fallback.isExpense,
+        category = values.getOrNull(5) as? String ?: fallback.category,
+        note = values.getOrNull(6) as? String ?: fallback.note,
+        recurringIntervalName = values.getOrNull(7) as? String ?: fallback.recurringIntervalName,
+        source = source,
+        accountKey = (values.getOrNull(9) as? String)?.ifBlank { null },
+        accountName = (values.getOrNull(10) as? String)?.ifBlank { null },
+        reviewedAtEpochMillis =
+            (values.getOrNull(11) as? Long)
+                ?.takeUnless { it == Long.MIN_VALUE },
+        providerDescription =
+            (values.getOrNull(13) as? String)
+                ?.takeIf { providerDescriptionPresent },
+        merchantOverride =
+            (values.getOrNull(15) as? String)
+                ?.takeIf { merchantOverridePresent },
+        providerMerchant =
+            (values.getOrNull(17) as? String)
+                ?.takeIf { providerMerchantPresent }
+                ?: merchant.takeIf { source == "simplefin" && values.size <= 11 },
+    )
+}
 
 internal fun newEditorDraft(): EditorDraft =
     EditorDraft(
@@ -418,6 +451,10 @@ internal fun newEditorDraft(): EditorDraft =
         source = "local",
         accountKey = null,
         accountName = null,
+        reviewedAtEpochMillis = null,
+        providerDescription = null,
+        merchantOverride = null,
+        providerMerchant = null,
     )
 
 internal fun widgetQuickAddDraft(suggestionHistory: TransactionSuggestionHistory): EditorDraft {
@@ -443,14 +480,29 @@ private fun Transaction.toEditorDraft() =
         source = source,
         accountKey = accountKey,
         accountName = accountName,
+        reviewedAtEpochMillis = reviewedAtEpochMillis,
+        providerDescription = providerDescription,
+        merchantOverride = merchantOverride,
+        providerMerchant = providerMerchant,
     )
 
 private fun EditorDraft.toTransaction(): Transaction {
     val parsedAmount = MoneyFormatter.parseAmountToCents(amount).absoluteValue
+    val effectiveMerchant = merchant.trim().ifBlank { category }
+    val rawProviderMerchant = providerMerchant ?: effectiveMerchant
+    val originalEffectiveMerchant = merchantOverride ?: rawProviderMerchant
+    val updatedOverride =
+        if (source != "simplefin") {
+            null
+        } else if (effectiveMerchant == originalEffectiveMerchant) {
+            merchantOverride
+        } else {
+            effectiveMerchant.takeUnless { it == rawProviderMerchant }
+        }
     return Transaction(
         id = id ?: UUID.randomUUID().toString(),
         occurredAtEpochMillis = occurredAtEpochMillis,
-        merchant = merchant.trim().ifBlank { category },
+        merchant = effectiveMerchant,
         category = category,
         note = note.trim(),
         cents = TransactionSuggestions.signedCents(parsedAmount, isExpense),
@@ -458,6 +510,10 @@ private fun EditorDraft.toTransaction(): Transaction {
         source = source,
         accountKey = accountKey,
         accountName = accountName,
+        reviewedAtEpochMillis = reviewedAtEpochMillis,
+        providerDescription = providerDescription,
+        merchantOverride = updatedOverride,
+        providerMerchant = rawProviderMerchant.takeIf { source == "simplefin" },
     )
 }
 

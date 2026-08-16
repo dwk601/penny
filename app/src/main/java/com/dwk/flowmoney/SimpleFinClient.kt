@@ -179,6 +179,7 @@ class SimpleFinClient(
                                     amount = tx.getString("amount"),
                                     description = tx.optString("description", ""),
                                     pending = tx.optBoolean("pending", false),
+                                    payee = validateProviderPayee(tx.optNullableString("payee")),
                                 )
                             },
                     )
@@ -220,6 +221,7 @@ class SimpleFinClient(
                 validateProviderString(transaction.optString("id"))
                 validateProviderString(transaction.optString("amount"))
                 validateOptionalProviderString(transaction, "description")
+                validateProviderPayee(transaction.optNullableString("payee"))
             }
         }
     }
@@ -252,6 +254,11 @@ class SimpleFinClient(
         name: String,
     ) {
         if (json.has(name) && !json.isNull(name)) validateProviderString(json.optString(name))
+    }
+
+    internal fun validateProviderPayee(payee: String?): String? {
+        payee?.let(::validateProviderString)
+        return payee
     }
 
     private fun validateProviderString(value: String) {

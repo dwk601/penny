@@ -1212,6 +1212,7 @@ class SimpleFinLifecycleTest {
                         FlowMoneyDatabase.MIGRATION_4_5,
                         FlowMoneyDatabase.MIGRATION_5_6,
                         FlowMoneyDatabase.MIGRATION_6_7,
+                        FlowMoneyDatabase.MIGRATION_7_8,
                     ).build()
             try {
                 assertNull(migrated.simpleFinDao().getProfile())
@@ -1286,6 +1287,7 @@ class SimpleFinLifecycleTest {
                         FlowMoneyDatabase.MIGRATION_4_5,
                         FlowMoneyDatabase.MIGRATION_5_6,
                         FlowMoneyDatabase.MIGRATION_6_7,
+                        FlowMoneyDatabase.MIGRATION_7_8,
                     ).build()
             try {
                 val transaction = migrated.transactionDao().getAll().single()
@@ -1330,8 +1332,11 @@ class SimpleFinLifecycleTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_5_6, FlowMoneyDatabase.MIGRATION_6_7)
-                    .build()
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_5_6,
+                        FlowMoneyDatabase.MIGRATION_6_7,
+                        FlowMoneyDatabase.MIGRATION_7_8,
+                    ).build()
             try {
                 val profile = migrated.simpleFinDao().getProfile()!!
                 assertEquals("default", profile.id)

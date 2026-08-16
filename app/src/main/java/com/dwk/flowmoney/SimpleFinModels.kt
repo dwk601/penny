@@ -17,6 +17,7 @@ data class SimpleFinTransaction(
     val amount: String,
     val description: String,
     val pending: Boolean,
+    val payee: String? = null,
 )
 
 data class SimpleFinAccountsResult(

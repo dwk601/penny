@@ -252,7 +252,13 @@ class SimpleFinSyncRepository internal constructor(
                 if (reconciliationRequired) {
                     SimpleFinIdentityReconciler.reconcile(identityDao, origin, payloadOccurrences)
                 }
-                writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
+                val transactionDao = db.transactionDao()
+                writeResult =
+                    transactionDao.upsertSyncedTransactionsIgnoringTombstones(
+                        transactions = mapped.transactions,
+                        merchantRules = transactionDao.getMerchantRules(),
+                        reviewedAtEpochMillis = time,
+                    )
                 dao.upsertAccounts(mapped.accounts)
                 check(dao.recordSuccess(profile.connectionId, now(), error) == 1) {
                     "SimpleFIN connection changed during sync"
@@ -379,7 +385,13 @@ class SimpleFinSyncRepository internal constructor(
                     }
                     db.simpleFinDao().clearProfile()
                     db.simpleFinDao().clearAccounts()
-                    writeResult = db.transactionDao().upsertSyncedTransactionsIgnoringTombstones(mapped.transactions)
+                    val transactionDao = db.transactionDao()
+                    writeResult =
+                        transactionDao.upsertSyncedTransactionsIgnoringTombstones(
+                            transactions = mapped.transactions,
+                            merchantRules = transactionDao.getMerchantRules(),
+                            reviewedAtEpochMillis = fetchedAt,
+                        )
                     db.simpleFinDao().upsertAccounts(mapped.accounts)
                     db.simpleFinDao().upsertProfile(profile)
                     if (reconciliationRequired) {

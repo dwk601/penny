@@ -14,8 +14,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SimpleFinAccountEntity::class,
         SimpleFinIgnoredTransactionEntity::class,
         SimpleFinIdentityStateEntity::class,
+        MerchantRuleEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 abstract class FlowMoneyDatabase : RoomDatabase() {
@@ -42,6 +43,7 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                         MIGRATION_4_5,
                         MIGRATION_5_6,
                         MIGRATION_6_7,
+                        MIGRATION_7_8,
                     ).build()
                     .also { instance = it }
             }
@@ -117,6 +119,45 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                     db.execSQL(
                         "INSERT OR IGNORE INTO simplefin_identity_state (id, reconciliationComplete) " +
                             "VALUES ('stable_v2', 0)",
+                    )
+                }
+            }
+
+        internal val MIGRATION_7_8: Migration =
+            object : Migration(7, 8) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN reviewedAtEpochMillis INTEGER")
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN providerDescription TEXT")
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN merchantOverride TEXT")
+                    db.execSQL(
+                        "UPDATE transactions SET providerDescription = merchant " +
+                            "WHERE source = 'simplefin'",
+                    )
+                    db.execSQL(
+                        "UPDATE transactions SET reviewedAtEpochMillis = " +
+                            "CAST(strftime('%s', 'now') AS INTEGER) * 1000 " +
+                            "WHERE source != 'simplefin' OR category != 'Other' " +
+                            "OR length(trim(note, ' ' || char(9) || char(10) || char(11) || char(12) || " +
+                            "char(13) || char(133) || char(160) || char(5760) || char(8192) || char(8193) || " +
+                            "char(8194) || char(8195) || char(8196) || char(8197) || char(8198) || char(8199) || " +
+                            "char(8200) || char(8201) || char(8202) || char(8232) || char(8233) || char(8239) || " +
+                            "char(8287) || char(12288))) > 0 OR recurringInterval IS NOT NULL",
+                    )
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS merchant_rules (" +
+                            "normalizedProviderMerchant TEXT NOT NULL, " +
+                            "category TEXT NOT NULL, merchantOverride TEXT, " +
+                            "PRIMARY KEY(normalizedProviderMerchant))",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS " +
+                            "index_transactions_source_reviewedAtEpochMillis_occurredAtEpochMillis " +
+                            "ON transactions(source, reviewedAtEpochMillis, occurredAtEpochMillis)",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS " +
+                            "index_simplefin_ignored_transactions_occurredAtEpochMillis " +
+                            "ON simplefin_ignored_transactions(occurredAtEpochMillis)",
                     )
                 }
             }

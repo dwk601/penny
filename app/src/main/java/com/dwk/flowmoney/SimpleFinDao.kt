@@ -3,6 +3,7 @@ package com.dwk.flowmoney
 import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
@@ -33,7 +34,10 @@ data class SimpleFinAccountEntity(
     val lastSeenAtEpochMillis: Long,
 )
 
-@Entity(tableName = "simplefin_ignored_transactions")
+@Entity(
+    tableName = "simplefin_ignored_transactions",
+    indices = [Index(value = ["occurredAtEpochMillis"])],
+)
 data class SimpleFinIgnoredTransactionEntity(
     @PrimaryKey val transactionId: String,
     val ignoredAtEpochMillis: Long = System.currentTimeMillis(),
