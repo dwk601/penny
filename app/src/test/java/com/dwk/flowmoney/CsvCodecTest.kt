@@ -18,16 +18,34 @@ class CsvCodecTest {
         )
 
     @Test
-    fun csvRoundTripPreservesTransactionFieldsButReplacesIncomingId() {
-        val csv = CsvCodec.encode(listOf(sample))
+    fun csvV2RoundTripPreservesEffectiveFlowKindButReplacesIncomingIds() {
+        val overridden =
+            sample.copy(
+                id = "tx-override",
+                flowKind = FlowKind.NORMAL,
+                flowKindOverride = FlowKind.TRANSFER,
+            )
+        val csv = CsvCodec.encode(listOf(sample, overridden))
+        assertThat(csv.lineSequence().first())
+            .isEqualTo("id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind")
+        assertThat(csv).doesNotContain("flowKindOverride")
         assertThat(csv).contains("\"Coffee, Inc.\"")
         assertThat(csv).contains("\"latte \"\"oat\"\"\"")
 
-        val decoded = CsvCodec.decode(csv).single()
+        val decoded = CsvCodec.decode(csv)
 
-        assertThat(decoded).isEqualTo(sample.copy(id = decoded.id))
-        assertCsvId(decoded.id)
-        assertThat(decoded.id).isNotEqualTo(sample.id)
+        assertThat(decoded[0]).isEqualTo(sample.copy(id = decoded[0].id))
+        assertThat(decoded[1]).isEqualTo(
+            overridden.copy(
+                id = decoded[1].id,
+                flowKind = FlowKind.TRANSFER,
+                flowKindOverride = null,
+            ),
+        )
+        decoded.forEach { transaction ->
+            assertCsvId(transaction.id)
+            assertThat(transaction.id).isNotEqualTo(sample.id)
+        }
     }
 
     @Test
@@ -38,6 +56,80 @@ class CsvCodecTest {
 
         assertThat(decoded).isEqualTo(recurring.copy(id = decoded.id))
         assertCsvId(decoded.id)
+    }
+
+    @Test
+    fun v1CurrentCsvRemainsCompatibleAndKeepsItsStableImportId() {
+        val csv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents,recurring
+            ignored,1766145600000,AUTOPAY PYMT,Other,legacy v1,500,Weekly
+            """.trimIndent()
+
+        val decoded = CsvCodec.decode(csv).single()
+
+        assertThat(decoded.recurringInterval).isEqualTo(RecurrenceInterval.Weekly)
+        assertThat(decoded.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(decoded.flowKindOverride).isNull()
+        assertThat(decoded.id)
+            .isEqualTo("csv:8b1a1c85a305d2e07bef77943b38d0f35ed03023a6f911cc05445558d866afd4")
+    }
+
+    @Test
+    fun legacyAndMonarchRowsClassifySupportedStatementPaymentSigns() {
+        val legacyCsv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents
+            ignored,1766145600000,CREDIT CARD PAYMENT,Other,,-500
+            """.trimIndent()
+        val monarchCsv =
+            """
+            "Account name","Category","Description","Person","Date","Amount","Recurring"
+            "Checking","Other","PAYMENT - THANK YOU","","June 1, 2026",5.00,"No"
+            "Checking","Other","PAYMENT - THANK YOU","","June 2, 2026",-5.00,"No"
+            """.trimIndent()
+
+        val legacy = CsvCodec.decode(legacyCsv).single()
+        val monarch = CsvCodec.decode(monarchCsv)
+
+        assertThat(legacy.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(legacy.id)
+            .isEqualTo("csv:59a791499168bb7684f7a5e80f2b28442e613f2b551207b5e8ba0e7006674d97")
+        assertThat(monarch.map { it.flowKind })
+            .containsExactly(FlowKind.TRANSFER, FlowKind.NORMAL)
+            .inOrder()
+    }
+
+    @Test
+    fun v2RejectsInvalidFlowKindsInsteadOfFallingBackToClassification() {
+        val prefix =
+            "id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind\n" +
+                "ignored,1,PAYMENT - THANK YOU,Other,note,100,,"
+
+        listOf("", "transfer", "UNKNOWN").forEach { invalidFlowKind ->
+            assertThat(runCatching { CsvCodec.decode(prefix + invalidFlowKind) }.isFailure).isTrue()
+        }
+        assertThat(CsvCodec.decode(prefix + "NORMAL").single().flowKind).isEqualTo(FlowKind.NORMAL)
+    }
+
+    @Test
+    fun v2StableIdsDistinguishOtherwiseIdenticalFlowKinds() {
+        val csv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind
+            ignored,1,Same merchant,Other,same note,-100,,NORMAL
+            ignored,1,Same merchant,Other,same note,-100,,TRANSFER
+            """.trimIndent()
+
+        val firstDecode = CsvCodec.decode(csv)
+        val secondDecode = CsvCodec.decode(csv)
+
+        assertThat(firstDecode.map { it.flowKind })
+            .containsExactly(FlowKind.NORMAL, FlowKind.TRANSFER)
+            .inOrder()
+        assertThat(firstDecode.map { it.id }.toSet()).hasSize(2)
+        assertThat(secondDecode.map { it.id }).containsExactlyElementsIn(firstDecode.map { it.id }).inOrder()
+        firstDecode.forEach { assertCsvId(it.id) }
     }
 
     @Test
