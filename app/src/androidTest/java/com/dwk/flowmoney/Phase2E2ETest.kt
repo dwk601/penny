@@ -104,7 +104,7 @@ class Phase2E2ETest {
         composeRule.activityRule.scenario.recreate()
 
         composeRule
-            .onNodeWithTag("merchant_override_field")
+            .onNodeWithTag("merchant_override_field", useUnmergedTree = true)
             .assertTextContains("Edited merchant")
         composeRule.onNodeWithText("RAW PROVIDER DESCRIPTION").assertIsDisplayed()
         composeRule.onNodeWithTag("save_transaction_button").performClick()
