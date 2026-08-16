@@ -2365,7 +2365,7 @@ private fun OverviewPage(
                     RecentTransactionsHeader(
                         title = "Recent",
                         count = sortedTransactions.size,
-                        detail = "${rangeTransactions.size} in range",
+                        detail = "${metrics.transactionCount} in range",
                         actionText = "View all",
                         onAction = onViewAllTransactions,
                     )
@@ -3333,12 +3333,14 @@ private fun InsightsPage(
         remember(rangeTransactions, selectedDailySpend, selectedCategoryTotal) {
             when {
                 selectedDailySpend != null -> {
-                    rangeTransactions.filter { it.cents < 0 && it.localDate() == selectedDailySpend.date }
+                    rangeTransactions.filter {
+                        it.reportingSpendingCategory() != null && it.localDate() == selectedDailySpend.date
+                    }
                 }
 
                 selectedCategoryTotal != null -> {
                     rangeTransactions.filter {
-                        it.cents < 0 && it.insightCategory() == selectedCategoryTotal.category
+                        it.reportingSpendingCategory() == selectedCategoryTotal.category
                     }
                 }
 
@@ -5682,8 +5684,9 @@ internal fun TransactionEditor(
 
     fun updateTransferStatus(treatAsTransfer: Boolean) {
         val selectedFlowKind = if (treatAsTransfer) FlowKind.TRANSFER else FlowKind.NORMAL
-        if (selectedFlowKind != draft.effectiveFlowKind) {
-            onDraftChange(draft.copy(flowKindOverride = selectedFlowKind))
+        val updatedOverride = selectedFlowKind.takeUnless { it == draft.flowKind }
+        if (updatedOverride != draft.flowKindOverride) {
+            onDraftChange(draft.copy(flowKindOverride = updatedOverride))
         }
     }
 
@@ -6786,8 +6789,6 @@ private fun SimpleFinSyncResult.snackbarMessage(): String =
             "Sync recently run. Try again later."
         }
     }
-
-private fun Transaction.insightCategory(): String = category.trim().ifBlank { "Other" }
 
 private fun LocalDateTime.toEpochMillis(): Long = atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
 

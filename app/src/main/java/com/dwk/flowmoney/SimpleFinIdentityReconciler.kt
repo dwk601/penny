@@ -238,6 +238,7 @@ internal object SimpleFinIdentityReconciler {
             recurringInterval = ranked.firstOrNull { it.recurringInterval != null }?.recurringInterval,
             reviewedAtEpochMillis = ranked.firstOrNull { it.reviewedAtEpochMillis != null }?.reviewedAtEpochMillis,
             merchantOverride = ranked.firstOrNull { it.merchantOverride != null }?.merchantOverride,
+            flowKindOverride = ranked.firstOrNull { it.flowKindOverride != null }?.flowKindOverride,
             source = "simplefin",
             accountKey = stableAccountId,
             accountName = accountNames[stableAccountId] ?: base.accountName,

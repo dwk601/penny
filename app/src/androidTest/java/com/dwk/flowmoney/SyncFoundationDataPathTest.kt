@@ -274,6 +274,7 @@ class SyncFoundationDataPathTest {
                             cents = -250,
                             recurringInterval = RecurrenceInterval.Monthly,
                             merchantOverride = "Market Display",
+                            flowKindOverride = FlowKind.TRANSFER,
                         )
 
                 val applied =
@@ -293,6 +294,7 @@ class SyncFoundationDataPathTest {
                         recurringInterval = "Monthly",
                         reviewedAtEpochMillis = 7_000L,
                         merchantOverride = "Market Display",
+                        flowKindOverride = FlowKind.TRANSFER,
                     ),
                     dao.getAll().single(),
                 )
@@ -322,6 +324,7 @@ class SyncFoundationDataPathTest {
                             category = "Food",
                             note = "Must not persist",
                             merchantOverride = "New display",
+                            flowKindOverride = FlowKind.TRANSFER,
                         )
 
                 val result =
@@ -350,6 +353,8 @@ class SyncFoundationDataPathTest {
                         accountKey = "old-account",
                         accountName = "Old Checking",
                         providerDescription = "RAW OLD",
+                        flowKind = FlowKind.TRANSFER,
+                        flowKindOverride = FlowKind.NORMAL,
                     )
                 val previousRule = MerchantRuleEntity("undo market", "Travel", "Old rule display")
                 dao.upsert(origin)
@@ -365,6 +370,7 @@ class SyncFoundationDataPathTest {
                             cents = -222,
                             recurringInterval = RecurrenceInterval.Monthly,
                             merchantOverride = "New display",
+                            flowKindOverride = FlowKind.TRANSFER,
                         )
 
                 val firstSave =
@@ -395,6 +401,7 @@ class SyncFoundationDataPathTest {
                         accountKey = "new-account",
                         accountName = "New Checking",
                         providerDescription = "RAW REFRESHED",
+                        flowKind = FlowKind.NORMAL,
                     )
                 dao.upsertSyncedTransactionsIgnoringTombstones(listOf(refreshed))
                 repository.undoMerchantRuleSave(secondSave.undoToken)

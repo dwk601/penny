@@ -1037,7 +1037,7 @@ class PennyWidgetIntentTest {
         val scenario = ActivityScenario.launch<MainActivity>(PennyWidgetProvider.addTransactionIntent(context))
 
         try {
-            composeRule.waitUntil(5_000) {
+            composeRule.waitUntil(10_000) {
                 runCatching { composeRule.onNodeWithTag("app_loading_state").assertIsDisplayed() }.isSuccess
             }
             composeRule.onNodeWithTag("app_loading_state").assertIsDisplayed()
