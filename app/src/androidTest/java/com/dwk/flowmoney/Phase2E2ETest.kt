@@ -27,6 +27,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -84,14 +85,18 @@ class Phase2E2ETest {
                 source = "simplefin",
                 accountKey = "account-key",
                 accountName = "Checking",
-            ).copy(providerDescription = "RAW PROVIDER DESCRIPTION")
+            ).copy(
+                providerDescription = "RAW PROVIDER DESCRIPTION",
+                flowKind = FlowKind.TRANSFER,
+            )
         seed(original)
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithTag("tab_review").assertIsSelected() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("tab_overview").assertIsSelected() }.isSuccess
         }
         waitForMerchant(original.merchant)
 
-        composeRule.onNodeWithTag("tab_review").assertIsSelected()
+        composeRule.onNodeWithTag("tab_overview").assertIsSelected()
+        composeRule.onNodeWithTag("tab_review").assertDoesNotExist()
         composeRule.onNodeWithTag("tab_transactions").performClick()
         composeRule.onNodeWithTag("transaction_content_${original.id}").assertIsDisplayed().performClick()
         composeRule.onNodeWithText("RAW PROVIDER DESCRIPTION").assertIsDisplayed()
@@ -117,7 +122,9 @@ class Phase2E2ETest {
         assertEquals(original.category, saved.category)
         assertEquals(original.note, saved.note)
         assertEquals(original.cents, saved.cents)
-        assertEquals(original.reviewedAtEpochMillis, saved.reviewedAtEpochMillis)
+        assertEquals(original.flowKind, saved.flowKind)
+        assertEquals(original.flowKindOverride, saved.flowKindOverride)
+        assertNotNull(saved.reviewedAtEpochMillis)
     }
 
     @Test

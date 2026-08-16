@@ -29,7 +29,7 @@ class ColdStartNavigationUiTest {
     }
 
     @Test
-    fun startupSyncRowsAreIncludedBeforeTheOneColdStartRoutingDecision() {
+    fun startupSyncRowsKeepColdStartOnOverviewAndOfferOptionalCorrections() {
         FlowMoneyDatabase.resetForTest()
         val pending = pendingTransaction()
         val gateway = StartupSyncGateway()
@@ -56,9 +56,13 @@ class ColdStartNavigationUiTest {
         }
 
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithTag("tab_review").assertIsSelected() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("overview_review_action").assertExists() }.isSuccess
         }
-        composeRule.onNodeWithTag("tab_review").assertIsSelected()
+        composeRule.onNodeWithTag("tab_overview").assertIsSelected()
+        composeRule.onNodeWithTag("tab_review").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_row_pending-after-restore").assertDoesNotExist()
+
+        composeRule.onNodeWithTag("overview_review_action").performClick()
         composeRule.onNodeWithTag("review_row_pending-after-restore").assertExists()
         store.clear()
     }

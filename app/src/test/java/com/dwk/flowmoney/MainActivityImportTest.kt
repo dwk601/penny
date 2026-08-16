@@ -78,6 +78,8 @@ class MainActivityImportTest {
         assertThat(restored.reviewedAtEpochMillis).isNull()
         assertThat(restored.providerDescription).isNull()
         assertThat(restored.merchantOverride).isNull()
+        assertThat(restored.flowKind).isEqualTo(FlowKind.NORMAL)
+        assertThat(restored.flowKindOverride).isNull()
     }
 
     @Test fun truncatedEditorDraftShapeUsesSizeCheckedDefaults() {
@@ -90,40 +92,91 @@ class MainActivityImportTest {
         assertThat(restored.accountKey).isNull()
     }
 
-    @Test fun trueColdStartRoutesToReviewOnceAndOnlyWhenPending() {
+    @Test fun trueColdStartCompletesOnOverview() {
         val routed =
-            routeTrueColdStartToReview(
-                state = DashboardNavigationState(),
+            completeColdStartNavigation(
+                state = DashboardNavigationState(selectedTab = DashboardTab.Review),
                 isLoading = false,
-                pendingReviewCount = 2,
             )
 
-        assertThat(routed.selectedTab).isEqualTo(DashboardTab.Review)
-        assertThat(routed.coldStartReviewHandled).isTrue()
-        assertThat(
-            routeTrueColdStartToReview(routed, isLoading = false, pendingReviewCount = 5),
-        ).isEqualTo(routed)
-        assertThat(
-            routeTrueColdStartToReview(DashboardNavigationState(), isLoading = false, pendingReviewCount = 0).selectedTab,
-        ).isEqualTo(DashboardTab.Overview)
+        assertThat(routed.selectedTab).isEqualTo(DashboardTab.Overview)
+        assertThat(routed.coldStartRoutingHandled).isTrue()
+        assertThat(completeColdStartNavigation(routed, isLoading = false)).isEqualTo(routed)
     }
 
-    @Test fun coldStartReviewNeverOverridesRestoredUserOrExternalNavigation() {
+    @Test fun coldStartNeverOverridesRestoredUserOrExternalNavigation() {
         val protectedStates =
             listOf(
                 DashboardNavigationState(selectedTab = DashboardTab.Insights, restoredNavigation = true),
                 DashboardNavigationState(selectedTab = DashboardTab.Transactions, userSelectedBeforeLoading = true),
-                DashboardNavigationState(selectedTab = DashboardTab.Overview, externalRouteHandled = true),
+                DashboardNavigationState(selectedTab = DashboardTab.Review, externalRouteHandled = true),
             )
 
         protectedStates.forEach { state ->
-            val routed = routeTrueColdStartToReview(state, isLoading = false, pendingReviewCount = 3)
+            val routed = completeColdStartNavigation(state, isLoading = false)
             assertThat(routed.selectedTab).isEqualTo(state.selectedTab)
-            assertThat(routed.coldStartReviewHandled).isTrue()
+            assertThat(routed.coldStartRoutingHandled).isTrue()
         }
         assertThat(
-            routeTrueColdStartToReview(DashboardNavigationState(), isLoading = true, pendingReviewCount = 3),
+            completeColdStartNavigation(DashboardNavigationState(), isLoading = true),
         ).isEqualTo(DashboardNavigationState())
+    }
+
+    @Test fun editorDraftRoundTripPreservesTransferClassificationAndExplicitOverride() {
+        val original =
+            transaction("transfer", LocalDate.of(2026, 7, 10), -500)
+                .copy(
+                    source = "simplefin",
+                    providerMerchant = "Provider transfer",
+                    flowKind = FlowKind.TRANSFER,
+                    flowKindOverride = FlowKind.NORMAL,
+                ).toEditorDraft()
+
+        val restored = restoreEditorDraft(saveEditorDraft(original))
+        val converted = restored.toTransaction()
+
+        assertThat(restored.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(restored.flowKindOverride).isEqualTo(FlowKind.NORMAL)
+        assertThat(restored.effectiveFlowKind).isEqualTo(FlowKind.NORMAL)
+        assertThat(converted.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(converted.flowKindOverride).isEqualTo(FlowKind.NORMAL)
+    }
+
+    @Test fun explicitTransferCorrectionsEncodeTheSelectedState() {
+        val providerTransfer =
+            transaction("provider-transfer", LocalDate.of(2026, 7, 10), -500)
+                .copy(
+                    source = "simplefin",
+                    providerMerchant = "Provider transfer",
+                    flowKind = FlowKind.TRANSFER,
+                ).toEditorDraft()
+        val normal =
+            transaction("normal", LocalDate.of(2026, 7, 10), -500)
+                .toEditorDraft()
+
+        val correctedNormal = providerTransfer.copy(flowKindOverride = FlowKind.NORMAL).toTransaction()
+        val correctedTransfer = normal.copy(flowKindOverride = FlowKind.TRANSFER).toTransaction()
+
+        assertThat(correctedNormal.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(correctedNormal.flowKindOverride).isEqualTo(FlowKind.NORMAL)
+        assertThat(correctedTransfer.flowKind).isEqualTo(FlowKind.NORMAL)
+        assertThat(correctedTransfer.flowKindOverride).isEqualTo(FlowKind.TRANSFER)
+    }
+
+    @Test fun editorSaveMarksOnlyExistingSimpleFinDraftReviewed() {
+        val existingSimpleFin =
+            transaction("synced", LocalDate.of(2026, 7, 10), -500)
+                .copy(source = "simplefin", providerMerchant = "Provider")
+                .toEditorDraft()
+        val existingLocal = transaction("local", LocalDate.of(2026, 7, 10), -500).toEditorDraft()
+
+        val reviewed = existingSimpleFin.prepareForEditorSave("synced", nowEpochMillis = 1234L)
+        val local = existingLocal.prepareForEditorSave("local", nowEpochMillis = 1234L)
+        val newLocal = newEditorDraft().prepareForEditorSave("new-local", nowEpochMillis = 1234L)
+
+        assertThat(reviewed.reviewedAtEpochMillis).isEqualTo(1234L)
+        assertThat(local.reviewedAtEpochMillis).isNull()
+        assertThat(newLocal.reviewedAtEpochMillis).isNull()
     }
 
     @Test fun syncHealthUsesRepositoryEligibilityAndNeverOffersCooldownBypass() {

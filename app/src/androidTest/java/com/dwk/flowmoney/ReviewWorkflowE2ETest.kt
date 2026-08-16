@@ -60,14 +60,11 @@ class ReviewWorkflowE2ETest {
     }
 
     @Test
-    fun trueColdStartCategorizesWithOneUndoAndRefreshesReactiveQueue() {
+    fun coldStartOptionalCorrectionEntryCategorizesWithOneUndoAndRefreshesReactiveQueue() {
         insertUnreviewed("review-one", "Coffee Shop", 1_800_000_000_000L)
 
         ActivityScenario.launch(MainActivity::class.java).use {
-            composeRule.waitUntil(5_000) {
-                runCatching { composeRule.onNodeWithTag("tab_review").assertIsSelected() }.isSuccess
-            }
-            composeRule.onNodeWithTag("tab_review").assertIsSelected()
+            openOptionalCorrections()
             composeRule.onNodeWithTag("review_row_review-one").assertIsDisplayed()
             composeRule.onNodeWithTag("review_category_review-one_food").performClick()
 
@@ -96,9 +93,7 @@ class ReviewWorkflowE2ETest {
         }
 
         ActivityScenario.launch(MainActivity::class.java).use {
-            composeRule.waitUntil(5_000) {
-                composeRule.onAllNodesWithText("Use for future").fetchSemanticsNodes().isNotEmpty()
-            }
+            openOptionalCorrections()
             composeRule.onNodeWithTag("review_use_future_rule-origin").performClick()
             composeRule.onNodeWithTag("review_category_rule-origin_food").performClick()
 
@@ -136,7 +131,7 @@ class ReviewWorkflowE2ETest {
 
         ActivityScenario.launch(MainActivity::class.java).use {
             composeRule.waitUntil(5_000) {
-                runCatching { composeRule.onNodeWithTag("tab_review").assertIsSelected() }.isSuccess
+                runCatching { composeRule.onNodeWithTag("tab_overview").assertIsSelected() }.isSuccess
             }
             composeRule.onNodeWithTag("tab_transactions").performClick()
             composeRule.onNodeWithTag("transaction_content_editor-rule").assertIsDisplayed().performClick()
@@ -177,9 +172,7 @@ class ReviewWorkflowE2ETest {
         insertUnreviewed("bulk-old", "Old Merchant", 1_800_000_000_000L)
 
         ActivityScenario.launch(MainActivity::class.java).use {
-            composeRule.waitUntil(5_000) {
-                composeRule.onAllNodesWithText("Select").fetchSemanticsNodes().isNotEmpty()
-            }
+            openOptionalCorrections()
             composeRule.onNodeWithTag("review_select_action").performClick()
             listOf("bulk-new", "bulk-old").forEach { id ->
                 composeRule
@@ -207,6 +200,15 @@ class ReviewWorkflowE2ETest {
             }
             assertEquals(setOf("Other"), listOf(row("bulk-new"), row("bulk-old")).map { it.category }.toSet())
         }
+    }
+
+    private fun openOptionalCorrections() {
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed() }.isSuccess
+        }
+        composeRule.onNodeWithTag("tab_overview").assertIsSelected()
+        composeRule.onNodeWithTag("tab_review").assertDoesNotExist()
+        composeRule.onNodeWithTag("overview_review_action").performClick()
     }
 
     private fun insertUnreviewed(

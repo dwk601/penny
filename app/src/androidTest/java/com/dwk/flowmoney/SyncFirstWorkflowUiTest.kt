@@ -299,6 +299,8 @@ class SyncFirstWorkflowUiTest {
                     providerDescription = "RAW PROVIDER DESCRIPTION 123",
                     merchantOverride = null,
                     providerMerchant = "Provider Cafe",
+                    flowKind = FlowKind.NORMAL,
+                    flowKindOverride = null,
                 ),
             )
         var futureSave: Transaction? = null
@@ -347,6 +349,92 @@ class SyncFirstWorkflowUiTest {
             assertEquals("RAW PROVIDER DESCRIPTION 123", futureSave?.providerDescription)
             assertEquals("Provider Cafe", futureSave?.providerMerchant)
             assertEquals("Checking", futureSave?.accountName)
+        }
+    }
+
+    @Test
+    fun providerTransferCanBeExplicitlyCorrectedToNormalWithoutChangingClassification() {
+        val transaction =
+            syncedTransaction("provider-transfer", LocalDate.of(2026, 7, 10))
+                .copy(flowKind = FlowKind.TRANSFER)
+        var draft by mutableStateOf(transaction.toEditorDraft())
+        var saved: Transaction? = null
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                TransactionEditor(
+                    transaction = transaction,
+                    draft = draft,
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = { draft = it },
+                    onSave = { saved = it },
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
+            .performScrollToNode(hasTestTag("transfer_status_control"))
+        composeRule
+            .onNodeWithTag("transfer_status_control")
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.StateDescription,
+                    "Treat as transfer",
+                ),
+            )
+        composeRule.onNodeWithTag("transfer_status_transfer").assertIsSelected()
+        composeRule.onNodeWithTag("transfer_status_not_transfer").performClick().assertIsSelected()
+        composeRule
+            .onNodeWithTag("transfer_status_control")
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.StateDescription,
+                    "Not a transfer",
+                ),
+            )
+        composeRule.onNodeWithTag("save_transaction_button").performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(FlowKind.TRANSFER, saved?.flowKind)
+            assertEquals(FlowKind.NORMAL, saved?.flowKindOverride)
+        }
+    }
+
+    @Test
+    fun normalTransactionCanBeExplicitlyTreatedAsTransfer() {
+        val transaction = syncedTransaction("normal-flow", LocalDate.of(2026, 7, 10))
+        var draft by mutableStateOf(transaction.toEditorDraft())
+        var saved: Transaction? = null
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                TransactionEditor(
+                    transaction = transaction,
+                    draft = draft,
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = { draft = it },
+                    onSave = { saved = it },
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
+            .performScrollToNode(hasTestTag("transfer_status_control"))
+        composeRule.onNodeWithTag("transfer_status_not_transfer").assertIsSelected()
+        composeRule.onNodeWithTag("transfer_status_transfer").performClick().assertIsSelected()
+        composeRule.onNodeWithTag("save_transaction_button").performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(FlowKind.NORMAL, saved?.flowKind)
+            assertEquals(FlowKind.TRANSFER, saved?.flowKindOverride)
         }
     }
 
