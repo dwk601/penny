@@ -12,6 +12,15 @@ class TransactionClassifierTest {
     }
 
     @Test
+    fun automaticPaymentIsCardSideTransferOnlyForPositiveAmounts() {
+        assertKind("AUTOMATIC PAYMENT", 100, FlowKind.TRANSFER)
+        assertKind("  automatic payment  ", 100, FlowKind.TRANSFER)
+        assertKind("AUTOMATIC PAYMENT", -100, FlowKind.NORMAL)
+        assertKind("AUTOMATIC PAYMENT", 0, FlowKind.NORMAL)
+        assertKind("AUTOMATIC PAYMENT PLAN", 100, FlowKind.NORMAL)
+    }
+
+    @Test
     fun signMismatchesAndZeroAmountsStayNormal() {
         cardSideDescriptors.forEach { description ->
             assertKind(description, -12_345, FlowKind.NORMAL)

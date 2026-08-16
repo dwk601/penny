@@ -19,7 +19,8 @@ object TransactionClassifier {
     }
 
     private fun String.isCardSideStatementPayment(): Boolean =
-        (startsWith("AUTOMATIC PAYMENT ") && endsWith(" THANK")) ||
+        this == "AUTOMATIC PAYMENT" ||
+            (startsWith("AUTOMATIC PAYMENT ") && endsWith(" THANK")) ||
             this == "PAYMENT - THANK YOU" ||
             this == "AUTOPAY PYMT"
 
