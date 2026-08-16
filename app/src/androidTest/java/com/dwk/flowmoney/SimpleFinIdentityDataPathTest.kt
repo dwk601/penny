@@ -55,6 +55,7 @@ class SimpleFinIdentityDataPathTest {
                         FlowMoneyDatabase.MIGRATION_6_7,
                         FlowMoneyDatabase.MIGRATION_7_8,
                         FlowMoneyDatabase.MIGRATION_8_9,
+                        FlowMoneyDatabase.MIGRATION_9_10,
                     ).build()
             try {
                 assertEquals(
@@ -111,6 +112,7 @@ class SimpleFinIdentityDataPathTest {
                         FlowMoneyDatabase.MIGRATION_6_7,
                         FlowMoneyDatabase.MIGRATION_7_8,
                         FlowMoneyDatabase.MIGRATION_8_9,
+                        FlowMoneyDatabase.MIGRATION_9_10,
                     ).build()
             val fake = FakeFunctions()
             fake.credential = CONNECTION_ONE to FIRST_ACCESS_URL

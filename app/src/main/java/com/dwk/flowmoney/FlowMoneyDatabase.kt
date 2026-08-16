@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SimpleFinIdentityStateEntity::class,
         MerchantRuleEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 abstract class FlowMoneyDatabase : RoomDatabase() {
@@ -45,6 +45,7 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                         MIGRATION_6_7,
                         MIGRATION_7_8,
                         MIGRATION_8_9,
+                        MIGRATION_9_10,
                     ).build()
                     .also { instance = it }
             }
@@ -181,6 +182,17 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                             "(UPPER(TRIM(providerDescription)) LIKE 'CARDMEMBER SERVICE %' AND " +
                             "UPPER(TRIM(providerDescription)) LIKE '% PAY') OR " +
                             "UPPER(TRIM(providerDescription)) = 'CREDIT CARD PAYMENT')))",
+                    )
+                }
+            }
+
+        internal val MIGRATION_9_10: Migration =
+            object : Migration(9, 10) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "UPDATE transactions SET flowKind = 'TRANSFER' " +
+                            "WHERE source = 'simplefin' AND cents > 0 AND flowKind = 'NORMAL' AND " +
+                            "UPPER(TRIM(providerDescription)) = 'AUTOMATIC PAYMENT'",
                     )
                 }
             }
