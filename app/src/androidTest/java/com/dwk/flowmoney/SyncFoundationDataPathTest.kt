@@ -40,8 +40,11 @@ class SyncFoundationDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_7_8, FlowMoneyDatabase.MIGRATION_8_9)
-                    .build()
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_7_8,
+                        FlowMoneyDatabase.MIGRATION_8_9,
+                        FlowMoneyDatabase.MIGRATION_9_10,
+                    ).build()
             try {
                 val rows = migrated.transactionDao().getAll().associateBy { it.id }
                 assertNotNull(rows.getValue("manual").reviewedAtEpochMillis)
@@ -97,7 +100,7 @@ class SyncFoundationDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_8_9)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_8_9, FlowMoneyDatabase.MIGRATION_9_10)
                     .build()
             try {
                 val rows = migrated.transactionDao().getAll().associateBy { it.id }
@@ -119,6 +122,73 @@ class SyncFoundationDataPathTest {
                 assertEquals(FlowKind.NORMAL, rows.getValue("p2p").effectiveFlowKind)
                 assertEquals(FlowKind.NORMAL, rows.getValue("local").effectiveFlowKind)
                 assertEquals(FlowKind.NORMAL, rows.getValue("missing-description").effectiveFlowKind)
+            } finally {
+                migrated.close()
+                context.deleteDatabase(name)
+            }
+        }
+
+    @Test
+    fun version9MigratesTo10ForExactPositiveSimpleFinAutomaticPaymentsOnly() =
+        runBlocking {
+            val name = "automatic-payment-v9-${UUID.randomUUID()}.db"
+            val file = context.getDatabasePath(name)
+            context.deleteDatabase(name)
+            SQLiteDatabase.openOrCreateDatabase(file, null).use { raw ->
+                createVersion9Schema(raw)
+                insertVersion9Transaction(raw, "exact", "simplefin", 100, "AUTOMATIC PAYMENT")
+                insertVersion9Transaction(raw, "normalized", "simplefin", 100, "  automatic payment  ")
+                insertVersion9Transaction(
+                    raw,
+                    "normal-override",
+                    "simplefin",
+                    100,
+                    "Automatic Payment",
+                    flowKindOverride = FlowKind.NORMAL,
+                )
+                insertVersion9Transaction(
+                    raw,
+                    "transfer-override",
+                    "simplefin",
+                    100,
+                    "AUTOMATIC PAYMENT",
+                    flowKindOverride = FlowKind.TRANSFER,
+                )
+                insertVersion9Transaction(
+                    raw,
+                    "already-transfer",
+                    "simplefin",
+                    100,
+                    "AUTOMATIC PAYMENT",
+                    flowKind = FlowKind.TRANSFER,
+                )
+                insertVersion9Transaction(raw, "local", "local", 100, "AUTOMATIC PAYMENT")
+                insertVersion9Transaction(raw, "wrong-sign", "simplefin", -100, "AUTOMATIC PAYMENT")
+                insertVersion9Transaction(raw, "zero", "simplefin", 0, "AUTOMATIC PAYMENT")
+                insertVersion9Transaction(raw, "suffix", "simplefin", 100, "AUTOMATIC PAYMENT FEE")
+                insertVersion9Transaction(raw, "prefix", "simplefin", 100, "ONLINE AUTOMATIC PAYMENT")
+                insertVersion9Transaction(raw, "internal-space", "simplefin", 100, "AUTOMATIC  PAYMENT")
+                raw.version = 9
+            }
+
+            val migrated =
+                Room
+                    .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_9_10)
+                    .build()
+            try {
+                val rows = migrated.transactionDao().getAll().associateBy { it.id }
+                assertEquals(
+                    setOf("exact", "normalized", "normal-override", "transfer-override", "already-transfer"),
+                    rows.values.filter { it.flowKind == FlowKind.TRANSFER }.mapTo(mutableSetOf()) { it.id },
+                )
+                assertEquals(
+                    setOf("local", "wrong-sign", "zero", "suffix", "prefix", "internal-space"),
+                    rows.values.filter { it.flowKind == FlowKind.NORMAL }.mapTo(mutableSetOf()) { it.id },
+                )
+                assertEquals(FlowKind.NORMAL, rows.getValue("normal-override").flowKindOverride)
+                assertEquals(FlowKind.NORMAL, rows.getValue("normal-override").effectiveFlowKind)
+                assertEquals(FlowKind.TRANSFER, rows.getValue("transfer-override").flowKindOverride)
             } finally {
                 migrated.close()
                 context.deleteDatabase(name)
@@ -753,6 +823,40 @@ class SyncFoundationDataPathTest {
         raw.execSQL(
             "CREATE INDEX index_simplefin_ignored_transactions_occurredAtEpochMillis " +
                 "ON simplefin_ignored_transactions(occurredAtEpochMillis)",
+        )
+    }
+
+    private fun createVersion9Schema(raw: SQLiteDatabase) {
+        createVersion8Schema(raw)
+        raw.execSQL("ALTER TABLE transactions ADD COLUMN flowKind TEXT NOT NULL DEFAULT 'NORMAL'")
+        raw.execSQL("ALTER TABLE transactions ADD COLUMN flowKindOverride TEXT")
+    }
+
+    private fun insertVersion9Transaction(
+        raw: SQLiteDatabase,
+        id: String,
+        source: String,
+        cents: Int,
+        providerDescription: String?,
+        flowKind: FlowKind = FlowKind.NORMAL,
+        flowKindOverride: FlowKind? = null,
+    ) {
+        raw.execSQL(
+            "INSERT INTO transactions " +
+                "(id, occurredAtEpochMillis, merchant, category, note, cents, source, providerDescription, " +
+                "flowKind, flowKindOverride) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            arrayOf<Any?>(
+                id,
+                1L,
+                id,
+                "Other",
+                "",
+                cents,
+                source,
+                providerDescription,
+                flowKind.name,
+                flowKindOverride?.name,
+            ),
         )
     }
 
