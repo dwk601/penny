@@ -51,6 +51,7 @@ object SimpleFinMapper {
                         accountKey = accountKey,
                         accountName = account.name,
                         providerDescription = tx.description,
+                        flowKind = TransactionClassifier.classify(tx.description, cents),
                     )
                 }
             }

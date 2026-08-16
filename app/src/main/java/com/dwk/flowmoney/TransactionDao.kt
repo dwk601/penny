@@ -408,13 +408,7 @@ interface TransactionDao {
         merchantRules: List<MerchantRuleEntity> = emptyList(),
         reviewedAtEpochMillis: Long = System.currentTimeMillis(),
     ): SyncedTransactionWriteResult {
-        val conflictingRule =
-            merchantRules
-                .groupBy { normalizedProviderMerchantKey(it.normalizedProviderMerchant) }
-                .values
-                .firstOrNull { rules -> rules.distinct().size > 1 }
-        require(conflictingRule == null) { "Conflicting normalized merchant rules" }
-        val rulesByKey = merchantRules.associateBy { it.normalizedProviderMerchant }
+        val ruleLookup = MerchantRuleLookup.from(merchantRules)
         val unique = transactions.distinctBy { it.id }
         val ignored =
             unique
@@ -442,25 +436,39 @@ interface TransactionDao {
                 when {
                     current == null -> {
                         inserted++
-                        val rule = rulesByKey[normalizedProviderMerchantKey(incoming.merchant)]
+                        val rule = ruleLookup.ruleFor(incoming.merchant)
+                        val shouldAutoReview =
+                            rule != null || incoming.effectiveFlowKind == FlowKind.TRANSFER
                         incoming.copy(
                             category = rule?.category ?: incoming.category,
                             source = "simplefin",
-                            reviewedAtEpochMillis = rule?.let { reviewedAtEpochMillis },
-                            merchantOverride = rule?.merchantOverride,
+                            reviewedAtEpochMillis =
+                                incoming.reviewedAtEpochMillis
+                                    ?: reviewedAtEpochMillis.takeIf { shouldAutoReview },
+                            merchantOverride =
+                                if (rule == null) incoming.merchantOverride else rule.merchantOverride,
                         )
                     }
 
                     current.source == "simplefin" -> {
                         updated++
-                        current.copy(
-                            occurredAtEpochMillis = incoming.occurredAtEpochMillis,
-                            merchant = incoming.merchant,
-                            cents = incoming.cents,
-                            source = "simplefin",
-                            accountKey = incoming.accountKey,
-                            accountName = incoming.accountName,
-                            providerDescription = incoming.providerDescription,
+                        val providerRefreshed =
+                            current.copy(
+                                occurredAtEpochMillis = incoming.occurredAtEpochMillis,
+                                merchant = incoming.merchant,
+                                cents = incoming.cents,
+                                source = "simplefin",
+                                accountKey = incoming.accountKey,
+                                accountName = incoming.accountName,
+                                providerDescription = incoming.providerDescription,
+                                flowKind = incoming.flowKind,
+                            )
+                        providerRefreshed.copy(
+                            reviewedAtEpochMillis =
+                                current.reviewedAtEpochMillis
+                                    ?: reviewedAtEpochMillis.takeIf {
+                                        providerRefreshed.effectiveFlowKind == FlowKind.TRANSFER
+                                    },
                         )
                     }
 
@@ -523,6 +531,41 @@ interface TransactionDao {
     }
 }
 
+private data class MerchantRuleLookup(
+    private val exactRules: Map<String, MerchantRuleEntity>,
+    private val canonicalRules: Map<String, MerchantRuleEntity>,
+) {
+    fun ruleFor(providerMerchant: String): MerchantRuleEntity? {
+        val exactKey = normalizedProviderMerchantKey(providerMerchant)
+        return exactRules[exactKey]
+            ?: canonicalProviderMerchantKey(exactKey)?.let(canonicalRules::get)
+    }
+
+    companion object {
+        fun from(rules: List<MerchantRuleEntity>): MerchantRuleLookup {
+            val rulesByExactKey =
+                rules.groupBy { normalizedProviderMerchantKey(it.normalizedProviderMerchant) }
+            val conflictingRule =
+                rulesByExactKey.values.firstOrNull { exactRules -> exactRules.distinct().size > 1 }
+            require(conflictingRule == null) { "Conflicting normalized merchant rules" }
+
+            val exactRules =
+                rulesByExactKey.mapValues { (_, exactRules) -> exactRules.distinct().single() }
+            val canonicalRules =
+                exactRules.values
+                    .mapNotNull { rule ->
+                        canonicalProviderMerchantKey(rule.normalizedProviderMerchant)?.let { key ->
+                            key to rule
+                        }
+                    }.groupBy(keySelector = { it.first }, valueTransform = { it.second })
+                    .mapNotNull { (key, canonicalMatches) ->
+                        canonicalMatches.singleOrNull()?.let { key to it }
+                    }.toMap()
+            return MerchantRuleLookup(exactRules, canonicalRules)
+        }
+    }
+}
+
 private fun TransactionEntity.hasSameProviderStateAs(other: TransactionEntity): Boolean =
     occurredAtEpochMillis == other.occurredAtEpochMillis &&
         merchant == other.merchant &&
@@ -530,4 +573,5 @@ private fun TransactionEntity.hasSameProviderStateAs(other: TransactionEntity): 
         source == other.source &&
         accountKey == other.accountKey &&
         accountName == other.accountName &&
-        providerDescription == other.providerDescription
+        providerDescription == other.providerDescription &&
+        flowKind == other.flowKind

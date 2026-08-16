@@ -469,7 +469,7 @@ class SyncFoundationDataPathTest {
         }
 
     @Test
-    fun syncRefreshesProviderFieldsPreservesUserFieldsAndRulesOnlyNewRows() =
+    fun syncRefreshesProviderFieldsPreservesUserFieldsAndAutoReviewsNewMatchesAndTransfers() =
         runBlocking {
             withDatabase { db ->
                 val origin = SimpleFinServerOrigin.fromAccessUrl(ACCESS_URL)
@@ -478,12 +478,18 @@ class SyncFoundationDataPathTest {
                 val existingIncoming = mapped.values.single { it.id.endsWith(":ZXhpc3Rpbmc") }
                 db.transactionDao().upsert(
                     existingIncoming.copy(
+                        occurredAtEpochMillis = 1,
+                        merchant = "Stale provider merchant",
                         category = "User category",
                         note = "User note",
+                        cents = -999,
                         recurringInterval = "Monthly",
+                        accountKey = "stale-account",
+                        accountName = "Stale account",
                         reviewedAtEpochMillis = 123,
                         providerDescription = "Stale raw",
                         merchantOverride = "User display",
+                        flowKindOverride = FlowKind.NORMAL,
                     ),
                 )
                 db.transactionDao().insertMerchantRule(
@@ -495,7 +501,13 @@ class SyncFoundationDataPathTest {
                 )
                 db.simpleFinIdentityDao().upsertState(SimpleFinIdentityStateEntity(reconciliationComplete = true))
                 db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
-                val fake = FakeFunctions(accounts(existingDescription = "Refreshed raw", newDescription = "Brand new raw"))
+                val fake =
+                    FakeFunctions(
+                        accounts(
+                            existingDescription = "CREDIT CARD PAYMENT",
+                            newDescription = "Brand new raw",
+                        ),
+                    )
                 val repository = SimpleFinSyncRepository(db, fake.bundle())
 
                 val result = repository.syncNow()
@@ -503,19 +515,96 @@ class SyncFoundationDataPathTest {
                 assertTrue(result is SimpleFinSyncResult.Success)
                 val rows = db.transactionDao().getAll().associateBy { it.id }
                 val existing = rows.getValue(existingIncoming.id)
-                assertEquals("Refreshed raw", existing.providerDescription)
+                assertEquals(10_000L, existing.occurredAtEpochMillis)
+                assertEquals("Market #42 Downtown", existing.merchant)
+                assertEquals(-100, existing.cents)
+                assertEquals(existingIncoming.accountKey, existing.accountKey)
+                assertEquals("Checking", existing.accountName)
+                assertEquals("CREDIT CARD PAYMENT", existing.providerDescription)
                 assertEquals("User category", existing.category)
                 assertEquals("User note", existing.note)
                 assertEquals("Monthly", existing.recurringInterval)
                 assertEquals(123L, existing.reviewedAtEpochMillis)
                 assertEquals("User display", existing.merchantOverride)
+                assertEquals(FlowKind.TRANSFER, existing.flowKind)
+                assertEquals(FlowKind.NORMAL, existing.flowKindOverride)
+                assertEquals(FlowKind.NORMAL, existing.effectiveFlowKind)
 
-                val inserted = rows.values.single { it.id != existing.id }
-                assertEquals("Brand new raw", inserted.providerDescription)
-                assertEquals("Food", inserted.category)
-                assertEquals("Downtown Market", inserted.merchantOverride)
-                assertEquals(fake.currentTime, inserted.reviewedAtEpochMillis)
-                assertFalse(inserted.isUnreviewed)
+                val ruleMatch = rows.values.single { it.providerDescription == "Brand new raw" }
+                assertEquals("Food", ruleMatch.category)
+                assertEquals("Downtown Market", ruleMatch.merchantOverride)
+                assertEquals(FlowKind.NORMAL, ruleMatch.flowKind)
+                assertEquals(fake.currentTime, ruleMatch.reviewedAtEpochMillis)
+                assertFalse(ruleMatch.isUnreviewed)
+
+                val transfer = rows.values.single { it.merchant == "Card payment" }
+                assertEquals("Other", transfer.category)
+                assertEquals(FlowKind.TRANSFER, transfer.flowKind)
+                assertEquals(FlowKind.TRANSFER, transfer.effectiveFlowKind)
+                assertEquals(fake.currentTime, transfer.reviewedAtEpochMillis)
+                assertFalse(transfer.isUnreviewed)
+            }
+        }
+
+    @Test
+    fun syncedRuleLookupIsExactFirstAndDisablesUnsafeCanonicalFallbacks() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val rules =
+                    listOf(
+                        MerchantRuleEntity("north market *aa11bb22", "Exact", "Exact display"),
+                        MerchantRuleEntity("north market", "Stable", "Stable display"),
+                        MerchantRuleEntity("coffee roasters *ab12cd34", "Coffee", null),
+                        MerchantRuleEntity("collision cafe *ab12cd34", "Food", null),
+                        MerchantRuleEntity("collision cafe *zx98yu76", "Travel", null),
+                        MerchantRuleEntity("go *ab12cd34", "Too short", null),
+                        MerchantRuleEntity("*ab12cd34", "Blank", null),
+                    )
+                dao.upsertSyncedTransactionsIgnoringTombstones(
+                    transactions =
+                        listOf(
+                            syncedEntity("exact", 1).copy(merchant = "North Market *AA11BB22"),
+                            syncedEntity("canonical", 2).copy(merchant = "Coffee Roasters *ZX98YU76"),
+                            syncedEntity("collision", 3).copy(merchant = "Collision Cafe *CC44DD55"),
+                            syncedEntity("short", 4).copy(merchant = "Go *ZX98YU76"),
+                            syncedEntity("blank", 5).copy(merchant = "*ZX98YU76"),
+                            syncedEntity("effective-transfer", 6).copy(
+                                merchant = "Ordinary unmatched row",
+                                flowKindOverride = FlowKind.TRANSFER,
+                            ),
+                        ),
+                    merchantRules = rules,
+                    reviewedAtEpochMillis = 8_800L,
+                )
+
+                val rows = dao.getAll().associateBy { it.id }
+                assertEquals("Exact", rows.getValue("exact").category)
+                assertEquals("Exact display", rows.getValue("exact").merchantOverride)
+                assertEquals(8_800L, rows.getValue("exact").reviewedAtEpochMillis)
+                assertEquals("Coffee", rows.getValue("canonical").category)
+                assertEquals(8_800L, rows.getValue("canonical").reviewedAtEpochMillis)
+                listOf("collision", "short", "blank").forEach { id ->
+                    assertEquals("Other", rows.getValue(id).category)
+                    assertNull(rows.getValue(id).reviewedAtEpochMillis)
+                }
+                assertEquals(FlowKind.TRANSFER, rows.getValue("effective-transfer").effectiveFlowKind)
+                assertEquals(8_800L, rows.getValue("effective-transfer").reviewedAtEpochMillis)
+
+                val beforeConflict = dao.getAll()
+                val conflictFailure =
+                    runCatching {
+                        dao.upsertSyncedTransactionsIgnoringTombstones(
+                            transactions = listOf(syncedEntity("must-not-write", 7)),
+                            merchantRules =
+                                listOf(
+                                    MerchantRuleEntity("same exact key", "Food", null),
+                                    MerchantRuleEntity("same exact key", "Travel", null),
+                                ),
+                        )
+                    }.exceptionOrNull()
+                assertTrue(conflictFailure is IllegalArgumentException)
+                assertEquals(beforeConflict, dao.getAll())
             }
         }
 
@@ -573,6 +662,14 @@ class SyncFoundationDataPathTest {
                         description = newDescription,
                         pending = false,
                         payee = "Market #42 Downtown",
+                    ),
+                    SimpleFinTransaction(
+                        id = "transfer",
+                        posted = 12,
+                        amount = "-3.00",
+                        description = "CREDIT CARD PAYMENT",
+                        pending = false,
+                        payee = "Card payment",
                     ),
                 ),
         ),
