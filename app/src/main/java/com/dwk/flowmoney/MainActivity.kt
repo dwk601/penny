@@ -73,8 +73,6 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -300,7 +298,7 @@ internal suspend fun bestEffortWidgetRefresh(refresh: suspend () -> Unit) {
 
 internal data class DashboardNavigationState(
     val selectedTab: DashboardTab = DashboardTab.Overview,
-    val coldStartReviewHandled: Boolean = false,
+    val coldStartRoutingHandled: Boolean = false,
     val restoredNavigation: Boolean = false,
     val userSelectedBeforeLoading: Boolean = false,
     val externalRouteHandled: Boolean = false,
@@ -311,7 +309,7 @@ private val DashboardNavigationStateSaver =
         save = { state ->
             listOf(
                 state.selectedTab.name,
-                state.coldStartReviewHandled,
+                state.coldStartRoutingHandled,
                 state.userSelectedBeforeLoading,
                 state.externalRouteHandled,
             )
@@ -322,7 +320,7 @@ private val DashboardNavigationStateSaver =
             val selectedName = (values?.getOrNull(0) as? String) ?: (saved as? String)
             DashboardNavigationState(
                 selectedTab = DashboardTab.entries.firstOrNull { it.name == selectedName } ?: DashboardTab.Overview,
-                coldStartReviewHandled = (values?.getOrNull(1) as? Boolean) ?: true,
+                coldStartRoutingHandled = (values?.getOrNull(1) as? Boolean) ?: true,
                 restoredNavigation = true,
                 userSelectedBeforeLoading = (values?.getOrNull(2) as? Boolean) ?: false,
                 externalRouteHandled = (values?.getOrNull(3) as? Boolean) ?: false,
@@ -330,20 +328,18 @@ private val DashboardNavigationStateSaver =
         },
     )
 
-internal fun routeTrueColdStartToReview(
+internal fun completeColdStartNavigation(
     state: DashboardNavigationState,
     isLoading: Boolean,
-    pendingReviewCount: Int,
 ): DashboardNavigationState {
-    if (isLoading || state.coldStartReviewHandled) return state
-    val shouldOpenReview =
-        pendingReviewCount > 0 &&
-            !state.restoredNavigation &&
+    if (isLoading || state.coldStartRoutingHandled) return state
+    val isTrueColdStart =
+        !state.restoredNavigation &&
             !state.userSelectedBeforeLoading &&
             !state.externalRouteHandled
     return state.copy(
-        selectedTab = if (shouldOpenReview) DashboardTab.Review else state.selectedTab,
-        coldStartReviewHandled = true,
+        selectedTab = if (isTrueColdStart) DashboardTab.Overview else state.selectedTab,
+        coldStartRoutingHandled = true,
     )
 }
 
@@ -442,33 +438,41 @@ internal data class EditorDraft(
     val providerDescription: String?,
     val merchantOverride: String?,
     val providerMerchant: String?,
-)
+    val flowKind: FlowKind,
+    val flowKindOverride: FlowKind?,
+) {
+    val effectiveFlowKind: FlowKind
+        get() = flowKindOverride ?: flowKind
+}
 
 private val EditorDraftSaver =
     androidx.compose.runtime.saveable.listSaver<EditorDraft, Any>(
-        save = { draft ->
-            listOf(
-                draft.id.orEmpty(),
-                draft.occurredAtEpochMillis,
-                draft.merchant,
-                draft.amount,
-                draft.isExpense,
-                draft.category,
-                draft.note,
-                draft.recurringIntervalName,
-                draft.source,
-                draft.accountKey.orEmpty(),
-                draft.accountName.orEmpty(),
-                draft.reviewedAtEpochMillis ?: Long.MIN_VALUE,
-                draft.providerDescription != null,
-                draft.providerDescription.orEmpty(),
-                draft.merchantOverride != null,
-                draft.merchantOverride.orEmpty(),
-                draft.providerMerchant != null,
-                draft.providerMerchant.orEmpty(),
-            )
-        },
+        save = { draft -> saveEditorDraft(draft) },
         restore = ::restoreEditorDraft,
+    )
+
+internal fun saveEditorDraft(draft: EditorDraft): List<Any> =
+    listOf(
+        draft.id.orEmpty(),
+        draft.occurredAtEpochMillis,
+        draft.merchant,
+        draft.amount,
+        draft.isExpense,
+        draft.category,
+        draft.note,
+        draft.recurringIntervalName,
+        draft.source,
+        draft.accountKey.orEmpty(),
+        draft.accountName.orEmpty(),
+        draft.reviewedAtEpochMillis ?: Long.MIN_VALUE,
+        draft.providerDescription != null,
+        draft.providerDescription.orEmpty(),
+        draft.merchantOverride != null,
+        draft.merchantOverride.orEmpty(),
+        draft.providerMerchant != null,
+        draft.providerMerchant.orEmpty(),
+        draft.flowKind.name,
+        draft.flowKindOverride?.name.orEmpty(),
     )
 
 /** Size-checked restoration keeps process state written by older app versions valid. */
@@ -504,6 +508,13 @@ internal fun restoreEditorDraft(values: List<Any>): EditorDraft {
             (values.getOrNull(17) as? String)
                 ?.takeIf { providerMerchantPresent }
                 ?: merchant.takeIf { source == "simplefin" && values.size <= 11 },
+        flowKind =
+            (values.getOrNull(18) as? String)
+                ?.let { saved -> FlowKind.entries.firstOrNull { it.name == saved } }
+                ?: fallback.flowKind,
+        flowKindOverride =
+            (values.getOrNull(19) as? String)
+                ?.let { saved -> FlowKind.entries.firstOrNull { it.name == saved } },
     )
 }
 
@@ -524,6 +535,8 @@ internal fun newEditorDraft(): EditorDraft =
         providerDescription = null,
         merchantOverride = null,
         providerMerchant = null,
+        flowKind = FlowKind.NORMAL,
+        flowKindOverride = null,
     )
 
 internal fun widgetQuickAddDraft(suggestionHistory: TransactionSuggestionHistory): EditorDraft {
@@ -536,7 +549,7 @@ internal fun widgetQuickAddDraft(suggestionHistory: TransactionSuggestionHistory
     )
 }
 
-private fun Transaction.toEditorDraft() =
+internal fun Transaction.toEditorDraft() =
     EditorDraft(
         id = id,
         occurredAtEpochMillis = occurredAtEpochMillis,
@@ -553,9 +566,25 @@ private fun Transaction.toEditorDraft() =
         providerDescription = providerDescription,
         merchantOverride = merchantOverride,
         providerMerchant = providerMerchant,
+        flowKind = flowKind,
+        flowKindOverride = flowKindOverride,
     )
 
-private fun EditorDraft.toTransaction(): Transaction {
+internal fun EditorDraft.prepareForEditorSave(
+    candidateId: String,
+    nowEpochMillis: Long = System.currentTimeMillis(),
+): EditorDraft =
+    copy(
+        id = candidateId,
+        reviewedAtEpochMillis =
+            if (id != null && source == "simplefin") {
+                reviewedAtEpochMillis ?: nowEpochMillis
+            } else {
+                reviewedAtEpochMillis
+            },
+    )
+
+internal fun EditorDraft.toTransaction(): Transaction {
     val parsedAmount = MoneyFormatter.parseAmountToCents(amount).absoluteValue
     val effectiveMerchant = merchant.trim().ifBlank { category }
     val rawProviderMerchant = providerMerchant ?: effectiveMerchant
@@ -583,6 +612,8 @@ private fun EditorDraft.toTransaction(): Transaction {
         providerDescription = providerDescription,
         merchantOverride = updatedOverride,
         providerMerchant = rawProviderMerchant.takeIf { source == "simplefin" },
+        flowKind = flowKind,
+        flowKindOverride = flowKindOverride,
     )
 }
 
@@ -634,11 +665,7 @@ fun FlowMoneyApp(
     var resetDaysReselectRequest by rememberSaveable { mutableStateOf(0) }
     var pendingMerchantRuleConflict by remember { mutableStateOf<PendingMerchantRuleConflictRequest?>(null) }
     var pendingDeleteRequest by remember { mutableStateOf<PendingDeleteRequest?>(null) }
-    var coldStartSyncCompleted by remember { mutableStateOf(false) }
-    var coldStartReviewSnapshotCount by remember { mutableStateOf(0) }
-    var coldStartReviewSnapshotReady by remember { mutableStateOf(false) }
     val selectedTab = navigationState.selectedTab
-    val pendingReviewCount = unreviewedTransactions.size
     val editorDirty = editorDraft != originalEditorDraft
     val editorMutationBusy = persistenceBusy || viewModelMutationBusy
     val latestEditorDirty by rememberUpdatedState(editorDirty)
@@ -649,7 +676,7 @@ fun FlowMoneyApp(
             navigationState =
                 navigationState.copy(
                     selectedTab = DashboardTab.Overview,
-                    coldStartReviewHandled = true,
+                    coldStartRoutingHandled = true,
                     externalRouteHandled = true,
                 )
         }
@@ -659,7 +686,7 @@ fun FlowMoneyApp(
         if (openAddSheetRequest > 0) {
             navigationState =
                 navigationState.copy(
-                    coldStartReviewHandled = true,
+                    coldStartRoutingHandled = true,
                     externalRouteHandled = true,
                 )
         }
@@ -679,29 +706,12 @@ fun FlowMoneyApp(
         }
     }
 
-    LaunchedEffect(viewModel, uiState.isLoading, coldStartSyncCompleted) {
-        if (!uiState.isLoading && coldStartSyncCompleted && !coldStartReviewSnapshotReady) {
-            coldStartReviewSnapshotCount =
-                try {
-                    viewModel.getUnreviewedTransactions().size
-                } catch (failure: CancellationException) {
-                    throw failure
-                } catch (_: Throwable) {
-                    0
-                }
-            coldStartReviewSnapshotReady = true
-        }
-    }
-
-    LaunchedEffect(uiState.isLoading, pendingReviewCount, coldStartReviewSnapshotReady, coldStartReviewSnapshotCount) {
-        if (coldStartReviewSnapshotReady) {
-            navigationState =
-                routeTrueColdStartToReview(
-                    state = navigationState,
-                    isLoading = uiState.isLoading,
-                    pendingReviewCount = maxOf(pendingReviewCount, coldStartReviewSnapshotCount),
-                )
-        }
+    LaunchedEffect(uiState.isLoading) {
+        navigationState =
+            completeColdStartNavigation(
+                state = navigationState,
+                isLoading = uiState.isLoading,
+            )
     }
 
     LaunchedEffect(viewModel) {
@@ -808,7 +818,6 @@ fun FlowMoneyApp(
         } catch (_: Throwable) {
             // Automatic startup sync is best-effort; do not expose failure details from bank data paths.
         }
-        coldStartSyncCompleted = true
     }
 
     fun deleteWithUndo(request: PendingDeleteRequest) {
@@ -957,9 +966,15 @@ fun FlowMoneyApp(
         if (persistenceBusy || viewModel.mutationBusy.value) return
         val isEditorSave = editorTransaction != null
         val reviewedEditorTransaction =
-            editorTransaction?.copy(
-                reviewedAtEpochMillis = editorTransaction.reviewedAtEpochMillis ?: System.currentTimeMillis(),
-            )
+            editorTransaction?.let { transaction ->
+                if (transaction.source == "simplefin") {
+                    transaction.copy(
+                        reviewedAtEpochMillis = transaction.reviewedAtEpochMillis ?: System.currentTimeMillis(),
+                    )
+                } else {
+                    transaction
+                }
+            }
         val reviewedEditorDraft =
             candidateEditorDraft?.copy(
                 reviewedAtEpochMillis = reviewedEditorTransaction?.reviewedAtEpochMillis,
@@ -1186,12 +1201,11 @@ fun FlowMoneyApp(
                 navigationState.copy(
                     selectedTab = tab,
                     userSelectedBeforeLoading =
-                        navigationState.userSelectedBeforeLoading || !navigationState.coldStartReviewHandled,
+                        navigationState.userSelectedBeforeLoading || !navigationState.coldStartRoutingHandled,
                 )
         },
         onAddTransaction = ::openNewTransactionEditor,
         onData = { showDataSheet = true },
-        pendingReviewCount = pendingReviewCount,
         simpleFin = uiState.simpleFin,
         operation = dataOperation,
         syncHealthNowEpochMillis = syncHealthClock.millis(),
@@ -1213,7 +1227,13 @@ fun FlowMoneyApp(
             onDelete = ::requestDelete,
             onAddTransaction = ::openNewTransactionEditor,
             onData = { showDataSheet = true },
-            onReview = { navigationState = navigationState.copy(selectedTab = DashboardTab.Review) },
+            onReview = {
+                navigationState =
+                    navigationState.copy(
+                        selectedTab = DashboardTab.Review,
+                        coldStartRoutingHandled = true,
+                    )
+            },
             onCategorizeReview = ::categorizeAndReview,
             onBulkCategorizeReview = ::bulkCategorizeAndReview,
             onBulkAcceptOther = ::bulkAcceptAsOther,
@@ -1260,7 +1280,7 @@ fun FlowMoneyApp(
                     onSave = { transaction ->
                         if (!persistenceBusy && !viewModel.mutationBusy.value) {
                             val candidateId = editorDraft.id ?: transaction.id
-                            val candidateDraft = editorDraft.copy(id = candidateId)
+                            val candidateDraft = editorDraft.prepareForEditorSave(candidateId)
                             persistenceBusy = true
                             scope.launch {
                                 var saveFailureMessage: String? = null
@@ -1288,7 +1308,7 @@ fun FlowMoneyApp(
                     },
                     onSaveWithFutureRule = { transaction ->
                         val candidateId = editorDraft.id ?: transaction.id
-                        val candidateDraft = editorDraft.copy(id = candidateId)
+                        val candidateDraft = editorDraft.prepareForEditorSave(candidateId)
                         val candidateTransaction = candidateDraft.toTransaction()
                         saveMerchantRule(
                             originatingTransactionId = candidateId,
@@ -1752,6 +1772,13 @@ internal enum class DashboardTab(
     Review("Review", R.drawable.ic_nav_review),
 }
 
+private val PrimaryDashboardTabs =
+    listOf(
+        DashboardTab.Overview,
+        DashboardTab.Transactions,
+        DashboardTab.Insights,
+    )
+
 internal enum class SyncHealthKind {
     Connected,
     Pending,
@@ -1859,7 +1886,6 @@ internal fun AdaptiveFlowMoneyShell(
     onTabSelected: (DashboardTab) -> Unit,
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
-    pendingReviewCount: Int = 0,
     simpleFin: SimpleFinUiState = SimpleFinUiState(),
     operation: DataOperation? = null,
     syncHealthNowEpochMillis: Long = System.currentTimeMillis(),
@@ -1873,7 +1899,6 @@ internal fun AdaptiveFlowMoneyShell(
             Row(modifier = Modifier.fillMaxSize()) {
                 FlowMoneyNavigationRail(
                     selectedTab = selectedTab,
-                    pendingReviewCount = pendingReviewCount,
                     onTabSelected = onTabSelected,
                 )
                 FlowMoneyScaffold(
@@ -1883,7 +1908,6 @@ internal fun AdaptiveFlowMoneyShell(
                     onTabSelected = onTabSelected,
                     onAddTransaction = onAddTransaction,
                     onData = onData,
-                    pendingReviewCount = pendingReviewCount,
                     simpleFin = simpleFin,
                     operation = operation,
                     syncHealthNowEpochMillis = syncHealthNowEpochMillis,
@@ -1900,7 +1924,6 @@ internal fun AdaptiveFlowMoneyShell(
                 onTabSelected = onTabSelected,
                 onAddTransaction = onAddTransaction,
                 onData = onData,
-                pendingReviewCount = pendingReviewCount,
                 simpleFin = simpleFin,
                 operation = operation,
                 syncHealthNowEpochMillis = syncHealthNowEpochMillis,
@@ -1921,7 +1944,6 @@ private fun FlowMoneyScaffold(
     onTabSelected: (DashboardTab) -> Unit,
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
-    pendingReviewCount: Int,
     simpleFin: SimpleFinUiState,
     operation: DataOperation?,
     syncHealthNowEpochMillis: Long,
@@ -1953,7 +1975,6 @@ private fun FlowMoneyScaffold(
             if (!isWide) {
                 FlowMoneyNavigationBar(
                     selectedTab = selectedTab,
-                    pendingReviewCount = pendingReviewCount,
                     onTabSelected = onTabSelected,
                 )
             }
@@ -2060,7 +2081,6 @@ internal fun FlowMoneyTopAppBar(
 @Composable
 private fun FlowMoneyNavigationBar(
     selectedTab: DashboardTab,
-    pendingReviewCount: Int,
     onTabSelected: (DashboardTab) -> Unit,
 ) {
     NavigationBar(
@@ -2068,16 +2088,13 @@ private fun FlowMoneyNavigationBar(
         windowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
         modifier = Modifier.testTag("compact_navigation"),
     ) {
-        DashboardTab.entries.forEach { tab ->
+        PrimaryDashboardTabs.forEach { tab ->
             NavigationBarItem(
                 selected = selectedTab == tab,
                 onClick = { onTabSelected(tab) },
-                icon = { NavigationTabIcon(tab, pendingReviewCount) },
+                icon = { NavigationTabIcon(tab) },
                 label = { Text(tab.label, maxLines = 1) },
-                modifier =
-                    Modifier
-                        .testTag("tab_${tab.name.lowercase(Locale.US)}")
-                        .then(reviewTabSemantics(tab, pendingReviewCount)),
+                modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
             )
         }
     }
@@ -2086,7 +2103,6 @@ private fun FlowMoneyNavigationBar(
 @Composable
 private fun FlowMoneyNavigationRail(
     selectedTab: DashboardTab,
-    pendingReviewCount: Int,
     onTabSelected: (DashboardTab) -> Unit,
 ) {
     NavigationRail(
@@ -2097,55 +2113,21 @@ private fun FlowMoneyNavigationRail(
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical),
     ) {
-        DashboardTab.entries.forEach { tab ->
+        PrimaryDashboardTabs.forEach { tab ->
             NavigationRailItem(
                 selected = selectedTab == tab,
                 onClick = { onTabSelected(tab) },
-                icon = { NavigationTabIcon(tab, pendingReviewCount) },
+                icon = { NavigationTabIcon(tab) },
                 label = { Text(tab.label, maxLines = 1) },
-                modifier =
-                    Modifier
-                        .testTag("tab_${tab.name.lowercase(Locale.US)}")
-                        .then(reviewTabSemantics(tab, pendingReviewCount)),
+                modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
             )
         }
     }
 }
 
-private fun reviewTabSemantics(
-    tab: DashboardTab,
-    pendingReviewCount: Int,
-): Modifier =
-    if (tab == DashboardTab.Review) {
-        Modifier.semantics {
-            contentDescription = "Review"
-            stateDescription =
-                if (pendingReviewCount == 0) {
-                    "No transactions pending review"
-                } else {
-                    "$pendingReviewCount ${if (pendingReviewCount == 1) "transaction" else "transactions"} pending review"
-                }
-        }
-    } else {
-        Modifier
-    }
-
 @Composable
-private fun NavigationTabIcon(
-    tab: DashboardTab,
-    pendingReviewCount: Int,
-) {
-    if (tab == DashboardTab.Review && pendingReviewCount > 0) {
-        BadgedBox(
-            badge = {
-                Badge { Text(if (pendingReviewCount > 99) "99+" else pendingReviewCount.toString()) }
-            },
-        ) {
-            Icon(painter = painterResource(tab.iconRes), contentDescription = null)
-        }
-    } else {
-        Icon(painter = painterResource(tab.iconRes), contentDescription = null)
-    }
+private fun NavigationTabIcon(tab: DashboardTab) {
+    Icon(painter = painterResource(tab.iconRes), contentDescription = null)
 }
 
 @Composable
@@ -2449,7 +2431,12 @@ private fun OverviewSyncReviewBanner(
         ) {
             Text(syncText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
             Text(
-                "$pendingReviewCount ${if (pendingReviewCount == 1) "transaction" else "transactions"} to review",
+                if (pendingReviewCount == 0) {
+                    "No synced transactions to check"
+                } else {
+                    "$pendingReviewCount synced ${if (pendingReviewCount == 1) "transaction" else "transactions"} " +
+                        "available for optional corrections"
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("overview_pending_review_count"),
@@ -2459,7 +2446,7 @@ private fun OverviewSyncReviewBanner(
                     TextButton(
                         onClick = onReview,
                         modifier = Modifier.heightIn(min = 48.dp).testTag("overview_review_action"),
-                    ) { Text("Review") }
+                    ) { Text("Check & correct") }
                 }
                 if (simpleFin.isConnectionPending || profile?.isPaused == true || profile == null) {
                     TextButton(
@@ -2543,7 +2530,7 @@ internal fun ReviewPage(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Review", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "${orderedTransactions.size} ${if (orderedTransactions.size == 1) "transaction" else "transactions"} pending",
+                            "${orderedTransactions.size} synced ${if (orderedTransactions.size == 1) "transaction" else "transactions"} available",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.testTag("review_pending_count"),
                         )
@@ -2587,7 +2574,7 @@ internal fun ReviewPage(
                         ) {
                             Text("All caught up", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "New synced transactions that need a category will appear here.",
+                                "New synced transactions will appear here for optional corrections.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -3474,7 +3461,7 @@ private fun PendingReviewInsightsCard(
             TextButton(
                 onClick = onReview,
                 modifier = Modifier.heightIn(min = 48.dp).testTag("insights_pending_review_action"),
-            ) { Text("Review transactions") }
+            ) { Text("Check & correct") }
         }
     }
 }
@@ -5297,7 +5284,7 @@ private fun EmptyState(
             Text("Start tracking", fontWeight = FontWeight.SemiBold)
             Text(
                 if (disconnected) {
-                    "Connect your bank to review synced spending, or add a transaction manually."
+                    "Connect your bank to track synced spending, or add a transaction manually."
                 } else {
                     "Add your first transaction, or import a CSV from Data."
                 },
@@ -5693,6 +5680,13 @@ internal fun TransactionEditor(
         onDraftChange(draft.copy(amount = amount))
     }
 
+    fun updateTransferStatus(treatAsTransfer: Boolean) {
+        val selectedFlowKind = if (treatAsTransfer) FlowKind.TRANSFER else FlowKind.NORMAL
+        if (selectedFlowKind != draft.effectiveFlowKind) {
+            onDraftChange(draft.copy(flowKindOverride = selectedFlowKind))
+        }
+    }
+
     fun loadNearbySuggestion() {
         scope.launch {
             locationStatus = "Finding nearby address..."
@@ -5787,6 +5781,12 @@ internal fun TransactionEditor(
                 if (isSynced) {
                     item {
                         SyncedProviderSummary(draft = draft, dateTime = dateTime)
+                    }
+                    item {
+                        TransferStatusToggle(
+                            isTransfer = draft.effectiveFlowKind == FlowKind.TRANSFER,
+                            onTransferChange = ::updateTransferStatus,
+                        )
                     }
                     item {
                         Column(
@@ -5981,6 +5981,12 @@ internal fun TransactionEditor(
                                 }
                             }
                         }
+                    }
+                    item {
+                        TransferStatusToggle(
+                            isTransfer = draft.effectiveFlowKind == FlowKind.TRANSFER,
+                            onTransferChange = ::updateTransferStatus,
+                        )
                     }
 
                     item {
@@ -6391,6 +6397,39 @@ private fun DateTimeField(
 }
 
 private fun String.toRecurrenceIntervalOrNull(): RecurrenceInterval? = RecurrenceInterval.entries.firstOrNull { it.name == this }
+
+@Composable
+private fun TransferStatusToggle(
+    isTransfer: Boolean,
+    onTransferChange: (Boolean) -> Unit,
+) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("transfer_status_control")
+                .semantics {
+                    stateDescription = if (isTransfer) "Treat as transfer" else "Not a transfer"
+                },
+    ) {
+        SectionLabel("Transfer status")
+        Spacer(Modifier.height(8.dp))
+        PennyBinaryChoice(
+            firstLabel = "Not a transfer",
+            firstSelected = !isTransfer,
+            onFirstClick = { onTransferChange(false) },
+            firstModifier = Modifier.testTag("transfer_status_not_transfer"),
+            secondLabel = "Treat as transfer",
+            secondSelected = isTransfer,
+            onSecondClick = { onTransferChange(true) },
+            secondModifier = Modifier.testTag("transfer_status_transfer"),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+        )
+    }
+}
 
 @Composable
 private fun TransactionTypeToggle(

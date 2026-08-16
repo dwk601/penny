@@ -12,12 +12,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
-import androidx.compose.ui.test.SemanticsMatcher
-import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
@@ -37,6 +34,13 @@ import org.junit.Test
 class AdaptiveShellUiTest {
     @get:Rule val composeRule = createComposeRule()
 
+    private val primaryTabs =
+        listOf(
+            DashboardTab.Overview,
+            DashboardTab.Transactions,
+            DashboardTab.Insights,
+        )
+
     @Test
     fun breakpointUsesExactlyOneNavigationSurface() {
         var resize: (Dp) -> Unit = {}
@@ -49,13 +53,18 @@ class AdaptiveShellUiTest {
         }
         composeRule.onAllNodesWithTag("compact_navigation").assertCountEquals(1)
         composeRule.onAllNodesWithTag("wide_navigation").assertCountEquals(0)
-        DashboardTab.entries.forEach { tab ->
+        primaryTabs.forEach { tab ->
             composeRule.onAllNodesWithTag("tab_${tab.name.lowercase()}").assertCountEquals(1)
         }
+        composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
 
         composeRule.runOnIdle { resize(600.dp) }
         composeRule.onAllNodesWithTag("wide_navigation").assertCountEquals(1)
         composeRule.onAllNodesWithTag("compact_navigation").assertCountEquals(0)
+        primaryTabs.forEach { tab ->
+            composeRule.onAllNodesWithTag("tab_${tab.name.lowercase()}").assertCountEquals(1)
+        }
+        composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
     }
 
     @Test
@@ -106,34 +115,31 @@ class AdaptiveShellUiTest {
     }
 
     @Test
-    fun reviewBadgeAnnouncesPendingStateOnCompactAndRail() {
+    fun reviewDestinationStaysHiddenFromCompactAndRailNavigation() {
         var resize: (Dp) -> Unit = {}
         composeRule.setContent {
             var width by remember { mutableStateOf(599.dp) }
             resize = { width = it }
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width, 800.dp))) {
-                MaterialTheme { TestShell(DashboardTab.Review, {}, pendingReviewCount = 7) }
+                MaterialTheme { TestShell(DashboardTab.Review, {}) }
             }
         }
 
-        val pendingState =
-            SemanticsMatcher.expectValue(
-                SemanticsProperties.StateDescription,
-                "7 transactions pending review",
-            )
-        composeRule.onNodeWithTag("tab_review").assertIsSelected().assert(pendingState)
+        composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
+        composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
         composeRule.runOnIdle { resize(600.dp) }
-        composeRule.onNodeWithTag("tab_review").assertIsSelected().assert(pendingState)
+        composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
+        composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
     }
 
     @Test
-    fun regularAddFabRemainsReachableOnAllFourTabs() {
+    fun regularAddFabRemainsReachableOnPrimaryTabs() {
         composeRule.setContent {
             var selected by remember { mutableStateOf(DashboardTab.Overview) }
             MaterialTheme { TestShell(selected, { selected = it }) }
         }
 
-        DashboardTab.entries.forEach { tab ->
+        primaryTabs.forEach { tab ->
             composeRule.onNodeWithTag("tab_${tab.name.lowercase()}").performClick().assertIsSelected()
             val fab =
                 composeRule
@@ -170,7 +176,6 @@ class AdaptiveShellUiTest {
 private fun TestShell(
     selectedTab: DashboardTab,
     onTabSelected: (DashboardTab) -> Unit,
-    pendingReviewCount: Int = 0,
 ) {
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
@@ -178,7 +183,6 @@ private fun TestShell(
         onTabSelected = onTabSelected,
         onAddTransaction = {},
         onData = {},
-        pendingReviewCount = pendingReviewCount,
         modifier = Modifier.fillMaxSize(),
     ) { padding: PaddingValues ->
         Box(
