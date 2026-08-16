@@ -21,12 +21,16 @@ class TransactionMetadataMappingTest {
                 reviewedAtEpochMillis = 2,
                 providerDescription = "RAW DESCRIPTION 88",
                 merchantOverride = "Corner Store",
+                flowKind = FlowKind.TRANSFER,
+                flowKindOverride = FlowKind.NORMAL,
             )
 
         val domain = entity.toTransaction()
 
         assertThat(domain.merchant).isEqualTo("Corner Store")
         assertThat(domain.providerMerchant).isEqualTo("Provider Merchant 88")
+        assertThat(domain.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(domain.effectiveFlowKind).isEqualTo(FlowKind.NORMAL)
         assertThat(domain.toEntity()).isEqualTo(entity)
     }
 }

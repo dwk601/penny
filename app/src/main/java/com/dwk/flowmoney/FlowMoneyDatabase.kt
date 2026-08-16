@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SimpleFinIdentityStateEntity::class,
         MerchantRuleEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 abstract class FlowMoneyDatabase : RoomDatabase() {
@@ -44,6 +44,7 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                         MIGRATION_5_6,
                         MIGRATION_6_7,
                         MIGRATION_7_8,
+                        MIGRATION_8_9,
                     ).build()
                     .also { instance = it }
             }
@@ -158,6 +159,28 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                         "CREATE INDEX IF NOT EXISTS " +
                             "index_simplefin_ignored_transactions_occurredAtEpochMillis " +
                             "ON simplefin_ignored_transactions(occurredAtEpochMillis)",
+                    )
+                }
+            }
+
+        internal val MIGRATION_8_9: Migration =
+            object : Migration(8, 9) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN flowKind TEXT NOT NULL DEFAULT 'NORMAL'")
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN flowKindOverride TEXT")
+                    db.execSQL(
+                        "UPDATE transactions SET flowKind = 'TRANSFER' " +
+                            "WHERE source = 'simplefin' AND (" +
+                            "(cents > 0 AND (" +
+                            "(UPPER(TRIM(providerDescription)) LIKE 'AUTOMATIC PAYMENT %' AND " +
+                            "UPPER(TRIM(providerDescription)) LIKE '% THANK') OR " +
+                            "UPPER(TRIM(providerDescription)) = 'PAYMENT - THANK YOU' OR " +
+                            "UPPER(TRIM(providerDescription)) = 'AUTOPAY PYMT')) OR " +
+                            "(cents < 0 AND (" +
+                            "UPPER(TRIM(providerDescription)) = 'CREDIT CRD AUTOPAY' OR " +
+                            "(UPPER(TRIM(providerDescription)) LIKE 'CARDMEMBER SERVICE %' AND " +
+                            "UPPER(TRIM(providerDescription)) LIKE '% PAY') OR " +
+                            "UPPER(TRIM(providerDescription)) = 'CREDIT CARD PAYMENT')))",
                     )
                 }
             }
