@@ -55,9 +55,9 @@ it, along with the rest of the Android testing stack.
 
 ## Data and credentials
 
-- Room is at schema version 6. Migrations 1→6 are hand-written in
-  `FlowMoneyDatabase.kt`, but `app/schemas/` only contains `5.json` and
-  `6.json`, so automated migration tests can't reach further back than 5.
+- Room is at schema version 8. Migrations 1→8 are hand-written in
+  `FlowMoneyDatabase.kt`, but `app/schemas/` only contains exported schemas
+  5 through 8, so automated migration tests can't reach further back than 5.
 - SimpleFIN access URLs are encrypted with an AndroidKeystore AES/GCM key and
   written to `noBackupFilesDir` (`SimpleFinCredentialStore`). They must never
   be logged, and must never move to SharedPreferences or any backed-up
