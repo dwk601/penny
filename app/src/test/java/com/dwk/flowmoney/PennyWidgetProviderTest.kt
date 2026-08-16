@@ -29,6 +29,90 @@ class PennyWidgetProviderTest {
     }
 
     @Test
+    fun widgetStatsKeepAllSpendButRankOnlyReviewedTransactions() {
+        val stats =
+            calculateWidgetTransactionStats(
+                listOf(
+                    transaction(id = "local-food", category = "Food", cents = -4_000),
+                    transaction(
+                        id = "reviewed-food",
+                        category = "Food",
+                        cents = -2_000,
+                        source = "simplefin",
+                        reviewedAtEpochMillis = 2L,
+                    ),
+                    transaction(
+                        id = "reviewed-travel",
+                        category = "Travel",
+                        cents = -1_000,
+                        source = "simplefin",
+                        reviewedAtEpochMillis = 3L,
+                    ),
+                    transaction(
+                        id = "unreviewed-travel",
+                        category = "Travel",
+                        cents = -12_000,
+                        source = "simplefin",
+                    ),
+                ),
+            )
+
+        assertThat(stats.metrics.spentCents).isEqualTo(19_000)
+        assertThat(stats.metrics.transactionCount).isEqualTo(4)
+        assertThat(stats.categoryTotals)
+            .containsExactly(
+                CategoryTotal(category = "Food", cents = 6_000),
+                CategoryTotal(category = "Travel", cents = 1_000),
+            ).inOrder()
+        assertThat(stats.pendingReviewCount).isEqualTo(1)
+    }
+
+    @Test
+    fun widgetStatsHaveNoPendingReviewForLocalAndReviewedSimpleFinTransactions() {
+        val stats =
+            calculateWidgetTransactionStats(
+                listOf(
+                    transaction(id = "local", category = "Food", cents = -1_000),
+                    transaction(
+                        id = "reviewed",
+                        category = "Travel",
+                        cents = -2_000,
+                        source = "simplefin",
+                        reviewedAtEpochMillis = 2L,
+                    ),
+                ),
+            )
+
+        assertThat(stats.pendingReviewCount).isEqualTo(0)
+        assertThat(stats.categoryTotals.map { it.category }).containsExactly("Travel", "Food").inOrder()
+    }
+
+    @Test
+    fun widgetStatsReturnNoCategoryInsightWhenEverySpendNeedsReview() {
+        val stats =
+            calculateWidgetTransactionStats(
+                listOf(
+                    transaction(
+                        id = "unreviewed-food",
+                        category = "Food",
+                        cents = -5_000,
+                        source = "simplefin",
+                    ),
+                    transaction(
+                        id = "unreviewed-travel",
+                        category = "Travel",
+                        cents = -4_000,
+                        source = "simplefin",
+                    ),
+                ),
+            )
+
+        assertThat(stats.metrics.spentCents).isEqualTo(9_000)
+        assertThat(stats.categoryTotals).isEmpty()
+        assertThat(stats.pendingReviewCount).isEqualTo(2)
+    }
+
+    @Test
     fun broadcastUpdateAwaitsWorkBeforeFinishing() {
         val events = mutableListOf<String>()
 
@@ -122,4 +206,22 @@ class PennyWidgetProviderTest {
 
         assertThat(events).containsExactly("updated", "finish attempted").inOrder()
     }
+
+    private fun transaction(
+        id: String,
+        category: String,
+        cents: Int,
+        source: String = "local",
+        reviewedAtEpochMillis: Long? = null,
+    ): Transaction =
+        Transaction(
+            id = id,
+            occurredAtEpochMillis = 1L,
+            merchant = id,
+            category = category,
+            note = "",
+            cents = cents,
+            source = source,
+            reviewedAtEpochMillis = reviewedAtEpochMillis,
+        )
 }

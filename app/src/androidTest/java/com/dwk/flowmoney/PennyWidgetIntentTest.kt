@@ -94,6 +94,15 @@ class PennyWidgetIntentTest {
                     topCategory = categoryRows.first(),
                     topCategories = categoryRows,
                 ),
+                WidgetSummary(
+                    label = "This month",
+                    amount = "\$123.45",
+                    compactAmount = "\$123.45",
+                    count = "12 txns",
+                    topCategory = categoryRows.first(),
+                    topCategories = categoryRows,
+                    pendingReviewCount = 12,
+                ),
                 fallback,
             )
         val cases =
@@ -150,6 +159,26 @@ class PennyWidgetIntentTest {
                     val description = "${case.name}, ${summary.amount}, at fontScale $fontScale"
                     val expectedAmount =
                         if (case.layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount
+                    val reviewText =
+                        summary.pendingReviewCount.takeIf { it > 0 }?.let { count ->
+                            configuredContext.resources.getQuantityString(
+                                R.plurals.widget_pending_review_count,
+                                count,
+                                count,
+                            )
+                        }
+                    val expectedLabel =
+                        if (case.layoutId == R.layout.widget_penny_compact && reviewText != null) {
+                            reviewText
+                        } else {
+                            summary.label
+                        }
+                    val countText =
+                        if (reviewText != null) {
+                            configuredContext.getString(R.string.widget_supporting_metrics, reviewText, summary.count)
+                        } else {
+                            summary.count
+                        }
                     val supportingText =
                         when (case.layoutId) {
                             R.layout.widget_penny_summary -> {
@@ -157,7 +186,7 @@ class PennyWidgetIntentTest {
                                     R.id.widget_count to
                                         configuredContext.getString(
                                             R.string.widget_supporting_metrics,
-                                            summary.count,
+                                            countText,
                                             summary.topCategory,
                                         ),
                                 )
@@ -165,7 +194,7 @@ class PennyWidgetIntentTest {
 
                             R.layout.widget_penny_wide -> {
                                 mapOf(
-                                    R.id.widget_count to summary.count,
+                                    R.id.widget_count to countText,
                                     R.id.widget_categories to summary.topCategories.joinToString("\n"),
                                 )
                             }
@@ -176,6 +205,7 @@ class PennyWidgetIntentTest {
                         }
                     val requiredText =
                         case.requiredText +
+                            (R.id.widget_spent_label to expectedLabel) +
                             (R.id.widget_amount to expectedAmount) +
                             supportingText
 
@@ -206,7 +236,9 @@ class PennyWidgetIntentTest {
                         assertTextFits(
                             description = textDescription,
                             textView = textView,
-                            ellipsisPermitted = textView.id in case.permittedEllipsisIds,
+                            ellipsisPermitted =
+                                textView.id in case.permittedEllipsisIds ||
+                                    (summary.pendingReviewCount > 0 && textView.id == R.id.widget_count),
                         )
                         val minimumSp =
                             when (textView.id) {
@@ -510,7 +542,146 @@ class PennyWidgetIntentTest {
     }
 
     @Test
-    fun everyWidgetVariantReappliesTextAndClickTargets() {
+    fun transactionSummaryKeepsAllMetricsButBuildsReviewedOnlyCategoryRows() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        fun transaction(
+            id: String,
+            category: String,
+            cents: Int,
+            source: String = "local",
+            reviewedAtEpochMillis: Long? = null,
+        ) = Transaction(
+            id = id,
+            occurredAtEpochMillis = 1L,
+            merchant = id,
+            category = category,
+            note = "",
+            cents = cents,
+            source = source,
+            reviewedAtEpochMillis = reviewedAtEpochMillis,
+        )
+
+        val transactions =
+            listOf(
+                transaction(id = "local-food", category = "Food", cents = -4_000),
+                transaction(
+                    id = "reviewed-food",
+                    category = "Food",
+                    cents = -2_000,
+                    source = "simplefin",
+                    reviewedAtEpochMillis = 2L,
+                ),
+                transaction(
+                    id = "reviewed-travel",
+                    category = "Travel",
+                    cents = -1_000,
+                    source = "simplefin",
+                    reviewedAtEpochMillis = 3L,
+                ),
+                transaction(
+                    id = "unreviewed-travel",
+                    category = "Travel",
+                    cents = -12_000,
+                    source = "simplefin",
+                ),
+            )
+        val summary = PennyWidgetProvider.summaryForTransactions(context, transactions)
+
+        assertEquals("\$190.00", summary.amount)
+        assertEquals("4 txns", summary.count)
+        assertEquals("Food \$60.00", summary.topCategory)
+        assertEquals(listOf("Food \$60.00", "Travel \$10.00"), summary.topCategories)
+        assertEquals(1, summary.pendingReviewCount)
+
+        val onlyUnreviewed =
+            PennyWidgetProvider.summaryForTransactions(
+                context,
+                transactions.filter { it.isUnreviewed },
+            )
+        val noReviewedSpend = context.getString(R.string.widget_no_reviewed_spend)
+        assertEquals("\$120.00", onlyUnreviewed.amount)
+        assertEquals("1 txn", onlyUnreviewed.count)
+        assertEquals(noReviewedSpend, onlyUnreviewed.topCategory)
+        assertEquals(listOf(noReviewedSpend), onlyUnreviewed.topCategories)
+        assertEquals(1, onlyUnreviewed.pendingReviewCount)
+    }
+
+    @Test
+    fun everyWidgetVariantShowsAccessiblePendingReviewText() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        listOf(1, 2).forEach { pendingReviewCount ->
+            val reviewText =
+                context.resources.getQuantityString(
+                    R.plurals.widget_pending_review_count,
+                    pendingReviewCount,
+                    pendingReviewCount,
+                )
+            assertEquals("$pendingReviewCount to review", reviewText)
+            val summary =
+                WidgetSummary(
+                    label = "This month",
+                    amount = "\$1,234.56",
+                    count = "4 txns",
+                    topCategory = "Food \$80.00",
+                    topCategories = listOf("Food \$80.00", "Travel \$43.45", "Bills \$12.34"),
+                    compactAmount = "\$1.2K",
+                    pendingReviewCount = pendingReviewCount,
+                )
+
+            listOf(
+                R.layout.widget_penny_compact,
+                R.layout.widget_penny_summary,
+                R.layout.widget_penny_wide,
+            ).forEach { layoutId ->
+                val root =
+                    PennyWidgetProvider
+                        .viewsForLayout(context, summary, layoutId)
+                        .apply(context, null) as ViewGroup
+                val label = root.findViewById<TextView>(R.id.widget_spent_label)
+                val amount = root.findViewById<TextView>(R.id.widget_amount)
+
+                assertEquals(
+                    if (layoutId == R.layout.widget_penny_compact) reviewText else summary.label,
+                    label.text.toString(),
+                )
+                assertEquals(
+                    if (layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount,
+                    amount.text.toString(),
+                )
+                assertEquals(summary.amount, amount.contentDescription.toString())
+                assertTrue(root.hasOnClickListeners())
+                assertTrue(root.findViewById<View>(R.id.widget_add_button).hasOnClickListeners())
+
+                when (layoutId) {
+                    R.layout.widget_penny_compact -> {
+                        assertEquals("This month · $reviewText", label.contentDescription.toString())
+                    }
+
+                    R.layout.widget_penny_summary -> {
+                        val supportingText = "$reviewText · 4 txns · Food \$80.00"
+                        val count = root.findViewById<TextView>(R.id.widget_count)
+                        assertEquals(supportingText, count.text.toString())
+                        assertEquals(supportingText, count.contentDescription.toString())
+                    }
+
+                    R.layout.widget_penny_wide -> {
+                        val count = root.findViewById<TextView>(R.id.widget_count)
+                        assertEquals("$reviewText · 4 txns", count.text.toString())
+                        assertEquals("$reviewText · 4 txns", count.contentDescription.toString())
+                        assertEquals(
+                            "Food \$80.00\nTravel \$43.45\nBills \$12.34",
+                            root.findViewById<TextView>(R.id.widget_categories).text.toString(),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun everyWidgetVariantKeepsExistingMetricsWhenNothingNeedsReview() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val summary =
             WidgetSummary(
@@ -520,6 +691,7 @@ class PennyWidgetIntentTest {
                 topCategory = "Food \$80.00",
                 topCategories = listOf("Food \$80.00", "Travel \$43.45", "Bills \$12.34"),
                 compactAmount = "\$1.2K",
+                pendingReviewCount = 0,
             )
 
         listOf(
@@ -543,6 +715,8 @@ class PennyWidgetIntentTest {
             assertTrue(root.hasOnClickListeners())
             assertTrue(root.findViewById<View>(R.id.widget_add_button).hasOnClickListeners())
 
+            val representedText = visibleDescendants(root).filterIsInstance<TextView>().joinToString(" | ") { it.text }
+            assertFalse(representedText.contains("to review"))
             when (layoutId) {
                 R.layout.widget_penny_summary -> {
                     assertEquals(

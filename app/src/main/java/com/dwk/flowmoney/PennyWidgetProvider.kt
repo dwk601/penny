@@ -167,28 +167,41 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                     .transactionDao()
                     .getInRange(startInclusiveEpochMillis, endExclusiveEpochMillis)
                     .map { it.toTransaction() }
-            val metrics = DashboardAnalytics.metrics(transactions)
+            return summaryForTransactions(context, transactions)
+        }
+
+        internal fun summaryForTransactions(
+            context: Context,
+            transactions: List<Transaction>,
+        ): WidgetSummary {
+            val stats = calculateWidgetTransactionStats(transactions)
             val categoryRows =
-                DashboardAnalytics.categoryTotals(transactions, limit = 3).map {
+                stats.categoryTotals.map {
                     context.getString(
                         R.string.widget_top_category,
                         it.category,
                         MoneyFormatter.formatUsd(it.cents),
                     )
                 }
-            val noSpend = context.getString(R.string.widget_no_spend)
+            val categoryFallback =
+                if (stats.pendingReviewCount > 0 && stats.metrics.spentCents > 0) {
+                    context.getString(R.string.widget_no_reviewed_spend)
+                } else {
+                    context.getString(R.string.widget_no_spend)
+                }
             return WidgetSummary(
                 label = context.getString(R.string.widget_spent_this_month),
-                amount = MoneyFormatter.formatUsd(metrics.spentCents),
+                amount = MoneyFormatter.formatUsd(stats.metrics.spentCents),
                 count =
                     context.resources.getQuantityString(
                         R.plurals.widget_transaction_count,
-                        metrics.transactionCount,
-                        metrics.transactionCount,
+                        stats.metrics.transactionCount,
+                        stats.metrics.transactionCount,
                     ),
-                topCategory = categoryRows.firstOrNull() ?: noSpend,
-                topCategories = categoryRows.ifEmpty { listOf(noSpend) },
-                compactAmount = formatCompactWidgetUsd(metrics.spentCents),
+                topCategory = categoryRows.firstOrNull() ?: categoryFallback,
+                topCategories = categoryRows.ifEmpty { listOf(categoryFallback) },
+                compactAmount = formatCompactWidgetUsd(stats.metrics.spentCents),
+                pendingReviewCount = stats.pendingReviewCount,
             )
         }
 
@@ -267,8 +280,35 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                     layoutId == R.layout.widget_penny_wide,
             ) { "Unknown Penny widget layout" }
 
+            val reviewText =
+                summary.pendingReviewCount.takeIf { it > 0 }?.let { count ->
+                    context.resources.getQuantityString(
+                        R.plurals.widget_pending_review_count,
+                        count,
+                        count,
+                    )
+                }
+            val labelText =
+                if (layoutId == R.layout.widget_penny_compact && reviewText != null) {
+                    reviewText
+                } else {
+                    summary.label
+                }
+            val countText =
+                if (reviewText != null) {
+                    context.getString(R.string.widget_supporting_metrics, reviewText, summary.count)
+                } else {
+                    summary.count
+                }
+
             val views = RemoteViews(context.packageName, layoutId)
-            views.setTextViewText(R.id.widget_spent_label, summary.label)
+            views.setTextViewText(R.id.widget_spent_label, labelText)
+            if (layoutId == R.layout.widget_penny_compact && reviewText != null) {
+                views.setContentDescription(
+                    R.id.widget_spent_label,
+                    context.getString(R.string.widget_supporting_metrics, summary.label, reviewText),
+                )
+            }
             views.setTextViewText(
                 R.id.widget_amount,
                 if (layoutId == R.layout.widget_penny_compact) summary.compactAmount else summary.amount,
@@ -278,14 +318,15 @@ open class PennyWidgetProvider : AppWidgetProvider() {
             views.setContentDescription(R.id.widget_add_button, context.getString(R.string.widget_quick_add_description))
             when (layoutId) {
                 R.layout.widget_penny_summary -> {
-                    views.setTextViewText(
-                        R.id.widget_count,
-                        context.getString(R.string.widget_supporting_metrics, summary.count, summary.topCategory),
-                    )
+                    val supportingText =
+                        context.getString(R.string.widget_supporting_metrics, countText, summary.topCategory)
+                    views.setTextViewText(R.id.widget_count, supportingText)
+                    views.setContentDescription(R.id.widget_count, supportingText)
                 }
 
                 R.layout.widget_penny_wide -> {
-                    views.setTextViewText(R.id.widget_count, summary.count)
+                    views.setTextViewText(R.id.widget_count, countText)
+                    views.setContentDescription(R.id.widget_count, countText)
                     views.setTextViewText(R.id.widget_categories, summary.topCategories.joinToString("\n"))
                 }
             }
@@ -392,6 +433,19 @@ internal fun formatCompactWidgetUsd(cents: Long): String {
     }
 }
 
+internal data class WidgetTransactionStats(
+    val metrics: DashboardMetrics,
+    val categoryTotals: List<CategoryTotal>,
+    val pendingReviewCount: Int,
+)
+
+internal fun calculateWidgetTransactionStats(transactions: List<Transaction>): WidgetTransactionStats =
+    WidgetTransactionStats(
+        metrics = DashboardAnalytics.metrics(transactions),
+        categoryTotals = DashboardAnalytics.categoryTotals(transactions.filterNot { it.isUnreviewed }, limit = 3),
+        pendingReviewCount = transactions.count { it.isUnreviewed },
+    )
+
 internal data class WidgetSummary(
     val label: String,
     val amount: String,
@@ -399,4 +453,5 @@ internal data class WidgetSummary(
     val topCategory: String,
     val topCategories: List<String> = listOf(topCategory),
     val compactAmount: String,
+    val pendingReviewCount: Int = 0,
 )
