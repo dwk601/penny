@@ -183,12 +183,7 @@ open class PennyWidgetProvider : AppWidgetProvider() {
                         MoneyFormatter.formatUsd(it.cents),
                     )
                 }
-            val categoryFallback =
-                if (stats.pendingReviewCount > 0 && stats.metrics.spentCents > 0) {
-                    context.getString(R.string.widget_no_reviewed_spend)
-                } else {
-                    context.getString(R.string.widget_no_spend)
-                }
+            val categoryFallback = context.getString(R.string.widget_no_spend)
             return WidgetSummary(
                 label = context.getString(R.string.widget_spent_this_month),
                 amount = MoneyFormatter.formatUsd(stats.metrics.spentCents),
@@ -442,8 +437,11 @@ internal data class WidgetTransactionStats(
 internal fun calculateWidgetTransactionStats(transactions: List<Transaction>): WidgetTransactionStats =
     WidgetTransactionStats(
         metrics = DashboardAnalytics.metrics(transactions),
-        categoryTotals = DashboardAnalytics.categoryTotals(transactions.filterNot { it.isUnreviewed }, limit = 3),
-        pendingReviewCount = transactions.count { it.isUnreviewed },
+        categoryTotals = DashboardAnalytics.categoryTotals(transactions, limit = 3),
+        pendingReviewCount =
+            transactions.count {
+                it.effectiveFlowKind == FlowKind.NORMAL && it.isUnreviewed
+            },
     )
 
 internal data class WidgetSummary(

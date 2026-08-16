@@ -62,7 +62,7 @@ class DashboardAnalyticsTest {
         assertThat(daily.first { it.date == LocalDate.of(2026, 6, 3) }.cents).isEqualTo(500L)
     }
 
-    @Test fun categoryTotalsExcludesUnreviewedOtherWithoutChangingOverallSpending() {
+    @Test fun categoryTotalsIncludesUncategorizedAndUnreviewedNormalSpendingUnderOther() {
         val date = LocalDate.of(2026, 6, 3)
         val range =
             DashboardAnalytics.rangeFor(
@@ -72,7 +72,7 @@ class DashboardAnalyticsTest {
             )
         val transactions =
             listOf(
-                transaction(id = "local-other", date = date, cents = -300, category = "Other"),
+                transaction(id = "uncategorized", date = date, cents = -300, category = " "),
                 transaction(
                     id = "reviewed-other",
                     date = date,
@@ -82,22 +82,22 @@ class DashboardAnalyticsTest {
                     reviewedAtEpochMillis = 123,
                 ),
                 transaction(
-                    id = "unreviewed-other",
+                    id = "unreviewed-suggestion",
                     date = date,
                     cents = -1_000,
-                    category = "Other",
+                    category = "Food",
                     source = "simplefin",
                 ),
             )
 
         assertThat(DashboardAnalytics.categoryTotals(transactions))
-            .containsExactly(CategoryTotal(category = "Other", cents = 700))
+            .containsExactly(CategoryTotal(category = "Other", cents = 1_700))
         assertThat(DashboardAnalytics.metrics(transactions).spentCents).isEqualTo(1_700L)
         assertThat(DashboardAnalytics.dailySpending(transactions, range, utc).single { it.date == date }.cents)
             .isEqualTo(1_700L)
     }
 
-    @Test fun categoryTotalsRanksReviewedMixedCategoriesAndIgnoresIncome() {
+    @Test fun categoryTotalsRanksUnreviewedSpendingUnderOtherAndIgnoresIncome() {
         val date = LocalDate.of(2026, 6, 3)
         val transactions =
             listOf(
@@ -122,6 +122,7 @@ class DashboardAnalyticsTest {
 
         assertThat(DashboardAnalytics.categoryTotals(transactions))
             .containsExactly(
+                CategoryTotal(category = "Other", cents = 3_000),
                 CategoryTotal(category = "Housing", cents = 900),
                 CategoryTotal(category = "Food", cents = 500),
                 CategoryTotal(category = "Transport", cents = 100),
@@ -178,7 +179,7 @@ class DashboardAnalyticsTest {
         )
     }
 
-    @Test fun categoryRankingLimitIsAppliedAfterUnreviewedSpendingIsExcluded() {
+    @Test fun categoryRankingLimitIsAppliedAfterUnreviewedSpendingIsGroupedUnderOther() {
         val date = LocalDate.of(2026, 6, 3)
         val transactions =
             listOf(
@@ -197,10 +198,85 @@ class DashboardAnalyticsTest {
 
         assertThat(DashboardAnalytics.categoryTotals(transactions, limit = 2))
             .containsExactly(
+                CategoryTotal(category = "Other", cents = 10_000),
                 CategoryTotal(category = "One", cents = 500),
-                CategoryTotal(category = "Two", cents = 400),
             ).inOrder()
         assertThat(DashboardAnalytics.categoryTotals(transactions, limit = 0)).isEmpty()
+    }
+
+    @Test fun effectiveTransfersAreExcludedFromEveryAggregateAndOverridesWin() {
+        val date = LocalDate.of(2026, 6, 3)
+        val range =
+            DashboardAnalytics.rangeFor(
+                mode = ChartRangeMode.Month,
+                selectedMonth = YearMonth.of(2026, 6),
+                today = date,
+            )
+        val transactions =
+            listOf(
+                transaction(id = "expense", date = date, cents = -500, category = "Food"),
+                transaction(id = "income", date = date, cents = 1_200, category = "Salary"),
+                transaction(
+                    id = "outgoing-transfer",
+                    date = date,
+                    cents = -700,
+                    source = "simplefin",
+                    flowKind = FlowKind.TRANSFER,
+                ),
+                transaction(
+                    id = "incoming-transfer",
+                    date = date,
+                    cents = 900,
+                    flowKind = FlowKind.TRANSFER,
+                ),
+                transaction(
+                    id = "normal-overridden-transfer",
+                    date = date,
+                    cents = -1_100,
+                    source = "simplefin",
+                    flowKindOverride = FlowKind.TRANSFER,
+                ),
+                transaction(
+                    id = "transfer-overridden-normal",
+                    date = date,
+                    cents = -300,
+                    category = "Correction",
+                    source = "simplefin",
+                    reviewedAtEpochMillis = 123,
+                    flowKind = FlowKind.TRANSFER,
+                    flowKindOverride = FlowKind.NORMAL,
+                ),
+                transaction(
+                    id = "unreviewed-normal",
+                    date = date,
+                    cents = -200,
+                    category = "Suggested",
+                    source = "simplefin",
+                ),
+            )
+
+        val metrics = DashboardAnalytics.metrics(transactions)
+
+        assertThat(metrics).isEqualTo(
+            DashboardMetrics(
+                spentCents = 1_000,
+                incomeCents = 1_200,
+                transactionCount = 4,
+                transferCents = 2_700,
+            ),
+        )
+        assertThat(metrics.netCents).isEqualTo(200)
+        assertThat(DashboardAnalytics.dailySpending(transactions, range, utc).single { it.date == date }.cents)
+            .isEqualTo(1_000)
+        assertThat(DashboardAnalytics.categoryTotals(transactions))
+            .containsExactly(
+                CategoryTotal(category = "Food", cents = 500),
+                CategoryTotal(category = "Correction", cents = 300),
+                CategoryTotal(category = "Other", cents = 200),
+            ).inOrder()
+        assertThat(DashboardAnalytics.unreviewedSpendingSummary(transactions)).isEqualTo(
+            UnreviewedSpendingSummary(spentCents = 200, transactionCount = 1),
+        )
     }
 
     @Test fun aggregatesIntMinimumAndTotalsBeyondIntMaximum() {
@@ -258,6 +334,8 @@ class DashboardAnalyticsTest {
         category: String = if (cents < 0) "Food" else "Salary",
         source: String = "local",
         reviewedAtEpochMillis: Long? = null,
+        flowKind: FlowKind = FlowKind.NORMAL,
+        flowKindOverride: FlowKind? = null,
     ): Transaction =
         Transaction(
             id = id,
@@ -268,5 +346,7 @@ class DashboardAnalyticsTest {
             cents = cents,
             source = source,
             reviewedAtEpochMillis = reviewedAtEpochMillis,
+            flowKind = flowKind,
+            flowKindOverride = flowKindOverride,
         )
 }

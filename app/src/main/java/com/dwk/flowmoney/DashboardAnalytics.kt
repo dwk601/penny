@@ -18,10 +18,19 @@ data class DashboardDateRange(
     val label: String,
 )
 
+/**
+ * Selected-range reporting totals.
+ *
+ * Spending, income, and [transactionCount] include only transactions whose
+ * [Transaction.effectiveFlowKind] is [FlowKind.NORMAL]. [transferCents] is the sum of the
+ * absolute value of every effective transfer in the range, so two matched transfer legs each
+ * contribute their own magnitude. It is disclosure-only and defaults to zero for existing callers.
+ */
 data class DashboardMetrics(
     val spentCents: Long,
     val incomeCents: Long,
     val transactionCount: Int,
+    val transferCents: Long = 0,
 ) {
     val netCents: Long = incomeCents - spentCents
 }
@@ -37,11 +46,13 @@ data class CategoryTotal(
 )
 
 /**
- * Selected-range expenses that still need review.
+ * Optional correction workload for selected-range, unreviewed normal expenses.
  *
- * [transactionCount] counts only transactions where [Transaction.isUnreviewed] is true and
- * [Transaction.cents] is negative. [spentCents] is their positive spending total; income and
- * zero-value transactions do not contribute to either value.
+ * These transactions are already included in dashboard spending and grouped under Other in
+ * category totals; review is not required for reporting. [transactionCount] counts negative
+ * transactions where [Transaction.isUnreviewed] is true and [Transaction.effectiveFlowKind] is
+ * [FlowKind.NORMAL]. [spentCents] is their positive spending total. Income, zero-value
+ * transactions, and effective transfers do not contribute to either value.
  */
 data class UnreviewedSpendingSummary(
     val spentCents: Long,
@@ -85,16 +96,24 @@ object DashboardAnalytics {
     fun metrics(transactions: List<Transaction>): DashboardMetrics {
         var spent = 0L
         var income = 0L
+        var transfers = 0L
+        var transactionCount = 0
         transactions.forEach { transaction ->
-            when {
-                transaction.cents < 0 -> spent -= transaction.cents.toLong()
-                transaction.cents > 0 -> income += transaction.cents.toLong()
+            if (transaction.effectiveFlowKind == FlowKind.TRANSFER) {
+                transfers += kotlin.math.abs(transaction.cents.toLong())
+            } else {
+                transactionCount += 1
+                when {
+                    transaction.cents < 0 -> spent -= transaction.cents.toLong()
+                    transaction.cents > 0 -> income += transaction.cents.toLong()
+                }
             }
         }
         return DashboardMetrics(
             spentCents = spent,
             incomeCents = income,
-            transactionCount = transactions.size,
+            transactionCount = transactionCount,
+            transferCents = transfers,
         )
     }
 
@@ -105,7 +124,7 @@ object DashboardAnalytics {
     ): List<DailySpend> {
         val spendingByDay = mutableMapOf<LocalDate, Long>()
         transactions.forEach { transaction ->
-            if (transaction.cents < 0) {
+            if (transaction.effectiveFlowKind == FlowKind.NORMAL && transaction.cents < 0) {
                 val date = transaction.localDate(zoneId)
                 spendingByDay[date] = (spendingByDay[date] ?: 0L) - transaction.cents.toLong()
             }
@@ -124,8 +143,13 @@ object DashboardAnalytics {
     ): List<CategoryTotal> {
         val totals = mutableMapOf<String, Long>()
         transactions.forEach { transaction ->
-            if (transaction.cents < 0 && !transaction.isUnreviewed) {
-                val category = transaction.category.trim().ifBlank { "Other" }
+            if (transaction.effectiveFlowKind == FlowKind.NORMAL && transaction.cents < 0) {
+                val category =
+                    if (transaction.isUnreviewed) {
+                        "Other"
+                    } else {
+                        transaction.category.trim().ifBlank { "Other" }
+                    }
                 totals[category] = (totals[category] ?: 0L) - transaction.cents.toLong()
             }
         }
@@ -139,7 +163,11 @@ object DashboardAnalytics {
         var spent = 0L
         var count = 0
         transactions.forEach { transaction ->
-            if (transaction.isUnreviewed && transaction.cents < 0) {
+            if (
+                transaction.effectiveFlowKind == FlowKind.NORMAL &&
+                transaction.isUnreviewed &&
+                transaction.cents < 0
+            ) {
                 spent -= transaction.cents.toLong()
                 count += 1
             }

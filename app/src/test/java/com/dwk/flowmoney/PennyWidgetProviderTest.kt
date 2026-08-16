@@ -29,7 +29,7 @@ class PennyWidgetProviderTest {
     }
 
     @Test
-    fun widgetStatsKeepAllSpendButRankOnlyReviewedTransactions() {
+    fun widgetStatsIncludeUnreviewedNormalSpendingUnderOther() {
         val stats =
             calculateWidgetTransactionStats(
                 listOf(
@@ -61,6 +61,7 @@ class PennyWidgetProviderTest {
         assertThat(stats.metrics.transactionCount).isEqualTo(4)
         assertThat(stats.categoryTotals)
             .containsExactly(
+                CategoryTotal(category = "Other", cents = 12_000),
                 CategoryTotal(category = "Food", cents = 6_000),
                 CategoryTotal(category = "Travel", cents = 1_000),
             ).inOrder()
@@ -88,7 +89,7 @@ class PennyWidgetProviderTest {
     }
 
     @Test
-    fun widgetStatsReturnNoCategoryInsightWhenEverySpendNeedsReview() {
+    fun widgetStatsGroupEveryUnreviewedNormalExpenseUnderOther() {
         val stats =
             calculateWidgetTransactionStats(
                 listOf(
@@ -108,8 +109,63 @@ class PennyWidgetProviderTest {
             )
 
         assertThat(stats.metrics.spentCents).isEqualTo(9_000)
-        assertThat(stats.categoryTotals).isEmpty()
+        assertThat(stats.categoryTotals)
+            .containsExactly(CategoryTotal(category = "Other", cents = 9_000))
         assertThat(stats.pendingReviewCount).isEqualTo(2)
+    }
+
+    @Test
+    fun widgetStatsExcludeEffectiveTransfersFromEveryTotalAndPendingCount() {
+        val stats =
+            calculateWidgetTransactionStats(
+                listOf(
+                    transaction(
+                        id = "unreviewed-normal",
+                        category = "Suggested",
+                        cents = -500,
+                        source = "simplefin",
+                    ),
+                    transaction(
+                        id = "outgoing-transfer",
+                        category = "Transfer",
+                        cents = -900,
+                        source = "simplefin",
+                        flowKind = FlowKind.TRANSFER,
+                    ),
+                    transaction(
+                        id = "incoming-transfer",
+                        category = "Transfer",
+                        cents = 1_000,
+                        flowKind = FlowKind.TRANSFER,
+                    ),
+                    transaction(
+                        id = "normal-overridden-transfer",
+                        category = "Hidden",
+                        cents = -800,
+                        source = "simplefin",
+                        flowKindOverride = FlowKind.TRANSFER,
+                    ),
+                    transaction(
+                        id = "transfer-overridden-normal",
+                        category = "Refund",
+                        cents = 400,
+                        flowKind = FlowKind.TRANSFER,
+                        flowKindOverride = FlowKind.NORMAL,
+                    ),
+                ),
+            )
+
+        assertThat(stats.metrics).isEqualTo(
+            DashboardMetrics(
+                spentCents = 500,
+                incomeCents = 400,
+                transactionCount = 2,
+                transferCents = 2_700,
+            ),
+        )
+        assertThat(stats.categoryTotals)
+            .containsExactly(CategoryTotal(category = "Other", cents = 500))
+        assertThat(stats.pendingReviewCount).isEqualTo(1)
     }
 
     @Test
@@ -213,6 +269,8 @@ class PennyWidgetProviderTest {
         cents: Int,
         source: String = "local",
         reviewedAtEpochMillis: Long? = null,
+        flowKind: FlowKind = FlowKind.NORMAL,
+        flowKindOverride: FlowKind? = null,
     ): Transaction =
         Transaction(
             id = id,
@@ -223,5 +281,7 @@ class PennyWidgetProviderTest {
             cents = cents,
             source = source,
             reviewedAtEpochMillis = reviewedAtEpochMillis,
+            flowKind = flowKind,
+            flowKindOverride = flowKindOverride,
         )
 }

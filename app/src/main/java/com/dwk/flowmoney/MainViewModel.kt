@@ -46,7 +46,7 @@ data class MainUiState(
     val categoryTotals: List<CategoryTotal> = emptyList(),
     val suggestionHistory: TransactionSuggestionHistory = TransactionSuggestionHistory.Empty,
     val simpleFin: SimpleFinUiState = SimpleFinUiState(),
-    /** UI contract: selected-range unreviewed expenses; render separately with a Review action. */
+    /** UI contract: optional correction workload already included in selected-range reporting. */
     val pendingReviewSummary: UnreviewedSpendingSummary = UnreviewedSpendingSummary(spentCents = 0, transactionCount = 0),
 )
 
