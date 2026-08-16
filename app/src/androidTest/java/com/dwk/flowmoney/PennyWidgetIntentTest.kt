@@ -542,7 +542,7 @@ class PennyWidgetIntentTest {
     }
 
     @Test
-    fun transactionSummaryKeepsAllMetricsButBuildsReviewedOnlyCategoryRows() {
+    fun transactionSummaryExcludesTransfersAndIncludesUnreviewedNormalUnderOther() {
         val context = ApplicationProvider.getApplicationContext<Context>()
 
         fun transaction(
@@ -551,6 +551,7 @@ class PennyWidgetIntentTest {
             cents: Int,
             source: String = "local",
             reviewedAtEpochMillis: Long? = null,
+            flowKind: FlowKind = FlowKind.NORMAL,
         ) = Transaction(
             id = id,
             occurredAtEpochMillis = 1L,
@@ -560,6 +561,7 @@ class PennyWidgetIntentTest {
             cents = cents,
             source = source,
             reviewedAtEpochMillis = reviewedAtEpochMillis,
+            flowKind = flowKind,
         )
 
         val transactions =
@@ -585,13 +587,23 @@ class PennyWidgetIntentTest {
                     cents = -12_000,
                     source = "simplefin",
                 ),
+                transaction(
+                    id = "unreviewed-transfer",
+                    category = "Transfer",
+                    cents = -50_000,
+                    source = "simplefin",
+                    flowKind = FlowKind.TRANSFER,
+                ),
             )
         val summary = PennyWidgetProvider.summaryForTransactions(context, transactions)
 
         assertEquals("\$190.00", summary.amount)
         assertEquals("4 txns", summary.count)
-        assertEquals("Food \$60.00", summary.topCategory)
-        assertEquals(listOf("Food \$60.00", "Travel \$10.00"), summary.topCategories)
+        assertEquals("Other \$120.00", summary.topCategory)
+        assertEquals(
+            listOf("Other \$120.00", "Food \$60.00", "Travel \$10.00"),
+            summary.topCategories,
+        )
         assertEquals(1, summary.pendingReviewCount)
 
         val onlyUnreviewed =
@@ -599,11 +611,10 @@ class PennyWidgetIntentTest {
                 context,
                 transactions.filter { it.isUnreviewed },
             )
-        val noReviewedSpend = context.getString(R.string.widget_no_reviewed_spend)
         assertEquals("\$120.00", onlyUnreviewed.amount)
         assertEquals("1 txn", onlyUnreviewed.count)
-        assertEquals(noReviewedSpend, onlyUnreviewed.topCategory)
-        assertEquals(listOf(noReviewedSpend), onlyUnreviewed.topCategories)
+        assertEquals("Other \$120.00", onlyUnreviewed.topCategory)
+        assertEquals(listOf("Other \$120.00"), onlyUnreviewed.topCategories)
         assertEquals(1, onlyUnreviewed.pendingReviewCount)
     }
 

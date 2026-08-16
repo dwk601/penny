@@ -3455,7 +3455,7 @@ private fun PendingReviewInsightsCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("Pending review", fontWeight = FontWeight.SemiBold)
+            Text("Optional corrections", fontWeight = FontWeight.SemiBold)
             Text(
                 "${summary.transactionCount} ${if (summary.transactionCount == 1) "transaction" else "transactions"}",
                 modifier = Modifier.testTag("insights_pending_review_count"),
@@ -3467,7 +3467,7 @@ private fun PendingReviewInsightsCard(
                 modifier = Modifier.testTag("insights_pending_review_amount"),
             )
             Text(
-                "Pending amounts are excluded from category totals until reviewed.",
+                "Already included in spending and grouped under Other; review only to correct details.",
                 color = MaterialTheme.colorScheme.onTertiaryContainer,
                 style = MaterialTheme.typography.bodySmall,
             )

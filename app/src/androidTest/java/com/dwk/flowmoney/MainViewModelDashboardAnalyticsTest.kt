@@ -34,7 +34,7 @@ class MainViewModelDashboardAnalyticsTest {
         context.deleteDatabase("flow_money.db")
     }
 
-    @Test fun rangeAnalyticsReactToReviewStateWithoutChangingOverallMetrics() =
+    @Test fun rangeAnalyticsIncludePendingSpendUnderOtherAndReactToCorrections() =
         runBlocking {
             val start =
                 LocalDate
@@ -49,7 +49,7 @@ class MainViewModelDashboardAnalyticsTest {
                             id = "pending-expense",
                             occurredAtEpochMillis = start + 3,
                             cents = -900,
-                            category = "Other",
+                            category = "Travel",
                         ),
                         transaction(
                             id = "reviewed-expense",
@@ -91,7 +91,10 @@ class MainViewModelDashboardAnalyticsTest {
                         initial.metrics,
                     )
                     assertEquals(
-                        listOf(CategoryTotal(category = "Food", cents = 100)),
+                        listOf(
+                            CategoryTotal(category = "Other", cents = 900),
+                            CategoryTotal(category = "Food", cents = 100),
+                        ),
                         initial.categoryTotals,
                     )
                     assertEquals(
@@ -111,13 +114,13 @@ class MainViewModelDashboardAnalyticsTest {
                         viewModel.uiState.first {
                             !it.isLoading &&
                                 it.pendingReviewSummary.transactionCount == 0 &&
-                                it.categoryTotals.firstOrNull()?.category == "Other"
+                                it.categoryTotals.firstOrNull()?.category == "Travel"
                         }
 
                     assertEquals(initial.metrics, updated.metrics)
                     assertEquals(
                         listOf(
-                            CategoryTotal(category = "Other", cents = 900),
+                            CategoryTotal(category = "Travel", cents = 900),
                             CategoryTotal(category = "Food", cents = 100),
                         ),
                         updated.categoryTotals,

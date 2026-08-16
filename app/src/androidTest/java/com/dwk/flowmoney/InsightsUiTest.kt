@@ -60,7 +60,7 @@ class InsightsUiTest {
     }
 
     @Test
-    fun pendingReviewShowsSeparateCountAmountAndLinksToReview() {
+    fun optionalCorrectionsShowIncludedSpendAndLinkToReview() {
         var reviewClicks = 0
         setScreen(
             uiState =
@@ -72,10 +72,14 @@ class InsightsUiTest {
             onReview = { reviewClicks++ },
         )
 
+        composeRule.onNodeWithText("Optional corrections").assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_count").assertIsDisplayed()
         composeRule.onNodeWithText("2 transactions").assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_amount").assertIsDisplayed()
         composeRule.onNodeWithText("$12.50").assertIsDisplayed()
+        composeRule
+            .onNodeWithText("Already included in spending and grouped under Other; review only to correct details.")
+            .assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_action").performClick()
         composeRule.runOnIdle { assertEquals(1, reviewClicks) }
     }

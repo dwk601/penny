@@ -12,7 +12,6 @@
     <string name="widget_quick_add_description">Add a transaction</string>
     <string name="widget_spent_this_month">This month</string>
     <string name="widget_no_spend">No spend</string>
-    <string name="widget_no_reviewed_spend">No reviewed spend</string>
     <string name="widget_unavailable">Unavailable</string>
     <string name="widget_unavailable_compact">—</string>
     <string name="widget_open_app">Open app</string>
