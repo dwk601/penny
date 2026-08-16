@@ -5,7 +5,9 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
 
-enum class ChartRangeMode(val label: String) {
+enum class ChartRangeMode(
+    val label: String,
+) {
     Week("Week"),
     Month("Month"),
 }
@@ -34,36 +36,51 @@ data class CategoryTotal(
     val cents: Long,
 )
 
+/**
+ * Selected-range expenses that still need review.
+ *
+ * [transactionCount] counts only transactions where [Transaction.isUnreviewed] is true and
+ * [Transaction.cents] is negative. [spentCents] is their positive spending total; income and
+ * zero-value transactions do not contribute to either value.
+ */
+data class UnreviewedSpendingSummary(
+    val spentCents: Long,
+    val transactionCount: Int,
+)
+
 object DashboardAnalytics {
     fun rangeFor(
         mode: ChartRangeMode,
         selectedMonth: YearMonth,
         today: LocalDate = LocalDate.now(),
-    ): DashboardDateRange {
-        return when (mode) {
-            ChartRangeMode.Week -> DashboardDateRange(
-                startInclusive = today.minusDays(6),
-                endExclusive = today.plusDays(1),
-                label = "Last 7 days",
-            )
-            ChartRangeMode.Month -> DashboardDateRange(
-                startInclusive = selectedMonth.atDay(1),
-                endExclusive = selectedMonth.plusMonths(1).atDay(1),
-                label = "${selectedMonth.month.displayName()} ${selectedMonth.year}",
-            )
+    ): DashboardDateRange =
+        when (mode) {
+            ChartRangeMode.Week -> {
+                DashboardDateRange(
+                    startInclusive = today.minusDays(6),
+                    endExclusive = today.plusDays(1),
+                    label = "Last 7 days",
+                )
+            }
+
+            ChartRangeMode.Month -> {
+                DashboardDateRange(
+                    startInclusive = selectedMonth.atDay(1),
+                    endExclusive = selectedMonth.plusMonths(1).atDay(1),
+                    label = "${selectedMonth.month.displayName()} ${selectedMonth.year}",
+                )
+            }
         }
-    }
 
     fun filterTransactions(
         transactions: List<Transaction>,
         range: DashboardDateRange,
         zoneId: ZoneId = ZoneId.systemDefault(),
-    ): List<Transaction> {
-        return transactions.filter { transaction ->
+    ): List<Transaction> =
+        transactions.filter { transaction ->
             val date = transaction.localDate(zoneId)
             !date.isBefore(range.startInclusive) && date.isBefore(range.endExclusive)
         }
-    }
 
     fun metrics(transactions: List<Transaction>): DashboardMetrics {
         var spent = 0L
@@ -107,14 +124,30 @@ object DashboardAnalytics {
     ): List<CategoryTotal> {
         val totals = mutableMapOf<String, Long>()
         transactions.forEach { transaction ->
-            if (transaction.cents < 0) {
+            if (transaction.cents < 0 && !transaction.isUnreviewed) {
                 val category = transaction.category.trim().ifBlank { "Other" }
                 totals[category] = (totals[category] ?: 0L) - transaction.cents.toLong()
             }
         }
-        return totals.map { (category, cents) -> CategoryTotal(category = category, cents = cents) }
+        return totals
+            .map { (category, cents) -> CategoryTotal(category = category, cents = cents) }
             .sortedByDescending { it.cents }
             .take(limit)
+    }
+
+    fun unreviewedSpendingSummary(transactions: List<Transaction>): UnreviewedSpendingSummary {
+        var spent = 0L
+        var count = 0
+        transactions.forEach { transaction ->
+            if (transaction.isUnreviewed && transaction.cents < 0) {
+                spent -= transaction.cents.toLong()
+                count += 1
+            }
+        }
+        return UnreviewedSpendingSummary(
+            spentCents = spent,
+            transactionCount = count,
+        )
     }
 
     fun availableMonths(
@@ -128,12 +161,10 @@ object DashboardAnalytics {
     }
 }
 
-internal fun Transaction.localDate(zoneId: ZoneId = ZoneId.systemDefault()): LocalDate {
-    return Instant.ofEpochMilli(occurredAtEpochMillis)
+internal fun Transaction.localDate(zoneId: ZoneId = ZoneId.systemDefault()): LocalDate =
+    Instant
+        .ofEpochMilli(occurredAtEpochMillis)
         .atZone(zoneId)
         .toLocalDate()
-}
 
-private fun java.time.Month.displayName(): String {
-    return getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.US)
-}
+private fun java.time.Month.displayName(): String = getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.US)

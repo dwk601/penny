@@ -46,6 +46,8 @@ data class MainUiState(
     val categoryTotals: List<CategoryTotal> = emptyList(),
     val suggestionHistory: TransactionSuggestionHistory = TransactionSuggestionHistory.Empty,
     val simpleFin: SimpleFinUiState = SimpleFinUiState(),
+    /** UI contract: selected-range unreviewed expenses; render separately with a Review action. */
+    val pendingReviewSummary: UnreviewedSpendingSummary = UnreviewedSpendingSummary(spentCents = 0, transactionCount = 0),
 )
 
 data class SimpleFinUiState(
@@ -132,6 +134,7 @@ class MainViewModel(
                 availableMonths = availableMonths,
                 dailySpending = DashboardAnalytics.dailySpending(ranged, range),
                 categoryTotals = DashboardAnalytics.categoryTotals(ranged),
+                pendingReviewSummary = DashboardAnalytics.unreviewedSpendingSummary(ranged),
                 suggestionHistory = snapshot.suggestionHistory,
             )
         }.flowOn(defaultDispatcher)
@@ -173,6 +176,7 @@ class MainViewModel(
                         dailySpending = dashboard.dailySpending,
                         categoryTotals = dashboard.categoryTotals,
                         suggestionHistory = dashboard.suggestionHistory,
+                        pendingReviewSummary = dashboard.pendingReviewSummary,
                         simpleFin = simpleFin,
                     )
                 },
@@ -574,5 +578,6 @@ private data class DashboardUiState(
     val availableMonths: List<YearMonth>,
     val dailySpending: List<DailySpend>,
     val categoryTotals: List<CategoryTotal>,
+    val pendingReviewSummary: UnreviewedSpendingSummary,
     val suggestionHistory: TransactionSuggestionHistory,
 )
