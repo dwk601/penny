@@ -11,9 +11,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
@@ -23,7 +27,6 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -46,6 +49,9 @@ class AdaptiveShellUiTest {
         }
         composeRule.onAllNodesWithTag("compact_navigation").assertCountEquals(1)
         composeRule.onAllNodesWithTag("wide_navigation").assertCountEquals(0)
+        DashboardTab.entries.forEach { tab ->
+            composeRule.onAllNodesWithTag("tab_${tab.name.lowercase()}").assertCountEquals(1)
+        }
 
         composeRule.runOnIdle { resize(600.dp) }
         composeRule.onAllNodesWithTag("wide_navigation").assertCountEquals(1)
@@ -100,6 +106,47 @@ class AdaptiveShellUiTest {
     }
 
     @Test
+    fun reviewBadgeAnnouncesPendingStateOnCompactAndRail() {
+        var resize: (Dp) -> Unit = {}
+        composeRule.setContent {
+            var width by remember { mutableStateOf(599.dp) }
+            resize = { width = it }
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width, 800.dp))) {
+                MaterialTheme { TestShell(DashboardTab.Review, {}, pendingReviewCount = 7) }
+            }
+        }
+
+        val pendingState =
+            SemanticsMatcher.expectValue(
+                SemanticsProperties.StateDescription,
+                "7 transactions pending review",
+            )
+        composeRule.onNodeWithTag("tab_review").assertIsSelected().assert(pendingState)
+        composeRule.runOnIdle { resize(600.dp) }
+        composeRule.onNodeWithTag("tab_review").assertIsSelected().assert(pendingState)
+    }
+
+    @Test
+    fun regularAddFabRemainsReachableOnAllFourTabs() {
+        composeRule.setContent {
+            var selected by remember { mutableStateOf(DashboardTab.Overview) }
+            MaterialTheme { TestShell(selected, { selected = it }) }
+        }
+
+        DashboardTab.entries.forEach { tab ->
+            composeRule.onNodeWithTag("tab_${tab.name.lowercase()}").performClick().assertIsSelected()
+            val fab =
+                composeRule
+                    .onNodeWithTag("add_transaction_fab")
+                    .assertIsDisplayed()
+                    .fetchSemanticsNode()
+                    .boundsInRoot
+            assertTrue("FAB target was $fab", fab.width / composeRule.density.density >= 48f)
+            assertTrue("FAB target was $fab", fab.height / composeRule.density.density >= 48f)
+        }
+    }
+
+    @Test
     fun wideLandscapeWithLargeFontKeepsShellReachable() {
         composeRule.setContent {
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(700.dp, 360.dp))) {
@@ -120,13 +167,18 @@ class AdaptiveShellUiTest {
 }
 
 @androidx.compose.runtime.Composable
-private fun TestShell(selectedTab: DashboardTab, onTabSelected: (DashboardTab) -> Unit) {
+private fun TestShell(
+    selectedTab: DashboardTab,
+    onTabSelected: (DashboardTab) -> Unit,
+    pendingReviewCount: Int = 0,
+) {
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
         snackbarHostState = remember { SnackbarHostState() },
         onTabSelected = onTabSelected,
         onAddTransaction = {},
         onData = {},
+        pendingReviewCount = pendingReviewCount,
         modifier = Modifier.fillMaxSize(),
     ) { padding: PaddingValues ->
         Box(

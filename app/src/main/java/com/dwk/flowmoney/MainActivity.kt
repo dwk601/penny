@@ -73,10 +73,13 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
@@ -118,6 +121,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -294,6 +298,55 @@ internal suspend fun bestEffortWidgetRefresh(refresh: suspend () -> Unit) {
     }
 }
 
+internal data class DashboardNavigationState(
+    val selectedTab: DashboardTab = DashboardTab.Overview,
+    val coldStartReviewHandled: Boolean = false,
+    val restoredNavigation: Boolean = false,
+    val userSelectedBeforeLoading: Boolean = false,
+    val externalRouteHandled: Boolean = false,
+)
+
+private val DashboardNavigationStateSaver =
+    Saver<DashboardNavigationState, Any>(
+        save = { state ->
+            listOf(
+                state.selectedTab.name,
+                state.coldStartReviewHandled,
+                state.userSelectedBeforeLoading,
+                state.externalRouteHandled,
+            )
+        },
+        restore = { saved ->
+            // The String branch restores process state written before Review navigation existed.
+            val values = saved as? List<*>
+            val selectedName = (values?.getOrNull(0) as? String) ?: (saved as? String)
+            DashboardNavigationState(
+                selectedTab = DashboardTab.entries.firstOrNull { it.name == selectedName } ?: DashboardTab.Overview,
+                coldStartReviewHandled = (values?.getOrNull(1) as? Boolean) ?: true,
+                restoredNavigation = true,
+                userSelectedBeforeLoading = (values?.getOrNull(2) as? Boolean) ?: false,
+                externalRouteHandled = (values?.getOrNull(3) as? Boolean) ?: false,
+            )
+        },
+    )
+
+internal fun routeTrueColdStartToReview(
+    state: DashboardNavigationState,
+    isLoading: Boolean,
+    pendingReviewCount: Int,
+): DashboardNavigationState {
+    if (isLoading || state.coldStartReviewHandled) return state
+    val shouldOpenReview =
+        pendingReviewCount > 0 &&
+            !state.restoredNavigation &&
+            !state.userSelectedBeforeLoading &&
+            !state.externalRouteHandled
+    return state.copy(
+        selectedTab = if (shouldOpenReview) DashboardTab.Review else state.selectedTab,
+        coldStartReviewHandled = true,
+    )
+}
+
 internal enum class DataOperation(
     val label: String,
 ) {
@@ -303,6 +356,7 @@ internal enum class DataOperation(
     StartOver("Starting over"),
     Sync("Syncing bank"),
     UpdateAutomaticSyncs("Saving sync frequency"),
+    DeleteMerchantRule("Deleting merchant rule"),
     Disconnect("Disconnecting bank"),
     ResetDays("Resetting days"),
     RestoreDays("Restoring reset days"),
@@ -317,6 +371,16 @@ internal fun pickerResultOperation(
     uri: Uri?,
     operation: DataOperation,
 ): DataOperation? = uri?.let { operation }
+
+private data class PendingMerchantRuleConflictRequest(
+    val originatingTransactionId: String,
+    val category: String,
+    val merchantOverride: String?,
+    val existingRule: MerchantRuleEntity,
+    val proposedRule: MerchantRuleEntity,
+    val editorTransaction: Transaction? = null,
+    val editorDraft: EditorDraft? = null,
+)
 
 private data class ResetDaysRequest(
     val range: PennyLocalDateRange,
@@ -532,6 +596,7 @@ fun FlowMoneyApp(
     appSnackbarHostState: SnackbarHostState? = null,
     resetDaysClock: Clock = Clock.systemDefaultZone(),
     resetDaysZoneId: ZoneId = ZoneId.systemDefault(),
+    syncHealthClock: Clock = Clock.systemDefaultZone(),
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -539,12 +604,16 @@ fun FlowMoneyApp(
     val snackbarHostState = appSnackbarHostState ?: rememberedAppSnackbarHostState
     val dataSnackbarHostState = remember { SnackbarHostState() }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    var unreviewedTransactions by remember(viewModel) { mutableStateOf<List<Transaction>>(emptyList()) }
+    var merchantRules by remember(viewModel) { mutableStateOf<List<MerchantRuleEntity>>(emptyList()) }
     val viewModelMutationBusy by viewModel.mutationBusy.collectAsStateWithLifecycle()
     val pendingRangeReset by viewModel.pendingRangeReset.collectAsStateWithLifecycle()
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var editorSessionId by rememberSaveable { mutableStateOf(0) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
-    var selectedTabName by rememberSaveable { mutableStateOf(DashboardTab.Overview.name) }
+    var navigationState by rememberSaveable(stateSaver = DashboardNavigationStateSaver) {
+        mutableStateOf(DashboardNavigationState())
+    }
     var editorDraft by rememberSaveable(stateSaver = EditorDraftSaver) { mutableStateOf(newEditorDraft()) }
     var originalEditorDraft by rememberSaveable(stateSaver = EditorDraftSaver) { mutableStateOf(newEditorDraft()) }
     var editorId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -558,14 +627,75 @@ fun FlowMoneyApp(
     var resetDaysFailure by rememberSaveable { mutableStateOf<String?>(null) }
     var resetDaysRecountRequest by rememberSaveable { mutableStateOf(0) }
     var resetDaysReselectRequest by rememberSaveable { mutableStateOf(0) }
-    val selectedTab = remember(selectedTabName) { DashboardTab.valueOf(selectedTabName) }
+    var pendingMerchantRuleConflict by remember { mutableStateOf<PendingMerchantRuleConflictRequest?>(null) }
+    var coldStartSyncCompleted by remember { mutableStateOf(false) }
+    var coldStartReviewSnapshotCount by remember { mutableStateOf(0) }
+    var coldStartReviewSnapshotReady by remember { mutableStateOf(false) }
+    val selectedTab = navigationState.selectedTab
+    val pendingReviewCount = unreviewedTransactions.size
     val editorDirty = editorDraft != originalEditorDraft
     val editorMutationBusy = persistenceBusy || viewModelMutationBusy
     val latestEditorDirty by rememberUpdatedState(editorDirty)
     val latestEditorMutationBusy by rememberUpdatedState(editorMutationBusy)
 
     LaunchedEffect(openOverviewRequest) {
-        if (openOverviewRequest > 0) selectedTabName = DashboardTab.Overview.name
+        if (openOverviewRequest > 0) {
+            navigationState =
+                navigationState.copy(
+                    selectedTab = DashboardTab.Overview,
+                    coldStartReviewHandled = true,
+                    externalRouteHandled = true,
+                )
+        }
+    }
+
+    LaunchedEffect(openAddSheetRequest) {
+        if (openAddSheetRequest > 0) {
+            navigationState =
+                navigationState.copy(
+                    coldStartReviewHandled = true,
+                    externalRouteHandled = true,
+                )
+        }
+    }
+
+    LaunchedEffect(viewModel, uiState.isLoading) {
+        if (!uiState.isLoading) {
+            viewModel.unreviewedTransactions.collect { transactions ->
+                unreviewedTransactions = transactions
+            }
+        }
+    }
+
+    LaunchedEffect(viewModel, uiState.isLoading) {
+        if (!uiState.isLoading) {
+            viewModel.merchantRules.collect { rules -> merchantRules = rules }
+        }
+    }
+
+    LaunchedEffect(viewModel, uiState.isLoading, coldStartSyncCompleted) {
+        if (!uiState.isLoading && coldStartSyncCompleted && !coldStartReviewSnapshotReady) {
+            coldStartReviewSnapshotCount =
+                try {
+                    viewModel.getUnreviewedTransactions().size
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: Throwable) {
+                    0
+                }
+            coldStartReviewSnapshotReady = true
+        }
+    }
+
+    LaunchedEffect(uiState.isLoading, pendingReviewCount, coldStartReviewSnapshotReady, coldStartReviewSnapshotCount) {
+        if (coldStartReviewSnapshotReady) {
+            navigationState =
+                routeTrueColdStartToReview(
+                    state = navigationState,
+                    isLoading = uiState.isLoading,
+                    pendingReviewCount = maxOf(pendingReviewCount, coldStartReviewSnapshotCount),
+                )
+        }
     }
 
     LaunchedEffect(viewModel) {
@@ -672,6 +802,7 @@ fun FlowMoneyApp(
         } catch (_: Throwable) {
             // Automatic startup sync is best-effort; do not expose failure details from bank data paths.
         }
+        coldStartSyncCompleted = true
     }
 
     fun deleteWithUndo(
@@ -757,6 +888,213 @@ fun FlowMoneyApp(
         }
     }
 
+    suspend fun offerReviewUndo(
+        message: String,
+        undo: suspend () -> Unit,
+    ) {
+        bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+        val result =
+            snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = "Undo",
+                withDismissAction = true,
+            )
+        if (result == SnackbarResult.ActionPerformed) {
+            try {
+                undo()
+                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                snackbarHostState.showSnackbar("Could not undo review.")
+            }
+        }
+    }
+
+    suspend fun completeMerchantRuleSave(
+        request: PendingMerchantRuleConflictRequest,
+        applied: MerchantRuleSaveResult.Applied,
+    ) {
+        val editorTransaction = request.editorTransaction
+        if (editorTransaction == null) {
+            offerReviewUndo(
+                message = "Reviewed as ${request.category} and saved future rule",
+                undo = { viewModel.undoMerchantRuleSave(applied.undoToken) },
+            )
+            return
+        }
+
+        val reviewedTransaction =
+            editorTransaction.copy(
+                reviewedAtEpochMillis = editorTransaction.reviewedAtEpochMillis ?: System.currentTimeMillis(),
+            )
+        try {
+            viewModel.upsert(reviewedTransaction)
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (failure: Throwable) {
+            // The rule operation is atomic; compensate if the separate ordinary editor write fails.
+            runCatching { viewModel.undoMerchantRuleSave(applied.undoToken) }
+            throw failure
+        }
+        val savedDraft =
+            request.editorDraft?.copy(reviewedAtEpochMillis = reviewedTransaction.reviewedAtEpochMillis)
+                ?: reviewedTransaction.toEditorDraft()
+        editorId = reviewedTransaction.id
+        editorDraft = savedDraft
+        originalEditorDraft = savedDraft
+        showSheet = false
+        bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+    }
+
+    fun saveMerchantRule(
+        originatingTransactionId: String,
+        category: String,
+        merchantOverride: String?,
+        overwriteConflict: Boolean = false,
+        editorTransaction: Transaction? = null,
+        candidateEditorDraft: EditorDraft? = null,
+    ) {
+        if (persistenceBusy || viewModel.mutationBusy.value) return
+        val isEditorSave = editorTransaction != null
+        if (isEditorSave) persistenceBusy = true
+        scope.launch {
+            try {
+                val result =
+                    viewModel.saveAndApplyMerchantRule(
+                        originatingTransactionId = originatingTransactionId,
+                        category = category,
+                        merchantOverride = merchantOverride,
+                        overwriteConflict = overwriteConflict,
+                    )
+                when (result) {
+                    is MerchantRuleSaveResult.Applied -> {
+                        pendingMerchantRuleConflict = null
+                        completeMerchantRuleSave(
+                            request =
+                                PendingMerchantRuleConflictRequest(
+                                    originatingTransactionId = originatingTransactionId,
+                                    category = category,
+                                    merchantOverride = merchantOverride,
+                                    existingRule = result.rule,
+                                    proposedRule = result.rule,
+                                    editorTransaction = editorTransaction,
+                                    editorDraft = candidateEditorDraft,
+                                ),
+                            applied = result,
+                        )
+                    }
+
+                    is MerchantRuleSaveResult.Conflict -> {
+                        pendingMerchantRuleConflict =
+                            PendingMerchantRuleConflictRequest(
+                                originatingTransactionId = originatingTransactionId,
+                                category = category,
+                                merchantOverride = merchantOverride,
+                                existingRule = result.existingRule,
+                                proposedRule = result.proposedRule,
+                                editorTransaction = editorTransaction,
+                                editorDraft = candidateEditorDraft,
+                            )
+                    }
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                snackbarHostState.showSnackbar(
+                    if (isEditorSave) "Could not save transaction and future rule." else "Could not save future rule.",
+                )
+            } finally {
+                if (isEditorSave) persistenceBusy = false
+            }
+        }
+    }
+
+    fun categorizeAndReview(
+        transaction: Transaction,
+        category: String,
+        useForFuture: Boolean,
+    ) {
+        if (persistenceBusy || viewModel.mutationBusy.value) return
+        if (useForFuture) {
+            saveMerchantRule(
+                originatingTransactionId = transaction.id,
+                category = category,
+                merchantOverride = transaction.merchantOverride,
+            )
+            return
+        }
+        scope.launch {
+            try {
+                val token = viewModel.categorizeAndReview(listOf(transaction.id), category)
+                offerReviewUndo("Reviewed ${transaction.merchant.ifBlank { "transaction" }} as $category") {
+                    viewModel.restoreReview(token)
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                snackbarHostState.showSnackbar("Could not review transaction.")
+            }
+        }
+    }
+
+    fun bulkCategorizeAndReview(
+        ids: List<String>,
+        category: String,
+    ) {
+        if (ids.isEmpty() || persistenceBusy || viewModel.mutationBusy.value) return
+        scope.launch {
+            try {
+                val token = viewModel.categorizeAndReview(ids, category)
+                offerReviewUndo("Categorized ${ids.size} transactions as $category") {
+                    viewModel.restoreReview(token)
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                snackbarHostState.showSnackbar("Could not review selected transactions.")
+            }
+        }
+    }
+
+    fun bulkAcceptAsOther(ids: List<String>) {
+        if (ids.isEmpty() || persistenceBusy || viewModel.mutationBusy.value) return
+        scope.launch {
+            try {
+                val token = viewModel.acceptAsOther(ids)
+                offerReviewUndo("Accepted ${ids.size} transactions as Other") {
+                    viewModel.restoreReview(token)
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                snackbarHostState.showSnackbar("Could not accept selected transactions.")
+            }
+        }
+    }
+
+    fun requestManualSimpleFinSync(hostState: SnackbarHostState = snackbarHostState) {
+        if (dataOperation != null) return
+        dataOperation = DataOperation.Sync
+        scope.launch {
+            var message = "Bank sync failed"
+            try {
+                val result = manualSimpleFinSync()
+                if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
+                    bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+                }
+                message = result.snackbarMessage()
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                message = "Bank sync failed"
+            } finally {
+                dataOperation = null
+            }
+            hostState.showSnackbar(message)
+        }
+    }
+
     val importLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             val callbackOperation = pickerResultOperation(uri, DataOperation.Import)
@@ -835,9 +1173,21 @@ fun FlowMoneyApp(
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
         snackbarHostState = snackbarHostState,
-        onTabSelected = { selectedTabName = it.name },
+        onTabSelected = { tab ->
+            navigationState =
+                navigationState.copy(
+                    selectedTab = tab,
+                    userSelectedBeforeLoading =
+                        navigationState.userSelectedBeforeLoading || !navigationState.coldStartReviewHandled,
+                )
+        },
         onAddTransaction = ::openNewTransactionEditor,
         onData = { showDataSheet = true },
+        pendingReviewCount = pendingReviewCount,
+        simpleFin = uiState.simpleFin,
+        operation = dataOperation,
+        syncHealthNowEpochMillis = syncHealthClock.millis(),
+        onManualSync = ::requestManualSimpleFinSync,
         modifier =
             Modifier
                 .fillMaxSize()
@@ -849,10 +1199,18 @@ fun FlowMoneyApp(
             onChartRangeModeSelected = viewModel::setChartRangeMode,
             onSelectedMonthChange = viewModel::setSelectedMonth,
             onEdit = ::openTransactionEditor,
-            onViewAllTransactions = { selectedTabName = DashboardTab.Transactions.name },
+            onViewAllTransactions = {
+                navigationState = navigationState.copy(selectedTab = DashboardTab.Transactions)
+            },
             onDelete = ::deleteImmediately,
             onAddTransaction = ::openNewTransactionEditor,
             onData = { showDataSheet = true },
+            onReview = { navigationState = navigationState.copy(selectedTab = DashboardTab.Review) },
+            onCategorizeReview = ::categorizeAndReview,
+            onBulkCategorizeReview = ::bulkCategorizeAndReview,
+            onBulkAcceptOther = ::bulkAcceptAsOther,
+            reviewOperationBusy = editorMutationBusy,
+            reviewTransactions = unreviewedTransactions,
             modifier =
                 Modifier
                     .fillMaxSize()
@@ -920,6 +1278,18 @@ fun FlowMoneyApp(
                             }
                         }
                     },
+                    onSaveWithFutureRule = { transaction ->
+                        val candidateId = editorDraft.id ?: transaction.id
+                        val candidateDraft = editorDraft.copy(id = candidateId)
+                        val candidateTransaction = candidateDraft.toTransaction()
+                        saveMerchantRule(
+                            originatingTransactionId = candidateId,
+                            category = candidateTransaction.category,
+                            merchantOverride = candidateTransaction.merchantOverride,
+                            editorTransaction = candidateTransaction,
+                            candidateEditorDraft = candidateDraft,
+                        )
+                    },
                     onDelete =
                         editorId?.let { id ->
                             uiState.sortedTransactions.firstOrNull { it.id == id }?.let { transaction ->
@@ -977,6 +1347,29 @@ fun FlowMoneyApp(
             DataSheet(
                 simpleFin = uiState.simpleFin,
                 operation = dataOperation,
+                merchantRules = merchantRules,
+                merchantRulesLoading = false,
+                onDeleteMerchantRule = { normalizedKey ->
+                    if (dataOperation != null) return@DataSheet
+                    dataOperation = DataOperation.DeleteMerchantRule
+                    scope.launch {
+                        val message =
+                            try {
+                                if (viewModel.deleteMerchantRule(normalizedKey) == null) {
+                                    "Merchant rule was already removed"
+                                } else {
+                                    "Merchant rule deleted"
+                                }
+                            } catch (failure: CancellationException) {
+                                throw failure
+                            } catch (_: Throwable) {
+                                "Could not delete merchant rule"
+                            } finally {
+                                dataOperation = null
+                            }
+                        dataSnackbarHostState.showSnackbar(message)
+                    }
+                },
                 onOpenSetup = {
                     if (dataOperation != null) return@DataSheet
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(SimpleFinCreateUrl))
@@ -1043,27 +1436,7 @@ fun FlowMoneyApp(
                         dataSnackbarHostState.showSnackbar(message)
                     }
                 },
-                onSync = {
-                    if (dataOperation != null) return@DataSheet
-                    dataOperation = DataOperation.Sync
-                    scope.launch {
-                        var message = "Bank sync failed"
-                        try {
-                            val result = manualSimpleFinSync()
-                            if (result is SimpleFinSyncResult.Success && (result.inserted > 0 || result.updated > 0)) {
-                                bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
-                            }
-                            message = result.snackbarMessage()
-                        } catch (failure: CancellationException) {
-                            throw failure
-                        } catch (_: Throwable) {
-                            message = "Bank sync failed"
-                        } finally {
-                            dataOperation = null
-                        }
-                        dataSnackbarHostState.showSnackbar(message)
-                    }
-                },
+                onSync = { requestManualSimpleFinSync(dataSnackbarHostState) },
                 onAutomaticSyncsPerDayChange = { count ->
                     if (dataOperation != null) return@DataSheet
                     dataOperation = DataOperation.UpdateAutomaticSyncs
@@ -1198,6 +1571,53 @@ fun FlowMoneyApp(
         )
     }
 
+    pendingMerchantRuleConflict?.let { conflict ->
+        val existingDisplay =
+            conflict.existingRule.merchantOverride
+                ?.let { ", display “$it”" }
+                .orEmpty()
+        val proposedDisplay =
+            conflict.proposedRule.merchantOverride
+                ?.let { ", display “$it”" }
+                .orEmpty()
+        AlertDialog(
+            onDismissRequest = {
+                if (!persistenceBusy && !viewModelMutationBusy) pendingMerchantRuleConflict = null
+            },
+            title = { Text("Replace saved rule?") },
+            text = {
+                Text(
+                    "Rule “${conflict.existingRule.normalizedProviderMerchant}” currently uses " +
+                        "${conflict.existingRule.category}$existingDisplay. Replace it with " +
+                        "${conflict.proposedRule.category}$proposedDisplay?",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingMerchantRuleConflict = null
+                        saveMerchantRule(
+                            originatingTransactionId = conflict.originatingTransactionId,
+                            category = conflict.category,
+                            merchantOverride = conflict.merchantOverride,
+                            overwriteConflict = true,
+                            editorTransaction = conflict.editorTransaction,
+                            candidateEditorDraft = conflict.editorDraft,
+                        )
+                    },
+                    enabled = !persistenceBusy && !viewModelMutationBusy,
+                    modifier = Modifier.testTag("confirm_merchant_rule_overwrite"),
+                ) { Text("Replace rule") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { pendingMerchantRuleConflict = null },
+                    enabled = !persistenceBusy && !viewModelMutationBusy,
+                ) { Text("Keep existing") }
+            },
+        )
+    }
+
     if (showDisconnectConfirmation) {
         AlertDialog(
             onDismissRequest = {
@@ -1291,6 +1711,107 @@ internal enum class DashboardTab(
     Overview("Overview", R.drawable.ic_nav_overview),
     Transactions("Transactions", R.drawable.ic_nav_transactions),
     Insights("Insights", R.drawable.ic_nav_insights),
+    Review("Review", R.drawable.ic_nav_review),
+}
+
+internal enum class SyncHealthKind {
+    Connected,
+    Pending,
+    ReconnectRequired,
+    Syncing,
+    Error,
+    CoolingDown,
+    Disconnected,
+}
+
+internal data class SyncHealthUiState(
+    val kind: SyncHealthKind,
+    val label: String,
+    val stateDescription: String,
+    val manualSync: Boolean = false,
+)
+
+internal fun simpleFinNextEligibleSyncAt(profile: SimpleFinProfileEntity): Long? {
+    val attempt = profile.lastSyncAttemptAtEpochMillis
+    val success = profile.lastSuccessfulSyncAtEpochMillis
+    val lastAttemptSucceeded = success != null && (attempt == null || success >= attempt)
+    val anchor = if (lastAttemptSucceeded) success else attempt ?: return null
+    val interval =
+        if (lastAttemptSucceeded) {
+            automaticSyncIntervalMillis(profile.automaticSyncsPerDay)
+        } else {
+            SIMPLEFIN_RETRY_INTERVAL_MILLIS
+        }
+    return try {
+        Math.addExact(anchor, interval)
+    } catch (_: ArithmeticException) {
+        Long.MAX_VALUE
+    }
+}
+
+internal fun syncHealthUiState(
+    simpleFin: SimpleFinUiState,
+    operation: DataOperation?,
+    nowEpochMillis: Long,
+): SyncHealthUiState {
+    if (operation == DataOperation.Sync) {
+        return SyncHealthUiState(SyncHealthKind.Syncing, "Syncing", "Bank sync in progress")
+    }
+    if (simpleFin.isConnectionPending) {
+        return SyncHealthUiState(SyncHealthKind.Pending, "Connection pending", "Connection pending; open Data to retry")
+    }
+    val profile =
+        simpleFin.profile
+            ?: return SyncHealthUiState(SyncHealthKind.Disconnected, "Disconnected", "Bank sync disconnected; open Data to connect")
+    if (profile.isPaused) {
+        return SyncHealthUiState(
+            SyncHealthKind.ReconnectRequired,
+            "Reconnect required",
+            "Bank reconnect required; open Data",
+        )
+    }
+
+    val failedAttempt =
+        profile.lastError?.isNotBlank() == true &&
+            profile.lastSyncAttemptAtEpochMillis != null &&
+            (
+                profile.lastSuccessfulSyncAtEpochMillis == null ||
+                    profile.lastSyncAttemptAtEpochMillis > profile.lastSuccessfulSyncAtEpochMillis
+            )
+    if (!isSimpleFinSyncEligible(profile, nowEpochMillis)) {
+        val next = simpleFinNextEligibleSyncAt(profile).toSyncTime()
+        return SyncHealthUiState(
+            kind = if (failedAttempt) SyncHealthKind.Error else SyncHealthKind.CoolingDown,
+            label = if (failedAttempt) "Error · cooling until $next" else "Cooling down · $next",
+            stateDescription =
+                if (failedAttempt) {
+                    "Sync error; cooling down until $next"
+                } else {
+                    "Connected; cooling down until $next"
+                },
+        )
+    }
+    if (failedAttempt) {
+        return SyncHealthUiState(
+            SyncHealthKind.Error,
+            "Sync error · Retry",
+            "Sync error; retry now",
+            manualSync = true,
+        )
+    }
+    if (profile.automaticSyncsPerDay == 1) {
+        return SyncHealthUiState(
+            SyncHealthKind.Connected,
+            "Connected · once daily",
+            "Connected and idle; automatic sync is once daily; open Data to change cadence",
+        )
+    }
+    return SyncHealthUiState(
+        kind = SyncHealthKind.Connected,
+        label = "Connected · Sync now",
+        stateDescription = "Connected and idle; sync now",
+        manualSync = true,
+    )
 }
 
 @Composable
@@ -1300,6 +1821,11 @@ internal fun AdaptiveFlowMoneyShell(
     onTabSelected: (DashboardTab) -> Unit,
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
+    pendingReviewCount: Int = 0,
+    simpleFin: SimpleFinUiState = SimpleFinUiState(),
+    operation: DataOperation? = null,
+    syncHealthNowEpochMillis: Long = System.currentTimeMillis(),
+    onManualSync: () -> Unit = {},
     modifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
@@ -1307,7 +1833,11 @@ internal fun AdaptiveFlowMoneyShell(
         val isWide = maxWidth >= NavigationBreakpoint
         if (isWide) {
             Row(modifier = Modifier.fillMaxSize()) {
-                FlowMoneyNavigationRail(selectedTab = selectedTab, onTabSelected = onTabSelected)
+                FlowMoneyNavigationRail(
+                    selectedTab = selectedTab,
+                    pendingReviewCount = pendingReviewCount,
+                    onTabSelected = onTabSelected,
+                )
                 FlowMoneyScaffold(
                     selectedTab = selectedTab,
                     isWide = true,
@@ -1315,6 +1845,11 @@ internal fun AdaptiveFlowMoneyShell(
                     onTabSelected = onTabSelected,
                     onAddTransaction = onAddTransaction,
                     onData = onData,
+                    pendingReviewCount = pendingReviewCount,
+                    simpleFin = simpleFin,
+                    operation = operation,
+                    syncHealthNowEpochMillis = syncHealthNowEpochMillis,
+                    onManualSync = onManualSync,
                     modifier = Modifier.weight(1f),
                     content = content,
                 )
@@ -1327,6 +1862,11 @@ internal fun AdaptiveFlowMoneyShell(
                 onTabSelected = onTabSelected,
                 onAddTransaction = onAddTransaction,
                 onData = onData,
+                pendingReviewCount = pendingReviewCount,
+                simpleFin = simpleFin,
+                operation = operation,
+                syncHealthNowEpochMillis = syncHealthNowEpochMillis,
+                onManualSync = onManualSync,
                 modifier = Modifier.fillMaxSize(),
                 content = content,
             )
@@ -1343,6 +1883,11 @@ private fun FlowMoneyScaffold(
     onTabSelected: (DashboardTab) -> Unit,
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
+    pendingReviewCount: Int,
+    simpleFin: SimpleFinUiState,
+    operation: DataOperation?,
+    syncHealthNowEpochMillis: Long,
+    onManualSync: () -> Unit,
     modifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
@@ -1352,6 +1897,10 @@ private fun FlowMoneyScaffold(
         topBar = {
             FlowMoneyTopAppBar(
                 selectedTab = selectedTab,
+                simpleFin = simpleFin,
+                operation = operation,
+                syncHealthNowEpochMillis = syncHealthNowEpochMillis,
+                onManualSync = onManualSync,
                 onData = onData,
                 scrollBehavior = scrollBehavior,
             )
@@ -1364,7 +1913,11 @@ private fun FlowMoneyScaffold(
         },
         bottomBar = {
             if (!isWide) {
-                FlowMoneyNavigationBar(selectedTab = selectedTab, onTabSelected = onTabSelected)
+                FlowMoneyNavigationBar(
+                    selectedTab = selectedTab,
+                    pendingReviewCount = pendingReviewCount,
+                    onTabSelected = onTabSelected,
+                )
             }
         },
         floatingActionButton = {
@@ -1378,8 +1931,8 @@ private fun FlowMoneyScaffold(
             ) {
                 FloatingActionButton(
                     onClick = onAddTransaction,
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     modifier =
                         Modifier
                             .testTag("add_transaction_fab")
@@ -1408,7 +1961,13 @@ internal fun FlowMoneyTopAppBar(
     selectedTab: DashboardTab,
     onData: () -> Unit,
     scrollBehavior: TopAppBarScrollBehavior? = null,
+    simpleFin: SimpleFinUiState = SimpleFinUiState(),
+    operation: DataOperation? = null,
+    syncHealthNowEpochMillis: Long = System.currentTimeMillis(),
+    onManualSync: () -> Unit = {},
 ) {
+    val syncHealth = syncHealthUiState(simpleFin, operation, syncHealthNowEpochMillis)
+    val syncActionEnabled = operation == null
     PennyOverviewTopAppBar(
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1422,13 +1981,38 @@ internal fun FlowMoneyTopAppBar(
             }
         },
         subtitle = {
-            Text(
-                text = selectedTab.label,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = selectedTab.label,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = " · ${syncHealth.label}",
+                    color =
+                        if (syncHealth.kind == SyncHealthKind.Error || syncHealth.kind == SyncHealthKind.ReconnectRequired) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier =
+                        Modifier
+                            .heightIn(min = 48.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .clickable(enabled = syncActionEnabled, role = Role.Button) {
+                                if (syncHealth.manualSync) onManualSync() else onData()
+                            }.semantics {
+                                contentDescription = "Bank sync status"
+                                stateDescription = syncHealth.stateDescription
+                            }.padding(horizontal = 4.dp, vertical = 14.dp)
+                            .testTag("sync_health_action"),
+                )
+            }
         },
         onData = onData,
         scrollBehavior = scrollBehavior,
@@ -1438,6 +2022,7 @@ internal fun FlowMoneyTopAppBar(
 @Composable
 private fun FlowMoneyNavigationBar(
     selectedTab: DashboardTab,
+    pendingReviewCount: Int,
     onTabSelected: (DashboardTab) -> Unit,
 ) {
     NavigationBar(
@@ -1449,11 +2034,12 @@ private fun FlowMoneyNavigationBar(
             NavigationBarItem(
                 selected = selectedTab == tab,
                 onClick = { onTabSelected(tab) },
-                icon = {
-                    Icon(painter = painterResource(tab.iconRes), contentDescription = null)
-                },
+                icon = { NavigationTabIcon(tab, pendingReviewCount) },
                 label = { Text(tab.label, maxLines = 1) },
-                modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
+                modifier =
+                    Modifier
+                        .testTag("tab_${tab.name.lowercase(Locale.US)}")
+                        .then(reviewTabSemantics(tab, pendingReviewCount)),
             )
         }
     }
@@ -1462,6 +2048,7 @@ private fun FlowMoneyNavigationBar(
 @Composable
 private fun FlowMoneyNavigationRail(
     selectedTab: DashboardTab,
+    pendingReviewCount: Int,
     onTabSelected: (DashboardTab) -> Unit,
 ) {
     NavigationRail(
@@ -1476,13 +2063,50 @@ private fun FlowMoneyNavigationRail(
             NavigationRailItem(
                 selected = selectedTab == tab,
                 onClick = { onTabSelected(tab) },
-                icon = {
-                    Icon(painter = painterResource(tab.iconRes), contentDescription = null)
-                },
+                icon = { NavigationTabIcon(tab, pendingReviewCount) },
                 label = { Text(tab.label, maxLines = 1) },
-                modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
+                modifier =
+                    Modifier
+                        .testTag("tab_${tab.name.lowercase(Locale.US)}")
+                        .then(reviewTabSemantics(tab, pendingReviewCount)),
             )
         }
+    }
+}
+
+private fun reviewTabSemantics(
+    tab: DashboardTab,
+    pendingReviewCount: Int,
+): Modifier =
+    if (tab == DashboardTab.Review) {
+        Modifier.semantics {
+            contentDescription = "Review"
+            stateDescription =
+                if (pendingReviewCount == 0) {
+                    "No transactions pending review"
+                } else {
+                    "$pendingReviewCount ${if (pendingReviewCount == 1) "transaction" else "transactions"} pending review"
+                }
+        }
+    } else {
+        Modifier
+    }
+
+@Composable
+private fun NavigationTabIcon(
+    tab: DashboardTab,
+    pendingReviewCount: Int,
+) {
+    if (tab == DashboardTab.Review && pendingReviewCount > 0) {
+        BadgedBox(
+            badge = {
+                Badge { Text(if (pendingReviewCount > 99) "99+" else pendingReviewCount.toString()) }
+            },
+        ) {
+            Icon(painter = painterResource(tab.iconRes), contentDescription = null)
+        }
+    } else {
+        Icon(painter = painterResource(tab.iconRes), contentDescription = null)
     }
 }
 
@@ -1498,6 +2122,12 @@ internal fun FlowMoneyScreen(
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
     modifier: Modifier = Modifier,
+    onReview: () -> Unit = {},
+    onCategorizeReview: (Transaction, String, Boolean) -> Unit = { _, _, _ -> },
+    onBulkCategorizeReview: (List<String>, String) -> Unit = { _, _ -> },
+    onBulkAcceptOther: (List<String>) -> Unit = {},
+    reviewOperationBusy: Boolean = false,
+    reviewTransactions: List<Transaction>? = null,
 ) {
     if (uiState.isLoading) {
         LoadingState(modifier)
@@ -1554,6 +2184,9 @@ internal fun FlowMoneyScreen(
                     onDelete = onDelete,
                     onAddTransaction = onAddTransaction,
                     onData = onData,
+                    simpleFin = uiState.simpleFin,
+                    pendingReviewCount = uiState.sortedTransactions.count(Transaction::isUnreviewed),
+                    onReview = onReview,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -1561,6 +2194,7 @@ internal fun FlowMoneyScreen(
             DashboardTab.Transactions -> {
                 TransactionsPage(
                     sortedTransactions = uiState.sortedTransactions,
+                    simpleFinAccounts = uiState.simpleFin.accounts,
                     onEdit = onEdit,
                     onDelete = onDelete,
                     onAddTransaction = onAddTransaction,
@@ -1583,6 +2217,24 @@ internal fun FlowMoneyScreen(
                     onEdit = onEdit,
                     onAddTransaction = onAddTransaction,
                     onData = onData,
+                    pendingReviewSummary = uiState.pendingReviewSummary,
+                    onReview = onReview,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+
+            DashboardTab.Review -> {
+                ReviewPage(
+                    unreviewedTransactions =
+                        reviewTransactions
+                            ?: uiState.sortedTransactions
+                                .filter(Transaction::isUnreviewed)
+                                .sortedByDescending(Transaction::occurredAtEpochMillis),
+                    onEdit = onEdit,
+                    onCategorize = onCategorizeReview,
+                    onBulkCategorize = onBulkCategorizeReview,
+                    onBulkAcceptOther = onBulkAcceptOther,
+                    operationBusy = reviewOperationBusy,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -1626,6 +2278,9 @@ private fun OverviewPage(
     onDelete: (Transaction) -> Unit,
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
+    simpleFin: SimpleFinUiState,
+    pendingReviewCount: Int,
+    onReview: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier) {
@@ -1639,6 +2294,14 @@ private fun OverviewPage(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PagePadding,
         ) {
+            item {
+                OverviewSyncReviewBanner(
+                    simpleFin = simpleFin,
+                    pendingReviewCount = pendingReviewCount,
+                    onReview = onReview,
+                    onData = onData,
+                )
+            }
             if (sortedTransactions.isEmpty()) {
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1653,6 +2316,7 @@ private fun OverviewPage(
                         EmptyState(
                             onAddTransaction = onAddTransaction,
                             onData = onData,
+                            disconnected = simpleFin.profile == null && !simpleFin.isConnectionPending,
                             modifier =
                                 Modifier
                                     .fillMaxWidth()
@@ -1717,6 +2381,64 @@ private fun OverviewPage(
     }
 }
 
+@Composable
+private fun OverviewSyncReviewBanner(
+    simpleFin: SimpleFinUiState,
+    pendingReviewCount: Int,
+    onReview: () -> Unit,
+    onData: () -> Unit,
+) {
+    val profile = simpleFin.profile
+    val syncText =
+        when {
+            simpleFin.isConnectionPending -> "Connection pending"
+            profile == null -> "Bank not connected"
+            profile.isPaused -> "Reconnect required"
+            profile.lastSuccessfulSyncAtEpochMillis == null -> "No successful sync yet"
+            else -> "Last successful sync ${profile.lastSuccessfulSyncAtEpochMillis.toSyncTime()}"
+        }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("overview_sync_review_banner"),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(syncText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                "$pendingReviewCount ${if (pendingReviewCount == 1) "transaction" else "transactions"} to review",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("overview_pending_review_count"),
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (pendingReviewCount > 0) {
+                    TextButton(
+                        onClick = onReview,
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_review_action"),
+                    ) { Text("Review") }
+                }
+                if (simpleFin.isConnectionPending || profile?.isPaused == true || profile == null) {
+                    TextButton(
+                        onClick = onData,
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_sync_data_action"),
+                    ) { Text(if (profile == null && !simpleFin.isConnectionPending) "Connect bank" else "Open Data") }
+                } else if (profile.automaticSyncsPerDay == 1) {
+                    TextButton(
+                        onClick = onData,
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_sync_cadence_action"),
+                    ) { Text("Adjust sync cadence (1–12/day)") }
+                }
+            }
+        }
+    }
+}
+
 internal data class TransactionDayGroup(
     val date: LocalDate,
     val transactions: List<Transaction>,
@@ -1737,9 +2459,365 @@ internal fun transactionDayGroups(transactions: List<Transaction>): List<Transac
         }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
+internal fun ReviewPage(
+    unreviewedTransactions: List<Transaction>,
+    onEdit: (Transaction) -> Unit,
+    onCategorize: (Transaction, String, Boolean) -> Unit,
+    onBulkCategorize: (List<String>, String) -> Unit,
+    onBulkAcceptOther: (List<String>) -> Unit,
+    operationBusy: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedIds by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    var confirmAcceptOther by rememberSaveable { mutableStateOf(false) }
+    val orderedTransactions =
+        remember(unreviewedTransactions) {
+            unreviewedTransactions
+                .filter(Transaction::isUnreviewed)
+                .sortedByDescending(Transaction::occurredAtEpochMillis)
+        }
+    val groups = remember(orderedTransactions) { transactionDayGroups(orderedTransactions) }
+
+    LaunchedEffect(orderedTransactions) {
+        val availableIds = orderedTransactions.mapTo(mutableSetOf(), Transaction::id)
+        selectedIds = selectedIds.filter(availableIds::contains)
+        if (orderedTransactions.isEmpty()) selectionMode = false
+    }
+
+    Box(modifier = modifier) {
+        LazyColumn(
+            modifier =
+                Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .testTag("review_list"),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PagePadding,
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Review", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${orderedTransactions.size} ${if (orderedTransactions.size == 1) "transaction" else "transactions"} pending",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("review_pending_count"),
+                        )
+                    }
+                    if (orderedTransactions.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                selectionMode = !selectionMode
+                                selectedIds = emptyList()
+                            },
+                            enabled = !operationBusy,
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("review_select_action"),
+                        ) { Text(if (selectionMode) "Done" else "Select") }
+                    }
+                }
+            }
+            if (selectionMode) {
+                item {
+                    ReviewBulkControls(
+                        selectedCount = selectedIds.size,
+                        enabled = selectedIds.isNotEmpty() && !operationBusy,
+                        onCategorize = { category ->
+                            val ids = selectedIds
+                            selectionMode = false
+                            selectedIds = emptyList()
+                            onBulkCategorize(ids, category)
+                        },
+                        onAcceptOther = { confirmAcceptOther = true },
+                    )
+                }
+            }
+            if (orderedTransactions.isEmpty()) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                        modifier = Modifier.fillMaxWidth().testTag("review_empty_state"),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("All caught up", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "New synced transactions that need a category will appear here.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            } else {
+                groups.forEach { group ->
+                    stickyHeader(key = "review_day_${group.date}") { TransactionDayHeader(group) }
+                    item(key = "review_rows_${group.date}") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            group.transactions.forEach { transaction ->
+                                key(transaction.id) {
+                                    ReviewTransactionCard(
+                                        transaction = transaction,
+                                        selectionMode = selectionMode,
+                                        selected = transaction.id in selectedIds,
+                                        enabled = !operationBusy,
+                                        onSelectionChange = { selected ->
+                                            selectedIds =
+                                                if (selected) {
+                                                    (selectedIds + transaction.id).distinct()
+                                                } else {
+                                                    selectedIds - transaction.id
+                                                }
+                                        },
+                                        onEdit = { onEdit(transaction) },
+                                        onCategorize = { category, useForFuture ->
+                                            onCategorize(transaction, category, useForFuture)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (confirmAcceptOther) {
+        AlertDialog(
+            onDismissRequest = { if (!operationBusy) confirmAcceptOther = false },
+            title = { Text("Accept as Other?") },
+            text = {
+                Text(
+                    "Mark ${selectedIds.size} selected ${if (selectedIds.size == 1) "transaction" else "transactions"} " +
+                        "reviewed with category Other?",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val ids = selectedIds
+                        confirmAcceptOther = false
+                        selectionMode = false
+                        selectedIds = emptyList()
+                        onBulkAcceptOther(ids)
+                    },
+                    enabled = selectedIds.isNotEmpty() && !operationBusy,
+                    modifier = Modifier.testTag("review_confirm_accept_other"),
+                ) { Text("Accept as Other") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmAcceptOther = false }, enabled = !operationBusy) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun ReviewBulkControls(
+    selectedCount: Int,
+    enabled: Boolean,
+    onCategorize: (String) -> Unit,
+    onAcceptOther: () -> Unit,
+) {
+    val categories = remember { (CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories).distinct() }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+        modifier = Modifier.fillMaxWidth().testTag("review_bulk_controls"),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("$selectedCount selected", fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag("review_selected_count"))
+            CategoryChoiceBar(
+                categories = categories,
+                enabled = enabled,
+                moreContentDescription = "More bulk categories",
+                testTagPrefix = "review_bulk_category",
+                onCategory = onCategorize,
+            )
+            Button(
+                onClick = onAcceptOther,
+                enabled = enabled,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary,
+                        contentColor = MaterialTheme.colorScheme.onSecondary,
+                    ),
+                modifier = Modifier.heightIn(min = 48.dp).testTag("review_accept_other_action"),
+            ) { Text("Accept as Other") }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun ReviewTransactionCard(
+    transaction: Transaction,
+    selectionMode: Boolean,
+    selected: Boolean,
+    enabled: Boolean,
+    onSelectionChange: (Boolean) -> Unit,
+    onEdit: () -> Unit,
+    onCategorize: (String, Boolean) -> Unit,
+) {
+    var useForFuture by rememberSaveable(transaction.id) { mutableStateOf(false) }
+    val selectionModifier =
+        if (selectionMode) {
+            Modifier
+                .selectable(
+                    selected = selected,
+                    enabled = enabled,
+                    role = Role.Checkbox,
+                    onClick = { onSelectionChange(!selected) },
+                ).semantics { stateDescription = if (selected) "Selected" else "Not selected" }
+        } else {
+            Modifier
+        }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("review_row_${transaction.id}")
+                .then(selectionModifier),
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .then(
+                            if (selectionMode) {
+                                Modifier
+                            } else {
+                                Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onEdit)
+                            },
+                        ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (selectionMode) {
+                    Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+                    Spacer(Modifier.width(8.dp))
+                }
+                TransactionCategoryBadge(transaction.category)
+                Spacer(Modifier.width(12.dp))
+                TransactionIdentity(transaction, Modifier.weight(1f))
+                Spacer(Modifier.width(8.dp))
+                TransactionAmount(transaction)
+            }
+            if (!selectionMode) {
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clip(MaterialTheme.shapes.medium)
+                            .clickable(enabled = enabled, role = Role.Checkbox) { useForFuture = !useForFuture }
+                            .semantics { stateDescription = if (useForFuture) "Selected" else "Not selected" }
+                            .padding(horizontal = 4.dp)
+                            .testTag("review_use_future_${transaction.id}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = useForFuture, onCheckedChange = null, enabled = enabled)
+                    Spacer(Modifier.width(6.dp))
+                    Column {
+                        Text("Use for future", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Apply this category to future transactions from the same normalized merchant.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                CategoryChoiceBar(
+                    categories = CategoryCatalog.categoriesFor(transaction.cents < 0),
+                    enabled = enabled,
+                    moreContentDescription = "More categories for ${transaction.merchant}",
+                    testTagPrefix = "review_category_${transaction.id}",
+                    onCategory = { category -> onCategorize(category, useForFuture) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun CategoryChoiceBar(
+    categories: List<String>,
+    enabled: Boolean,
+    moreContentDescription: String,
+    testTagPrefix: String,
+    onCategory: (String) -> Unit,
+) {
+    var moreExpanded by rememberSaveable { mutableStateOf(false) }
+    val visible = categories.take(4)
+    val remaining = categories.drop(4)
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth().testTag("${testTagPrefix}_choices"),
+    ) {
+        visible.forEach { category ->
+            SuggestionChip(
+                label = category,
+                isSelection = false,
+                enabled = enabled,
+                testTag = "${testTagPrefix}_${category.toCategoryChipTagSuffix()}",
+                onClick = { onCategory(category) },
+            )
+        }
+        if (remaining.isNotEmpty()) {
+            Box {
+                SuggestionChip(
+                    label = "More (${remaining.size})",
+                    isSelection = false,
+                    enabled = enabled,
+                    accessibilityLabel = moreContentDescription,
+                    testTag = "${testTagPrefix}_more",
+                    onClick = { moreExpanded = true },
+                )
+                DropdownMenu(
+                    expanded = moreExpanded,
+                    onDismissRequest = { moreExpanded = false },
+                    modifier = Modifier.testTag("${testTagPrefix}_menu"),
+                ) {
+                    remaining.forEach { category ->
+                        DropdownMenuItem(
+                            text = { Text(category) },
+                            onClick = {
+                                moreExpanded = false
+                                onCategory(category)
+                            },
+                            enabled = enabled,
+                            modifier =
+                                Modifier
+                                    .heightIn(min = 48.dp)
+                                    .semantics { contentDescription = "$category. $moreContentDescription" }
+                                    .testTag("${testTagPrefix}_more_${category.toCategoryChipTagSuffix()}"),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 private fun TransactionsPage(
     sortedTransactions: List<Transaction>,
+    simpleFinAccounts: List<SimpleFinAccountEntity>,
     onEdit: (Transaction) -> Unit,
     onDelete: (Transaction) -> Unit,
     onAddTransaction: () -> Unit,
@@ -1749,12 +2827,24 @@ private fun TransactionsPage(
     var timeFilterName by rememberSaveable { mutableStateOf(TransactionTimeFilter.All.name) }
     var selectedCategory by rememberSaveable { mutableStateOf<String?>(null) }
     var whereFilter by rememberSaveable { mutableStateOf("") }
+    var sourceFilterName by rememberSaveable { mutableStateOf(TransactionSourceFilter.All.name) }
+    var selectedAccountKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var unreviewedOnly by rememberSaveable { mutableStateOf(false) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
     val timeFilter = remember(timeFilterName) { TransactionTimeFilter.valueOf(timeFilterName) }
+    val sourceFilter = remember(sourceFilterName) { TransactionSourceFilter.valueOf(sourceFilterName) }
     val categories = remember(sortedTransactions) { TransactionFilters.categories(sortedTransactions) }
+    val accountOptions = remember(simpleFinAccounts) { TransactionFilters.accountOptions(simpleFinAccounts) }
     val filter =
-        remember(timeFilter, selectedCategory, whereFilter) {
-            TransactionFilter(time = timeFilter, category = selectedCategory, where = whereFilter)
+        remember(timeFilter, selectedCategory, whereFilter, sourceFilter, selectedAccountKey, unreviewedOnly) {
+            TransactionFilter(
+                time = timeFilter,
+                category = selectedCategory,
+                where = whereFilter,
+                source = sourceFilter,
+                accountKey = selectedAccountKey,
+                unreviewedOnly = unreviewedOnly,
+            )
         }
     val filteredTransactions =
         remember(sortedTransactions, filter) {
@@ -1763,6 +2853,11 @@ private fun TransactionsPage(
 
     LaunchedEffect(categories) {
         if (selectedCategory != null && categories.none { it == selectedCategory }) selectedCategory = null
+    }
+    LaunchedEffect(accountOptions) {
+        if (selectedAccountKey != null && accountOptions.none { it.accountKey == selectedAccountKey }) {
+            selectedAccountKey = null
+        }
     }
     val dayGroups = remember(filteredTransactions) { transactionDayGroups(filteredTransactions) }
 
@@ -1797,15 +2892,25 @@ private fun TransactionsPage(
                     selectedCategory = selectedCategory,
                     categories = categories,
                     whereFilter = whereFilter,
+                    sourceFilter = sourceFilter,
+                    selectedAccountKey = selectedAccountKey,
+                    accountOptions = accountOptions,
+                    unreviewedOnly = unreviewedOnly,
                     isExpanded = filtersExpanded,
                     onExpandedChange = { filtersExpanded = it },
                     onTimeFilterChange = { timeFilterName = it.name },
                     onCategoryChange = { selectedCategory = it },
                     onWhereFilterChange = { whereFilter = it },
+                    onSourceFilterChange = { sourceFilterName = it.name },
+                    onAccountChange = { selectedAccountKey = it },
+                    onUnreviewedOnlyChange = { unreviewedOnly = it },
                     onClear = {
                         timeFilterName = TransactionTimeFilter.All.name
                         selectedCategory = null
                         whereFilter = ""
+                        sourceFilterName = TransactionSourceFilter.All.name
+                        selectedAccountKey = null
+                        unreviewedOnly = false
                         filtersExpanded = false
                     },
                 )
@@ -1920,18 +3025,36 @@ private fun TransactionFilterBar(
     selectedCategory: String?,
     categories: List<String>,
     whereFilter: String,
+    sourceFilter: TransactionSourceFilter,
+    selectedAccountKey: String?,
+    accountOptions: List<TransactionAccountOption>,
+    unreviewedOnly: Boolean,
     isExpanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     onTimeFilterChange: (TransactionTimeFilter) -> Unit,
     onCategoryChange: (String?) -> Unit,
     onWhereFilterChange: (String) -> Unit,
+    onSourceFilterChange: (TransactionSourceFilter) -> Unit,
+    onAccountChange: (String?) -> Unit,
+    onUnreviewedOnlyChange: (Boolean) -> Unit,
     onClear: () -> Unit,
 ) {
-    val hasActiveFilter = timeFilter != TransactionTimeFilter.All || selectedCategory != null || whereFilter.isNotBlank()
+    var accountMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    val selectedAccountLabel = accountOptions.firstOrNull { it.accountKey == selectedAccountKey }?.label
+    val hasActiveFilter =
+        timeFilter != TransactionTimeFilter.All ||
+            selectedCategory != null ||
+            whereFilter.isNotBlank() ||
+            sourceFilter != TransactionSourceFilter.All ||
+            selectedAccountKey != null ||
+            unreviewedOnly
     val summary =
         buildList {
             if (timeFilter != TransactionTimeFilter.All) add(timeFilter.label)
             selectedCategory?.let { add(it) }
+            if (sourceFilter != TransactionSourceFilter.All) add(sourceFilter.label)
+            selectedAccountLabel?.let { add(it) }
+            if (unreviewedOnly) add("Needs review")
             if (whereFilter.isNotBlank()) add("“${whereFilter.trim()}”")
         }.joinToString(" · ").ifBlank { "All transactions" }
 
@@ -1949,7 +3072,7 @@ private fun TransactionFilterBar(
         OutlinedTextField(
             value = whereFilter,
             onValueChange = onWhereFilterChange,
-            placeholder = { Text("Where or merchant") },
+            placeholder = { Text("Merchant, note, or account") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             colors = flowTextFieldColors(),
@@ -2044,6 +3167,73 @@ private fun TransactionFilterBar(
                         )
                     }
                 }
+                SectionLabel("Source")
+                FlowRow(
+                    modifier =
+                        Modifier
+                            .selectableGroup()
+                            .testTag("transaction_source_filter_group"),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TransactionSourceFilter.entries.forEach { source ->
+                        SuggestionChip(
+                            label = source.label,
+                            selected = sourceFilter == source,
+                            testTag = "transaction_source_filter_${source.name.lowercase(Locale.US)}",
+                            onClick = { onSourceFilterChange(source) },
+                        )
+                    }
+                }
+                if (accountOptions.isNotEmpty()) {
+                    Box {
+                        TextButton(
+                            onClick = { accountMenuExpanded = true },
+                            modifier =
+                                Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("transaction_account_filter_action")
+                                    .semantics {
+                                        contentDescription = "Filter by account"
+                                        stateDescription = selectedAccountLabel ?: "All accounts"
+                                    },
+                        ) { Text(selectedAccountLabel?.let { "Account: $it" } ?: "All accounts") }
+                        DropdownMenu(
+                            expanded = accountMenuExpanded,
+                            onDismissRequest = { accountMenuExpanded = false },
+                            modifier = Modifier.testTag("transaction_account_filter_menu"),
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("All accounts") },
+                                onClick = {
+                                    accountMenuExpanded = false
+                                    onAccountChange(null)
+                                },
+                                modifier = Modifier.heightIn(min = 48.dp).testTag("transaction_account_filter_all"),
+                            )
+                            accountOptions.forEach { account ->
+                                DropdownMenuItem(
+                                    text = { Text(account.label) },
+                                    onClick = {
+                                        accountMenuExpanded = false
+                                        onAccountChange(account.accountKey)
+                                    },
+                                    modifier =
+                                        Modifier
+                                            .heightIn(min = 48.dp)
+                                            .testTag("transaction_account_filter_${account.accountKey}"),
+                                )
+                            }
+                        }
+                    }
+                }
+                SuggestionChip(
+                    label = "Needs review only",
+                    selected = unreviewedOnly,
+                    testTag = "transaction_unreviewed_filter",
+                    onClick = { onUnreviewedOnlyChange(!unreviewedOnly) },
+                )
+                SectionLabel("Category")
                 FlowRow(
                     modifier =
                         Modifier
@@ -2094,6 +3284,8 @@ private fun InsightsPage(
     onEdit: (Transaction) -> Unit,
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
+    pendingReviewSummary: UnreviewedSpendingSummary,
+    onReview: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var selectedDay by remember { mutableStateOf<LocalDate?>(null) }
@@ -2158,6 +3350,14 @@ private fun InsightsPage(
                     onSelectedMonthChange = onSelectedMonthChange,
                 )
             }
+            if (pendingReviewSummary.transactionCount > 0) {
+                item {
+                    PendingReviewInsightsCard(
+                        summary = pendingReviewSummary,
+                        onReview = onReview,
+                    )
+                }
+            }
             if (categoryTotals.isEmpty()) {
                 item { InsightsEmptyState(onAddTransaction = onAddTransaction) }
             } else {
@@ -2204,6 +3404,44 @@ private fun InsightsPage(
 }
 
 @Composable
+private fun PendingReviewInsightsCard(
+    summary: UnreviewedSpendingSummary,
+    onReview: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth().testTag("insights_pending_review_card"),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("Pending review", fontWeight = FontWeight.SemiBold)
+            Text(
+                "${summary.transactionCount} ${if (summary.transactionCount == 1) "transaction" else "transactions"}",
+                modifier = Modifier.testTag("insights_pending_review_count"),
+            )
+            Text(
+                MoneyFormatter.formatUsd(summary.spentCents),
+                color = LocalFinanceColors.current.expense,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.testTag("insights_pending_review_amount"),
+            )
+            Text(
+                "Pending amounts are excluded from category totals until reviewed.",
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(
+                onClick = onReview,
+                modifier = Modifier.heightIn(min = 48.dp).testTag("insights_pending_review_action"),
+            ) { Text("Review transactions") }
+        }
+    }
+}
+
+@Composable
 private fun InsightsEmptyState(onAddTransaction: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -2236,6 +3474,9 @@ private fun InsightsEmptyState(onAddTransaction: () -> Unit) {
 internal fun DataSheet(
     simpleFin: SimpleFinUiState,
     operation: DataOperation?,
+    merchantRules: List<MerchantRuleEntity> = emptyList(),
+    merchantRulesLoading: Boolean = false,
+    onDeleteMerchantRule: (String) -> Unit = {},
     onOpenSetup: () -> Unit,
     onConnect: (String) -> Unit,
     onSync: () -> Unit,
@@ -2260,6 +3501,7 @@ internal fun DataSheet(
     val profile = simpleFin.profile
     var setupToken by remember { mutableStateOf("") }
     var automaticSyncsExpanded by rememberSaveable(profile?.connectionId, profile?.isPaused) { mutableStateOf(false) }
+    var ruleToDelete by remember { mutableStateOf<MerchantRuleEntity?>(null) }
     val isBusy = operation != null
 
     fun submitSetupToken() {
@@ -2274,7 +3516,7 @@ internal fun DataSheet(
             DataSheetSectionHeader("Import & export")
             DataCard(modifier = Modifier.testTag("local_data_card")) {
                 Text(
-                    "Import transactions or save a portable CSV backup.",
+                    "Import transactions or export a portable CSV copy.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -2525,7 +3767,7 @@ internal fun DataSheet(
                         item {
                             DataCard(modifier = Modifier.testTag("bank_sync_card")) {
                                 StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
-                                StatusLine("Last error", profile.lastError?.takeIf { it.isNotBlank() } ?: "None")
+                                StatusLine("Last error", if (profile.lastError.isNullOrBlank()) "None" else "Sync needs attention")
                                 Spacer(Modifier.height(10.dp))
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                                 Spacer(Modifier.height(10.dp))
@@ -2635,7 +3877,101 @@ internal fun DataSheet(
                         item { resetDaysCard() }
                     }
                 }
+                item {
+                    MerchantRulesCard(
+                        rules = merchantRules,
+                        loading = merchantRulesLoading,
+                        enabled = !isBusy,
+                        onDelete = { ruleToDelete = it },
+                    )
+                }
             }
+        }
+    }
+
+    ruleToDelete?.let { rule ->
+        AlertDialog(
+            onDismissRequest = { if (!isBusy) ruleToDelete = null },
+            title = { Text("Delete merchant rule?") },
+            text = {
+                Text(
+                    "Delete rule “${rule.normalizedProviderMerchant}” (${rule.category})? " +
+                        "Existing transactions will not be rewritten.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        ruleToDelete = null
+                        onDeleteMerchantRule(rule.normalizedProviderMerchant)
+                    },
+                    enabled = !isBusy,
+                    modifier = Modifier.testTag("confirm_delete_merchant_rule"),
+                ) { Text("Delete rule", color = LocalFinanceColors.current.expense) }
+            },
+            dismissButton = {
+                TextButton(onClick = { ruleToDelete = null }, enabled = !isBusy) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun MerchantRulesCard(
+    rules: List<MerchantRuleEntity>,
+    loading: Boolean,
+    enabled: Boolean,
+    onDelete: (MerchantRuleEntity) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        DataSheetSectionHeader("Merchant rules")
+        DataCard(modifier = Modifier.testTag("merchant_rules_card")) {
+            when {
+                loading -> {
+                    Text("Loading saved rules…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                rules.isEmpty() -> {
+                    Text("No saved merchant rules", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                else -> {
+                    rules.forEachIndexed { index, rule ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().testTag("merchant_rule_$index"),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(rule.normalizedProviderMerchant, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    buildString {
+                                        append(rule.category)
+                                        rule.merchantOverride?.let { append(" · Display: $it") }
+                                    },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            TextButton(
+                                onClick = { onDelete(rule) },
+                                enabled = enabled,
+                                modifier =
+                                    Modifier
+                                        .heightIn(min = 48.dp)
+                                        .semantics { contentDescription = "Delete rule ${rule.normalizedProviderMerchant}" }
+                                        .testTag("delete_merchant_rule_$index"),
+                            ) { Text("Delete") }
+                        }
+                        if (index < rules.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Deleting a rule does not rewrite historical transactions.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -3905,6 +5241,7 @@ private fun EmptyState(
     onAddTransaction: () -> Unit,
     onData: () -> Unit,
     modifier: Modifier = Modifier,
+    disconnected: Boolean = false,
 ) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -3921,7 +5258,11 @@ private fun EmptyState(
             Spacer(Modifier.height(10.dp))
             Text("Start tracking", fontWeight = FontWeight.SemiBold)
             Text(
-                "Add your first transaction, or import a CSV from Data.",
+                if (disconnected) {
+                    "Connect your bank to review synced spending, or add a transaction manually."
+                } else {
+                    "Add your first transaction, or import a CSV from Data."
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center,
@@ -3932,7 +5273,15 @@ private fun EmptyState(
                 val addButton: @Composable (Modifier) -> Unit = { buttonModifier ->
                     Button(
                         onClick = onAddTransaction,
-                        colors = ButtonDefaults.buttonColors(),
+                        colors =
+                            if (disconnected) {
+                                ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                )
+                            } else {
+                                ButtonDefaults.buttonColors()
+                            },
                         shape = MaterialTheme.shapes.large,
                         modifier = buttonModifier.heightIn(min = 48.dp).testTag("empty_add_transaction"),
                     ) { Text("Add transaction") }
@@ -3941,23 +5290,29 @@ private fun EmptyState(
                     Button(
                         onClick = onData,
                         colors =
-                            ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                            ),
+                            if (disconnected) {
+                                ButtonDefaults.buttonColors()
+                            } else {
+                                ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                )
+                            },
                         shape = MaterialTheme.shapes.large,
                         modifier = buttonModifier.heightIn(min = 48.dp).testTag("empty_data_action"),
-                    ) { Text("Import from Data") }
+                    ) { Text(if (disconnected) "Connect your bank" else "Import from Data") }
                 }
+                val primary = if (disconnected) dataButton else addButton
+                val secondary = if (disconnected) addButton else dataButton
                 if (maxWidth < 480.dp) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        addButton(Modifier.fillMaxWidth())
-                        dataButton(Modifier.fillMaxWidth())
+                        primary(Modifier.fillMaxWidth())
+                        secondary(Modifier.fillMaxWidth())
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        addButton(Modifier.weight(1f))
-                        dataButton(Modifier.weight(1f))
+                        primary(Modifier.weight(1f))
+                        secondary(Modifier.weight(1f))
                     }
                 }
             }
@@ -4214,6 +5569,7 @@ internal fun TransactionEditor(
     onCancel: () -> Unit,
     persistenceBusy: Boolean,
     modifier: Modifier = Modifier,
+    onSaveWithFutureRule: ((Transaction) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -4225,6 +5581,9 @@ internal fun TransactionEditor(
     var locationStatus by rememberSaveable { mutableStateOf<String?>(null) }
     var locationSuggestion by rememberSaveable { mutableStateOf<String?>(null) }
     var amountInput by rememberSaveable(transaction?.id) { mutableStateOf(draft.amount) }
+    val isSynced = draft.source == "simplefin"
+    var useForFuture by rememberSaveable(transaction?.id) { mutableStateOf(false) }
+    var syncedAdvancedExpanded by rememberSaveable(transaction?.id) { mutableStateOf(false) }
     val editorStateKey = transaction?.id ?: draft.id ?: "new"
     var moreDetailsExpanded by rememberSaveable(editorStateKey) {
         mutableStateOf(draft.note.isNotBlank() || draft.recurringIntervalName.isNotBlank())
@@ -4360,20 +5719,23 @@ internal fun TransactionEditor(
                 }
             }
 
-            TransactionTypeToggle(
-                isExpense = draft.isExpense,
-                onExpenseChange = {
-                    val updatedCategories = CategoryCatalog.categoriesFor(it)
-                    showAllCategories = false
-                    onDraftChange(
-                        draft.copy(
-                            isExpense = it,
-                            category =
-                                draft.category.takeIf { category -> category in updatedCategories } ?: updatedCategories.first(),
-                        ),
-                    )
-                },
-            )
+            if (!isSynced) {
+                TransactionTypeToggle(
+                    isExpense = draft.isExpense,
+                    onExpenseChange = {
+                        val updatedCategories = CategoryCatalog.categoriesFor(it)
+                        showAllCategories = false
+                        onDraftChange(
+                            draft.copy(
+                                isExpense = it,
+                                category =
+                                    draft.category.takeIf { category -> category in updatedCategories }
+                                        ?: updatedCategories.first(),
+                            ),
+                        )
+                    },
+                )
+            }
 
             LazyColumn(
                 modifier =
@@ -4384,192 +5746,99 @@ internal fun TransactionEditor(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
                 contentPadding = PaddingValues(top = 10.dp, bottom = 12.dp),
             ) {
-                item {
-                    AmountPad(
-                        amount = amountInput,
-                        isExpense = draft.isExpense,
-                        onKey = ::applyAmountKey,
-                    )
-                    if (amountSuggestions.isNotEmpty()) {
-                        Spacer(Modifier.height(10.dp))
-                        SectionLabel("Suggested amounts")
-                        Spacer(Modifier.height(8.dp))
-                        FlowRow(
-                            modifier = Modifier.selectableGroup(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                if (isSynced) {
+                    item {
+                        SyncedProviderSummary(draft = draft, dateTime = dateTime)
+                    }
+                    item {
+                        Column(
+                            modifier =
+                                Modifier.animateContentSize(
+                                    animationSpec =
+                                        tween(
+                                            durationMillis = PennyMotion.DurationMedium,
+                                            easing = PennyMotion.StandardEasing,
+                                        ),
+                                ),
                         ) {
-                            amountSuggestions.forEachIndexed { index, suggestion ->
-                                SuggestionChip(
-                                    label = "${MoneyFormatter.formatUsd(suggestion.cents)} · ${suggestion.source.shortLabel()}",
-                                    selected = MoneyFormatter.parseAmountToCents(amountInput).absoluteValue == suggestion.cents,
-                                    testTag = "amount_suggestion_$index",
-                                    onClick = {
-                                        val suggestedAmount = MoneyFormatter.formatAmountText(suggestion.cents)
-                                        amountInput = suggestedAmount
-                                        onDraftChange(draft.copy(amount = suggestedAmount))
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
-
-                item {
-                    SectionLabel("Where")
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = draft.merchant,
-                        onValueChange = { onDraftChange(draft.copy(merchant = it)) },
-                        placeholder = { Text("Merchant or place") },
-                        singleLine = true,
-                        keyboardOptions =
-                            KeyboardOptions(
-                                capitalization = KeyboardCapitalization.Words,
-                                imeAction = ImeAction.Next,
-                            ),
-                        colors = flowTextFieldColors(),
-                        shape = MaterialTheme.shapes.large,
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .testTag("merchant_field"),
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        SuggestionChip(
-                            label = "Near me",
-                            selected = locationStatus == "Finding nearby address...",
-                            isSelection = false,
-                            onClick = {
-                                if (hasLocationPermission(context)) {
-                                    loadNearbySuggestion()
-                                } else {
-                                    locationPermissionLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
-                                }
-                            },
-                        )
-                        locationSuggestion?.let { suggestion ->
-                            SuggestionChip(
-                                label = suggestion,
-                                selected = draft.merchant == suggestion,
-                                onClick = {
-                                    onDraftChange(draft.copy(merchant = suggestion))
-                                },
-                            )
-                        }
-                        merchantSuggestions.forEach { suggestion ->
-                            SuggestionChip(
-                                label = suggestion,
-                                selected = draft.merchant == suggestion,
-                                onClick = {
-                                    onDraftChange(draft.copy(merchant = suggestion))
-                                },
-                            )
-                        }
-                    }
-                    locationStatus?.let { status ->
-                        Spacer(Modifier.height(6.dp))
-                        Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                    }
-                }
-
-                item {
-                    Column(
-                        modifier =
-                            Modifier.animateContentSize(
-                                animationSpec =
-                                    tween(
-                                        durationMillis = PennyMotion.DurationMedium,
-                                        easing = PennyMotion.StandardEasing,
-                                    ),
-                            ),
-                    ) {
-                        SectionLabel("Category")
-                        Spacer(Modifier.height(8.dp))
-                        FlowRow(
-                            modifier = Modifier.selectableGroup(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            categoryPickerOptions.visible.forEach { option ->
-                                SuggestionChip(
-                                    label = option.label,
-                                    selected = draft.category == option.label,
-                                    testTag = "category_chip_${option.label.toCategoryChipTagSuffix()}",
-                                    onClick = {
-                                        onDraftChange(draft.copy(category = option.label))
-                                    },
-                                )
-                            }
-                        }
-                        if (categoryPickerOptions.hiddenCount > 0 || showAllCategories) {
+                            SectionLabel("Category")
                             Spacer(Modifier.height(8.dp))
-                            SuggestionChip(
-                                label = if (showAllCategories) "Less" else "More (${categoryPickerOptions.hiddenCount})",
-                                testTag = "category_more_button",
-                                isSelection = false,
-                                onClick = { showAllCategories = !showAllCategories },
-                            )
-                        }
-                    }
-                }
-
-                item {
-                    MoreDetailsDisclosure(
-                        dateTime = dateTime,
-                        recurringInterval = draft.recurringIntervalName.toRecurrenceIntervalOrNull(),
-                        expanded = moreDetailsExpanded,
-                        onExpandedChange = { moreDetailsExpanded = it },
-                    )
-                }
-
-                if (moreDetailsExpanded) {
-                    item {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            DateTimeField(
-                                "Date",
-                                dateTime.toLocalDate().format(DateFormatter),
-                                Modifier.widthIn(min = 150.dp).weight(1f).testTag("date_picker_button"),
-                            ) { showDatePicker = true }
-                            DateTimeField(
-                                "Time",
-                                dateTime.toLocalTime().format(TimeFormatter),
-                                Modifier.widthIn(min = 150.dp).weight(1f).testTag("time_picker_button"),
-                            ) { showTimePicker = true }
-                        }
-                    }
-
-                    item {
-                        SuggestionSection(title = "Recurring") {
-                            SuggestionChip(
-                                label = "Off",
-                                selected = draft.recurringIntervalName.isBlank(),
-                                testTag = "recurring_chip_off",
-                                onClick = {
-                                    onDraftChange(draft.copy(recurringIntervalName = ""))
-                                },
-                            )
-                            RecurrenceInterval.entries.forEach { interval ->
+                            FlowRow(
+                                modifier = Modifier.selectableGroup(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                categoryPickerOptions.visible.forEach { option ->
+                                    SuggestionChip(
+                                        label = option.label,
+                                        selected = draft.category == option.label,
+                                        testTag = "category_chip_${option.label.toCategoryChipTagSuffix()}",
+                                        onClick = { onDraftChange(draft.copy(category = option.label)) },
+                                    )
+                                }
+                            }
+                            if (categoryPickerOptions.hiddenCount > 0 || showAllCategories) {
+                                Spacer(Modifier.height(8.dp))
                                 SuggestionChip(
-                                    label = interval.label,
-                                    selected = draft.recurringIntervalName == interval.name,
-                                    testTag = "recurring_chip_${interval.name.lowercase(Locale.US)}",
-                                    onClick = {
-                                        onDraftChange(draft.copy(recurringIntervalName = interval.name))
-                                    },
+                                    label = if (showAllCategories) "Less" else "More (${categoryPickerOptions.hiddenCount})",
+                                    testTag = "category_more_button",
+                                    isSelection = false,
+                                    onClick = { showAllCategories = !showAllCategories },
                                 )
                             }
                         }
                     }
-
+                    item {
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .clip(MaterialTheme.shapes.medium)
+                                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                                    .clickable(role = Role.Checkbox) { useForFuture = !useForFuture }
+                                    .semantics { stateDescription = if (useForFuture) "Selected" else "Not selected" }
+                                    .padding(horizontal = 10.dp)
+                                    .testTag("synced_use_future"),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = useForFuture, onCheckedChange = null)
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text("Use for future", fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Save a rule for this normalized provider merchant.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    }
+                    item {
+                        OutlinedTextField(
+                            value = draft.merchantOverride.orEmpty(),
+                            onValueChange = { value ->
+                                val override = value.takeIf { it.isNotBlank() }
+                                onDraftChange(
+                                    draft.copy(
+                                        merchantOverride = override,
+                                        merchant = override ?: draft.providerMerchant ?: draft.merchant,
+                                    ),
+                                )
+                            },
+                            label = { Text("Merchant display override (optional)") },
+                            placeholder = { Text(draft.providerMerchant ?: "Provider merchant") },
+                            singleLine = true,
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.Words,
+                                    imeAction = ImeAction.Next,
+                                ),
+                            colors = flowTextFieldColors(),
+                            shape = MaterialTheme.shapes.large,
+                            modifier = Modifier.fillMaxWidth().testTag("merchant_override_field"),
+                        )
+                    }
                     item {
                         OutlinedTextField(
                             value = draft.note,
@@ -4583,11 +5852,273 @@ internal fun TransactionEditor(
                                 ),
                             colors = flowTextFieldColors(),
                             shape = MaterialTheme.shapes.large,
+                            modifier = Modifier.fillMaxWidth().testTag("note_field"),
+                        )
+                    }
+                    item {
+                        SyncedAdvancedDisclosure(
+                            expanded = syncedAdvancedExpanded,
+                            onExpandedChange = { syncedAdvancedExpanded = it },
+                        )
+                    }
+                    if (syncedAdvancedExpanded) {
+                        item {
+                            Text(
+                                "Amount, date, and transaction type come from your bank and may refresh on the next sync.",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.testTag("synced_advanced_warning"),
+                            )
+                        }
+                        item {
+                            TransactionTypeToggle(
+                                isExpense = draft.isExpense,
+                                onExpenseChange = {
+                                    val updatedCategories = CategoryCatalog.categoriesFor(it)
+                                    showAllCategories = false
+                                    onDraftChange(
+                                        draft.copy(
+                                            isExpense = it,
+                                            category =
+                                                draft.category.takeIf { category -> category in updatedCategories }
+                                                    ?: updatedCategories.first(),
+                                        ),
+                                    )
+                                },
+                            )
+                        }
+                        item {
+                            AmountPad(
+                                amount = amountInput,
+                                isExpense = draft.isExpense,
+                                onKey = ::applyAmountKey,
+                            )
+                        }
+                        item {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                DateTimeField(
+                                    "Date",
+                                    dateTime.toLocalDate().format(DateFormatter),
+                                    Modifier.widthIn(min = 150.dp).weight(1f).testTag("date_picker_button"),
+                                ) { showDatePicker = true }
+                                DateTimeField(
+                                    "Time",
+                                    dateTime.toLocalTime().format(TimeFormatter),
+                                    Modifier.widthIn(min = 150.dp).weight(1f).testTag("time_picker_button"),
+                                ) { showTimePicker = true }
+                            }
+                        }
+                    }
+                } else {
+                    item {
+                        AmountPad(
+                            amount = amountInput,
+                            isExpense = draft.isExpense,
+                            onKey = ::applyAmountKey,
+                        )
+                        if (amountSuggestions.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            SectionLabel("Suggested amounts")
+                            Spacer(Modifier.height(8.dp))
+                            FlowRow(
+                                modifier = Modifier.selectableGroup(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                amountSuggestions.forEachIndexed { index, suggestion ->
+                                    SuggestionChip(
+                                        label = "${MoneyFormatter.formatUsd(suggestion.cents)} · ${suggestion.source.shortLabel()}",
+                                        selected = MoneyFormatter.parseAmountToCents(amountInput).absoluteValue == suggestion.cents,
+                                        testTag = "amount_suggestion_$index",
+                                        onClick = {
+                                            val suggestedAmount = MoneyFormatter.formatAmountText(suggestion.cents)
+                                            amountInput = suggestedAmount
+                                            onDraftChange(draft.copy(amount = suggestedAmount))
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        SectionLabel("Where")
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = draft.merchant,
+                            onValueChange = { onDraftChange(draft.copy(merchant = it)) },
+                            placeholder = { Text("Merchant or place") },
+                            singleLine = true,
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.Words,
+                                    imeAction = ImeAction.Next,
+                                ),
+                            colors = flowTextFieldColors(),
+                            shape = MaterialTheme.shapes.large,
                             modifier =
                                 Modifier
                                     .fillMaxWidth()
-                                    .testTag("note_field"),
+                                    .testTag("merchant_field"),
                         )
+                        Spacer(Modifier.height(10.dp))
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            SuggestionChip(
+                                label = "Near me",
+                                selected = locationStatus == "Finding nearby address...",
+                                isSelection = false,
+                                onClick = {
+                                    if (hasLocationPermission(context)) {
+                                        loadNearbySuggestion()
+                                    } else {
+                                        locationPermissionLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
+                                    }
+                                },
+                            )
+                            locationSuggestion?.let { suggestion ->
+                                SuggestionChip(
+                                    label = suggestion,
+                                    selected = draft.merchant == suggestion,
+                                    onClick = {
+                                        onDraftChange(draft.copy(merchant = suggestion))
+                                    },
+                                )
+                            }
+                            merchantSuggestions.forEach { suggestion ->
+                                SuggestionChip(
+                                    label = suggestion,
+                                    selected = draft.merchant == suggestion,
+                                    onClick = {
+                                        onDraftChange(draft.copy(merchant = suggestion))
+                                    },
+                                )
+                            }
+                        }
+                        locationStatus?.let { status ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                        }
+                    }
+
+                    item {
+                        Column(
+                            modifier =
+                                Modifier.animateContentSize(
+                                    animationSpec =
+                                        tween(
+                                            durationMillis = PennyMotion.DurationMedium,
+                                            easing = PennyMotion.StandardEasing,
+                                        ),
+                                ),
+                        ) {
+                            SectionLabel("Category")
+                            Spacer(Modifier.height(8.dp))
+                            FlowRow(
+                                modifier = Modifier.selectableGroup(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                categoryPickerOptions.visible.forEach { option ->
+                                    SuggestionChip(
+                                        label = option.label,
+                                        selected = draft.category == option.label,
+                                        testTag = "category_chip_${option.label.toCategoryChipTagSuffix()}",
+                                        onClick = {
+                                            onDraftChange(draft.copy(category = option.label))
+                                        },
+                                    )
+                                }
+                            }
+                            if (categoryPickerOptions.hiddenCount > 0 || showAllCategories) {
+                                Spacer(Modifier.height(8.dp))
+                                SuggestionChip(
+                                    label = if (showAllCategories) "Less" else "More (${categoryPickerOptions.hiddenCount})",
+                                    testTag = "category_more_button",
+                                    isSelection = false,
+                                    onClick = { showAllCategories = !showAllCategories },
+                                )
+                            }
+                        }
+                    }
+
+                    item {
+                        MoreDetailsDisclosure(
+                            dateTime = dateTime,
+                            recurringInterval = draft.recurringIntervalName.toRecurrenceIntervalOrNull(),
+                            expanded = moreDetailsExpanded,
+                            onExpandedChange = { moreDetailsExpanded = it },
+                        )
+                    }
+
+                    if (moreDetailsExpanded) {
+                        item {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                DateTimeField(
+                                    "Date",
+                                    dateTime.toLocalDate().format(DateFormatter),
+                                    Modifier.widthIn(min = 150.dp).weight(1f).testTag("date_picker_button"),
+                                ) { showDatePicker = true }
+                                DateTimeField(
+                                    "Time",
+                                    dateTime.toLocalTime().format(TimeFormatter),
+                                    Modifier.widthIn(min = 150.dp).weight(1f).testTag("time_picker_button"),
+                                ) { showTimePicker = true }
+                            }
+                        }
+
+                        item {
+                            SuggestionSection(title = "Recurring") {
+                                SuggestionChip(
+                                    label = "Off",
+                                    selected = draft.recurringIntervalName.isBlank(),
+                                    testTag = "recurring_chip_off",
+                                    onClick = {
+                                        onDraftChange(draft.copy(recurringIntervalName = ""))
+                                    },
+                                )
+                                RecurrenceInterval.entries.forEach { interval ->
+                                    SuggestionChip(
+                                        label = interval.label,
+                                        selected = draft.recurringIntervalName == interval.name,
+                                        testTag = "recurring_chip_${interval.name.lowercase(Locale.US)}",
+                                        onClick = {
+                                            onDraftChange(draft.copy(recurringIntervalName = interval.name))
+                                        },
+                                    )
+                                }
+                            }
+                        }
+
+                        item {
+                            OutlinedTextField(
+                                value = draft.note,
+                                onValueChange = { onDraftChange(draft.copy(note = it)) },
+                                label = { Text("Note") },
+                                minLines = 2,
+                                keyboardOptions =
+                                    KeyboardOptions(
+                                        capitalization = KeyboardCapitalization.Sentences,
+                                        imeAction = ImeAction.Done,
+                                    ),
+                                colors = flowTextFieldColors(),
+                                shape = MaterialTheme.shapes.large,
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .testTag("note_field"),
+                            )
+                        }
                     }
                 }
             }
@@ -4618,7 +6149,12 @@ internal fun TransactionEditor(
                         if (MoneyFormatter.parseAmountToCents(draft.amount).absoluteValue == 0) {
                             error = "Enter an amount"
                         } else {
-                            onSave(draft.toTransaction())
+                            val transactionToSave = draft.toTransaction()
+                            if (isSynced && useForFuture && onSaveWithFutureRule != null) {
+                                onSaveWithFutureRule(transactionToSave)
+                            } else {
+                                onSave(transactionToSave)
+                            }
                         }
                     },
                     enabled = !persistenceBusy,
@@ -4676,6 +6212,76 @@ internal fun TransactionEditor(
                 showTimePicker = false
             },
         )
+    }
+}
+
+@Composable
+private fun SyncedProviderSummary(
+    draft: EditorDraft,
+    dateTime: LocalDateTime,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth().testTag("synced_provider_summary"),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Bank details", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            StatusLine("Account", draft.accountName ?: draft.accountKey ?: "Unknown account")
+            StatusLine("Date", dateTime.format(ListDateFormatter))
+            StatusLine(
+                "Amount",
+                MoneyFormatter.formatUsd(
+                    TransactionSuggestions.signedCents(
+                        MoneyFormatter.parseAmountToCents(draft.amount).absoluteValue,
+                        draft.isExpense,
+                    ),
+                ),
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Text(
+                "Raw provider description",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Text(
+                draft.providerDescription ?: draft.providerMerchant ?: "Unavailable",
+                modifier = Modifier.testTag("synced_provider_description"),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SyncedAdvancedDisclosure(
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .clip(MaterialTheme.shapes.medium)
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .clickable(role = Role.Button) { onExpandedChange(!expanded) }
+                .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .testTag("synced_advanced_toggle"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(if (expanded) "Hide advanced" else "Advanced", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Edit provider-owned amount, date, or type",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Text(if (expanded) "−" else "+", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleLarge)
     }
 }
 
@@ -4908,14 +6514,16 @@ private fun SuggestionChip(
     selected: Boolean = false,
     testTag: String? = null,
     isSelection: Boolean = true,
+    enabled: Boolean = true,
+    accessibilityLabel: String? = null,
     onClick: () -> Unit,
 ) {
     val tagModifier = if (testTag == null) Modifier else Modifier.testTag(testTag)
     val interactionModifier =
         if (isSelection) {
-            Modifier.selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
         } else {
-            Modifier.clickable(role = Role.Button, onClick = onClick)
+            Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
         }
     Box(
         modifier =
@@ -4925,7 +6533,13 @@ private fun SuggestionChip(
                 .clip(MaterialTheme.shapes.large)
                 .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
                 .then(interactionModifier)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .then(
+                    if (accessibilityLabel == null) {
+                        Modifier
+                    } else {
+                        Modifier.semantics { contentDescription = accessibilityLabel }
+                    },
+                ).padding(horizontal = 14.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(

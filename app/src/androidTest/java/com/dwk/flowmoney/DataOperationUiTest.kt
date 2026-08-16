@@ -370,6 +370,48 @@ class DataOperationUiTest {
     }
 
     @Test
+    fun merchantRulesListExactValuesAndRequireIndividualDeleteConfirmation() {
+        var deletedKey: String? = null
+        composeRule.setContent {
+            MaterialTheme {
+                DataSheet(
+                    simpleFin = SimpleFinUiState(),
+                    operation = null,
+                    merchantRules =
+                        listOf(
+                            MerchantRuleEntity(
+                                normalizedProviderMerchant = "coffee shop 42",
+                                category = "Coffee",
+                                merchantOverride = "Morning coffee",
+                            ),
+                        ),
+                    onDeleteMerchantRule = { deletedKey = it },
+                    onOpenSetup = {},
+                    onConnect = {},
+                    onSync = {},
+                    onImport = {},
+                    onExport = {},
+                    onDisconnect = {},
+                    onClose = {},
+                    onRetryConnection = {},
+                    onCancelPendingConnection = {},
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("merchant_rules_card"))
+        composeRule.onNodeWithText("coffee shop 42").assertIsDisplayed()
+        composeRule.onNodeWithText("Coffee · Display: Morning coffee").assertIsDisplayed()
+        composeRule.onNodeWithTag("delete_merchant_rule_0").performClick()
+        composeRule.onNodeWithText("Existing transactions will not be rewritten.", substring = true).assertIsDisplayed()
+        composeRule.runOnIdle { assertNull(deletedKey) }
+        composeRule.onNodeWithTag("confirm_delete_merchant_rule").performClick()
+        composeRule.runOnIdle { assertEquals("coffee shop 42", deletedKey) }
+    }
+
+    @Test
     fun successfulConnectionUsesDedicatedSnackbarMessage() {
         composeRule.setContent {
             val snackbarHostState = remember { SnackbarHostState() }

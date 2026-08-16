@@ -90,6 +90,75 @@ class MainActivityImportTest {
         assertThat(restored.accountKey).isNull()
     }
 
+    @Test fun trueColdStartRoutesToReviewOnceAndOnlyWhenPending() {
+        val routed =
+            routeTrueColdStartToReview(
+                state = DashboardNavigationState(),
+                isLoading = false,
+                pendingReviewCount = 2,
+            )
+
+        assertThat(routed.selectedTab).isEqualTo(DashboardTab.Review)
+        assertThat(routed.coldStartReviewHandled).isTrue()
+        assertThat(
+            routeTrueColdStartToReview(routed, isLoading = false, pendingReviewCount = 5),
+        ).isEqualTo(routed)
+        assertThat(
+            routeTrueColdStartToReview(DashboardNavigationState(), isLoading = false, pendingReviewCount = 0).selectedTab,
+        ).isEqualTo(DashboardTab.Overview)
+    }
+
+    @Test fun coldStartReviewNeverOverridesRestoredUserOrExternalNavigation() {
+        val protectedStates =
+            listOf(
+                DashboardNavigationState(selectedTab = DashboardTab.Insights, restoredNavigation = true),
+                DashboardNavigationState(selectedTab = DashboardTab.Transactions, userSelectedBeforeLoading = true),
+                DashboardNavigationState(selectedTab = DashboardTab.Overview, externalRouteHandled = true),
+            )
+
+        protectedStates.forEach { state ->
+            val routed = routeTrueColdStartToReview(state, isLoading = false, pendingReviewCount = 3)
+            assertThat(routed.selectedTab).isEqualTo(state.selectedTab)
+            assertThat(routed.coldStartReviewHandled).isTrue()
+        }
+        assertThat(
+            routeTrueColdStartToReview(DashboardNavigationState(), isLoading = true, pendingReviewCount = 3),
+        ).isEqualTo(DashboardNavigationState())
+    }
+
+    @Test fun syncHealthUsesRepositoryEligibilityAndNeverOffersCooldownBypass() {
+        val now = 1_800_000_000_000L
+        val coolingProfile =
+            SimpleFinProfileEntity(
+                connectionId = "connected",
+                lastSuccessfulSyncAtEpochMillis = now,
+                lastSyncAttemptAtEpochMillis = now,
+                automaticSyncsPerDay = 4,
+            )
+        val cooling = syncHealthUiState(SimpleFinUiState(profile = coolingProfile), operation = null, nowEpochMillis = now)
+
+        assertThat(cooling.kind).isEqualTo(SyncHealthKind.CoolingDown)
+        assertThat(cooling.manualSync).isFalse()
+        assertThat(cooling.stateDescription).contains("cooling down until")
+        assertThat(simpleFinNextEligibleSyncAt(coolingProfile))
+            .isEqualTo(now + automaticSyncIntervalMillis(4))
+
+        val eligible =
+            syncHealthUiState(
+                SimpleFinUiState(
+                    profile =
+                        coolingProfile.copy(
+                            lastSuccessfulSyncAtEpochMillis = now - automaticSyncIntervalMillis(4),
+                            lastSyncAttemptAtEpochMillis = now - automaticSyncIntervalMillis(4),
+                        ),
+                ),
+                operation = null,
+                nowEpochMillis = now,
+            )
+        assertThat(eligible.manualSync).isTrue()
+        assertThat(eligible.kind).isEqualTo(SyncHealthKind.Connected)
+    }
+
     @Test fun transactionDayGroupsKeepSeparateSpentAndReceivedTotals() {
         val recentDate = LocalDate.of(2026, 7, 10)
         val earlierDate = LocalDate.of(2026, 7, 9)
