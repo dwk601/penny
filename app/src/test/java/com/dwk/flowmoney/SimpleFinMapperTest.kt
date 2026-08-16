@@ -137,6 +137,13 @@ class SimpleFinMapperTest {
                                     payee = "Ordinary card account",
                                 ),
                                 SimpleFinTransaction(
+                                    id = "automatic-payment",
+                                    posted = 2,
+                                    amount = "100.00",
+                                    description = "AUTOMATIC PAYMENT",
+                                    pending = false,
+                                ),
+                                SimpleFinTransaction(
                                     id = "card-wrong-sign",
                                     posted = 2,
                                     amount = "-100.00",
@@ -173,6 +180,8 @@ class SimpleFinMapperTest {
         assertThat(result.transactions.associate { it.id.substringAfterLast(':') to it.flowKind })
             .containsExactly(
                 "Y2FyZC1zaWRl",
+                FlowKind.TRANSFER,
+                "YXV0b21hdGljLXBheW1lbnQ",
                 FlowKind.TRANSFER,
                 "Y2FyZC13cm9uZy1zaWdu",
                 FlowKind.NORMAL,
