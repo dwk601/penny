@@ -119,6 +119,73 @@ class SimpleFinMapperTest {
     }
 
     @Test
+    fun mapsProviderFlowKindFromRawDescriptionsWithExpectedSignSemantics() {
+        val result =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(
+                    account(
+                        id = "classification",
+                        transactions =
+                            listOf(
+                                SimpleFinTransaction(
+                                    id = "card-side",
+                                    posted = 1,
+                                    amount = "100.00",
+                                    description = "PAYMENT - THANK YOU",
+                                    pending = false,
+                                    payee = "Ordinary card account",
+                                ),
+                                SimpleFinTransaction(
+                                    id = "card-wrong-sign",
+                                    posted = 2,
+                                    amount = "-100.00",
+                                    description = "PAYMENT - THANK YOU",
+                                    pending = false,
+                                ),
+                                SimpleFinTransaction(
+                                    id = "bank-side",
+                                    posted = 3,
+                                    amount = "-100.00",
+                                    description = "CREDIT CARD PAYMENT",
+                                    pending = false,
+                                ),
+                                SimpleFinTransaction(
+                                    id = "bank-wrong-sign",
+                                    posted = 4,
+                                    amount = "100.00",
+                                    description = "CREDIT CARD PAYMENT",
+                                    pending = false,
+                                ),
+                                SimpleFinTransaction(
+                                    id = "payee-is-not-descriptor",
+                                    posted = 5,
+                                    amount = "100.00",
+                                    description = "GROCERY PURCHASE",
+                                    pending = false,
+                                    payee = "PAYMENT - THANK YOU",
+                                ),
+                            ),
+                    ),
+                ),
+            )
+
+        assertThat(result.transactions.associate { it.id.substringAfterLast(':') to it.flowKind })
+            .containsExactly(
+                "Y2FyZC1zaWRl",
+                FlowKind.TRANSFER,
+                "Y2FyZC13cm9uZy1zaWdu",
+                FlowKind.NORMAL,
+                "YmFuay1zaWRl",
+                FlowKind.TRANSFER,
+                "YmFuay13cm9uZy1zaWdu",
+                FlowKind.NORMAL,
+                "cGF5ZWUtaXMtbm90LWRlc2NyaXB0b3I",
+                FlowKind.NORMAL,
+            )
+    }
+
+    @Test
     fun canonicalOriginIgnoresCredentialsCaseDefaultPortPathAndQuery() {
         val firstOrigin =
             origin(
