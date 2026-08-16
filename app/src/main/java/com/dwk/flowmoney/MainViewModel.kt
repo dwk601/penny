@@ -209,6 +209,10 @@ class MainViewModel(
         mutateTransactions { repository.delete(id) }
     }
 
+    suspend fun restoreDeletedTransaction(transaction: Transaction) {
+        mutateTransactions { repository.restoreDeletedTransaction(transaction) }
+    }
+
     suspend fun getUnreviewedTransactions(): List<Transaction> = repository.getUnreviewedTransactions()
 
     suspend fun categorizeAndReview(
@@ -232,13 +236,15 @@ class MainViewModel(
         category: String,
         merchantOverride: String?,
         overwriteConflict: Boolean = false,
+        editorTransaction: Transaction? = null,
     ): MerchantRuleSaveResult =
         mutateTransactions {
             repository.saveAndApplyMerchantRule(
-                originatingTransactionId,
-                category,
-                merchantOverride,
-                overwriteConflict,
+                originatingTransactionId = originatingTransactionId,
+                category = category,
+                merchantOverride = merchantOverride,
+                overwriteConflict = overwriteConflict,
+                editorTransaction = editorTransaction,
             )
         }
 

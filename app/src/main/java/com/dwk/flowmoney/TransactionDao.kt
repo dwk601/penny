@@ -297,7 +297,7 @@ interface TransactionDao {
         }
     }
 
-    /** Derives the key from the immutable provider merchant and updates the rule and origin atomically. */
+    /** Derives the key from the current provider merchant and commits the rule and origin together. */
     @Transaction
     suspend fun saveAndApplyMerchantRule(
         originatingTransactionId: String,
@@ -305,6 +305,7 @@ interface TransactionDao {
         merchantOverride: String?,
         reviewedAtEpochMillis: Long,
         overwriteConflict: Boolean,
+        editorUpdate: TransactionEntity? = null,
     ): MerchantRuleSaveResult {
         require(category.isNotBlank()) { "Category must not be blank" }
         val origin =
@@ -318,7 +319,33 @@ interface TransactionDao {
         if (previous != null && previous != proposed && !overwriteConflict) {
             return MerchantRuleSaveResult.Conflict(previous, proposed)
         }
-        val transactionState = origin.reviewState()
+
+        val updatedOrigin =
+            if (editorUpdate == null) {
+                origin.copy(
+                    category = category,
+                    reviewedAtEpochMillis = origin.reviewedAtEpochMillis ?: reviewedAtEpochMillis,
+                    merchantOverride = merchantOverride,
+                )
+            } else {
+                require(editorUpdate.id == origin.id) { "Editor transaction must match the origin" }
+                require(editorUpdate.source == "simplefin") { "Editor transaction must remain SimpleFIN-owned" }
+                require(editorUpdate.category == category) { "Editor category must match the rule" }
+                require(editorUpdate.merchantOverride == merchantOverride) { "Editor merchant must match the rule" }
+                origin.copy(
+                    occurredAtEpochMillis = editorUpdate.occurredAtEpochMillis,
+                    category = category,
+                    note = editorUpdate.note,
+                    cents = editorUpdate.cents,
+                    recurringInterval = editorUpdate.recurringInterval,
+                    reviewedAtEpochMillis =
+                        editorUpdate.reviewedAtEpochMillis
+                            ?: origin.reviewedAtEpochMillis
+                            ?: reviewedAtEpochMillis,
+                    merchantOverride = merchantOverride,
+                )
+            }
+
         if (previous == null) {
             insertMerchantRule(proposed)
         } else {
@@ -326,12 +353,16 @@ interface TransactionDao {
                 "Merchant rule changed while it was being saved"
             }
         }
-        check(applyRuleToOrigin(origin.id, category, merchantOverride, reviewedAtEpochMillis) == 1) {
-            "Originating transaction changed while saving merchant rule"
-        }
+        upsert(updatedOrigin)
         return MerchantRuleSaveResult.Applied(
             rule = proposed,
-            undoToken = MerchantRuleUndoToken(transactionState, previous, proposed),
+            undoToken =
+                MerchantRuleUndoToken(
+                    transactionBeforeSave = origin,
+                    transactionAfterSave = updatedOrigin,
+                    previousRule = previous,
+                    appliedRule = proposed,
+                ),
         )
     }
 
@@ -351,10 +382,24 @@ interface TransactionDao {
         } ?: check(deleteMerchantRuleByKey(token.appliedRule.normalizedProviderMerchant) == 1) {
             "Merchant rule disappeared before undo"
         }
-        val state = token.transactionState
-        check(restoreReviewState(state.id, state.category, state.reviewedAtEpochMillis, state.merchantOverride) == 1) {
-            "Originating transaction no longer exists"
-        }
+
+        val current =
+            transactionsForIds(listOf(token.transactionBeforeSave.id)).singleOrNull()
+                ?: error("Originating transaction no longer exists")
+        val restored =
+            if (current.hasSameProviderStateAs(token.transactionAfterSave)) {
+                token.transactionBeforeSave
+            } else {
+                // A later sync owns these refreshed columns; only restore the user-owned editor state.
+                current.copy(
+                    category = token.transactionBeforeSave.category,
+                    note = token.transactionBeforeSave.note,
+                    recurringInterval = token.transactionBeforeSave.recurringInterval,
+                    reviewedAtEpochMillis = token.transactionBeforeSave.reviewedAtEpochMillis,
+                    merchantOverride = token.transactionBeforeSave.merchantOverride,
+                )
+            }
+        upsert(restored)
     }
 
     @Transaction
@@ -469,4 +514,20 @@ interface TransactionDao {
         }
         deleteById(id)
     }
+
+    /** Restores a delete snapshot verbatim and removes only its matching SimpleFIN tombstone. */
+    @Transaction
+    suspend fun restoreDeletedTransaction(transaction: TransactionEntity) {
+        upsert(transaction)
+        if (transaction.source == "simplefin") deleteIgnoredTransaction(transaction.id)
+    }
 }
+
+private fun TransactionEntity.hasSameProviderStateAs(other: TransactionEntity): Boolean =
+    occurredAtEpochMillis == other.occurredAtEpochMillis &&
+        merchant == other.merchant &&
+        cents == other.cents &&
+        source == other.source &&
+        accountKey == other.accountKey &&
+        accountName == other.accountName &&
+        providerDescription == other.providerDescription

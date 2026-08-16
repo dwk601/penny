@@ -12,13 +12,16 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Rule
@@ -116,6 +119,55 @@ class ReviewWorkflowE2ETest {
             assertEquals("Old display", rule("coffee shop")?.merchantOverride)
             assertEquals("Other", row("rule-origin").category)
             assertNull(row("rule-origin").merchantOverride)
+        }
+    }
+
+    @Test
+    fun syncedEditorConflictSaveAndOneUndoRestoreTransactionAndRule() {
+        insertUnreviewed("editor-rule", "Editor Coffee", 1_800_000_000_000L)
+        val original = row("editor-rule")
+        val previousRule =
+            MerchantRuleEntity(
+                normalizedProviderMerchant = "editor coffee",
+                category = "Travel",
+                merchantOverride = "Old editor display",
+            )
+        runBlocking { database.transactionDao().insertMerchantRule(previousRule) }
+
+        ActivityScenario.launch(MainActivity::class.java).use {
+            composeRule.waitUntil(5_000) {
+                runCatching { composeRule.onNodeWithTag("tab_review").assertIsSelected() }.isSuccess
+            }
+            composeRule.onNodeWithTag("tab_transactions").performClick()
+            composeRule.onNodeWithTag("transaction_content_editor-rule").assertIsDisplayed().performClick()
+            composeRule.onNodeWithTag("category_chip_food").performScrollTo().performClick()
+            composeRule.onNodeWithTag("synced_use_future").performScrollTo().performClick()
+            composeRule.onNodeWithTag("merchant_override_field").performScrollTo().performTextInput("New editor display")
+            composeRule.onNodeWithTag("note_field").performScrollTo().performTextInput("Editor user note")
+            composeRule.onNodeWithTag("save_transaction_button").performClick()
+
+            composeRule.onNodeWithText("Replace saved rule?").assertIsDisplayed()
+            assertEquals(original, row("editor-rule"))
+            assertEquals(previousRule, rule("editor coffee"))
+
+            composeRule.onNodeWithTag("confirm_merchant_rule_overwrite").performClick()
+            composeRule.waitUntil(5_000) {
+                row("editor-rule").note == "Editor user note" &&
+                    rule("editor coffee")?.category == "Food"
+            }
+            val saved = row("editor-rule")
+            assertEquals("New editor display", saved.merchantOverride)
+            assertEquals("RAW Editor Coffee", saved.providerDescription)
+            assertEquals("Editor Coffee", saved.merchant)
+            assertEquals("checking", saved.accountKey)
+            assertEquals("Checking", saved.accountName)
+            assertNotNull(saved.reviewedAtEpochMillis)
+            composeRule.waitUntil(5_000) { composeRule.onAllNodesWithText("Undo").fetchSemanticsNodes().size == 1 }
+            composeRule.onNodeWithText("Undo").performClick()
+
+            composeRule.waitUntil(5_000) {
+                row("editor-rule") == original && rule("editor coffee") == previousRule
+            }
         }
     }
 

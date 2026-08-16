@@ -30,6 +30,9 @@ interface TransactionGateway {
 
     suspend fun delete(id: String)
 
+    suspend fun restoreDeletedTransaction(transaction: Transaction): Unit =
+        throw UnsupportedOperationException("Exact delete restore is not supported by this gateway")
+
     suspend fun categorizeAndReview(
         ids: List<String>,
         category: String,
@@ -50,6 +53,7 @@ interface TransactionGateway {
         category: String,
         merchantOverride: String?,
         overwriteConflict: Boolean = false,
+        editorTransaction: Transaction? = null,
     ): MerchantRuleSaveResult = throw UnsupportedOperationException("Merchant rules are not supported by this gateway")
 
     suspend fun undoMerchantRuleSave(token: MerchantRuleUndoToken): Unit =
@@ -128,6 +132,10 @@ class TransactionRepository(
         dao.deleteWithSimpleFinTombstone(id)
     }
 
+    override suspend fun restoreDeletedTransaction(transaction: Transaction) {
+        dao.restoreDeletedTransaction(transaction.toEntity())
+    }
+
     override suspend fun categorizeAndReview(
         ids: List<String>,
         category: String,
@@ -146,14 +154,22 @@ class TransactionRepository(
         category: String,
         merchantOverride: String?,
         overwriteConflict: Boolean,
-    ): MerchantRuleSaveResult =
-        dao.saveAndApplyMerchantRule(
+        editorTransaction: Transaction?,
+    ): MerchantRuleSaveResult {
+        val reviewedAtEpochMillis = now()
+        val editorUpdate =
+            editorTransaction?.copy(
+                reviewedAtEpochMillis = editorTransaction.reviewedAtEpochMillis ?: reviewedAtEpochMillis,
+            )
+        return dao.saveAndApplyMerchantRule(
             originatingTransactionId = originatingTransactionId,
             category = category,
             merchantOverride = merchantOverride,
-            reviewedAtEpochMillis = now(),
+            reviewedAtEpochMillis = reviewedAtEpochMillis,
             overwriteConflict = overwriteConflict,
+            editorUpdate = editorUpdate?.toEntity(),
         )
+    }
 
     override suspend fun undoMerchantRuleSave(token: MerchantRuleUndoToken) = dao.undoMerchantRuleSave(token)
 

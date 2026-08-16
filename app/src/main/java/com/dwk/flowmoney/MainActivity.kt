@@ -382,6 +382,11 @@ private data class PendingMerchantRuleConflictRequest(
     val editorDraft: EditorDraft? = null,
 )
 
+private data class PendingDeleteRequest(
+    val transaction: Transaction,
+    val closeEditor: Boolean,
+)
+
 private data class ResetDaysRequest(
     val range: PennyLocalDateRange,
     val zoneId: ZoneId,
@@ -628,6 +633,7 @@ fun FlowMoneyApp(
     var resetDaysRecountRequest by rememberSaveable { mutableStateOf(0) }
     var resetDaysReselectRequest by rememberSaveable { mutableStateOf(0) }
     var pendingMerchantRuleConflict by remember { mutableStateOf<PendingMerchantRuleConflictRequest?>(null) }
+    var pendingDeleteRequest by remember { mutableStateOf<PendingDeleteRequest?>(null) }
     var coldStartSyncCompleted by remember { mutableStateOf(false) }
     var coldStartReviewSnapshotCount by remember { mutableStateOf(0) }
     var coldStartReviewSnapshotReady by remember { mutableStateOf(false) }
@@ -805,10 +811,8 @@ fun FlowMoneyApp(
         coldStartSyncCompleted = true
     }
 
-    fun deleteWithUndo(
-        transaction: Transaction,
-        onDeleted: suspend () -> Unit = {},
-    ) {
+    fun deleteWithUndo(request: PendingDeleteRequest) {
+        val transaction = request.transaction
         val description = transaction.deleteDescription()
         scope.launch {
             try {
@@ -817,12 +821,14 @@ fun FlowMoneyApp(
                 } catch (failure: CancellationException) {
                     throw failure
                 } catch (_: Throwable) {
+                    pendingDeleteRequest = null
                     persistenceBusy = false
                     snackbarHostState.showSnackbar("Could not delete $description")
                     return@launch
                 }
 
-                onDeleted()
+                pendingDeleteRequest = null
+                if (request.closeEditor) showSheet = false
                 persistenceBusy = false
                 bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
                 val result =
@@ -835,7 +841,7 @@ fun FlowMoneyApp(
                     val restored =
                         try {
                             persistenceBusy = true
-                            viewModel.upsert(transaction)
+                            viewModel.restoreDeletedTransaction(transaction)
                             true
                         } catch (failure: CancellationException) {
                             throw failure
@@ -877,15 +883,19 @@ fun FlowMoneyApp(
         if (editorDirty) showDiscardDialog = true else showSheet = false
     }
 
-    fun deleteImmediately(
+    fun requestDelete(
         transaction: Transaction,
         closeEditor: Boolean = false,
     ) {
+        if (pendingDeleteRequest != null || persistenceBusy || viewModel.mutationBusy.value) return
+        pendingDeleteRequest = PendingDeleteRequest(transaction, closeEditor)
+    }
+
+    fun confirmDelete() {
+        val request = pendingDeleteRequest ?: return
         if (persistenceBusy || viewModel.mutationBusy.value) return
         persistenceBusy = true
-        deleteWithUndo(transaction) {
-            if (closeEditor) showSheet = false
-        }
+        deleteWithUndo(request)
     }
 
     suspend fun offerReviewUndo(
@@ -924,27 +934,16 @@ fun FlowMoneyApp(
             return
         }
 
-        val reviewedTransaction =
-            editorTransaction.copy(
-                reviewedAtEpochMillis = editorTransaction.reviewedAtEpochMillis ?: System.currentTimeMillis(),
-            )
-        try {
-            viewModel.upsert(reviewedTransaction)
-        } catch (failure: CancellationException) {
-            throw failure
-        } catch (failure: Throwable) {
-            // The rule operation is atomic; compensate if the separate ordinary editor write fails.
-            runCatching { viewModel.undoMerchantRuleSave(applied.undoToken) }
-            throw failure
-        }
-        val savedDraft =
-            request.editorDraft?.copy(reviewedAtEpochMillis = reviewedTransaction.reviewedAtEpochMillis)
-                ?: reviewedTransaction.toEditorDraft()
-        editorId = reviewedTransaction.id
+        val savedDraft = request.editorDraft ?: editorTransaction.toEditorDraft()
+        editorId = editorTransaction.id
         editorDraft = savedDraft
         originalEditorDraft = savedDraft
         showSheet = false
-        bestEffortWidgetRefresh { transactionWidgetRefresh(context) }
+        persistenceBusy = false
+        offerReviewUndo(
+            message = "Saved transaction and future rule",
+            undo = { viewModel.undoMerchantRuleSave(applied.undoToken) },
+        )
     }
 
     fun saveMerchantRule(
@@ -957,6 +956,14 @@ fun FlowMoneyApp(
     ) {
         if (persistenceBusy || viewModel.mutationBusy.value) return
         val isEditorSave = editorTransaction != null
+        val reviewedEditorTransaction =
+            editorTransaction?.copy(
+                reviewedAtEpochMillis = editorTransaction.reviewedAtEpochMillis ?: System.currentTimeMillis(),
+            )
+        val reviewedEditorDraft =
+            candidateEditorDraft?.copy(
+                reviewedAtEpochMillis = reviewedEditorTransaction?.reviewedAtEpochMillis,
+            )
         if (isEditorSave) persistenceBusy = true
         scope.launch {
             try {
@@ -966,6 +973,7 @@ fun FlowMoneyApp(
                         category = category,
                         merchantOverride = merchantOverride,
                         overwriteConflict = overwriteConflict,
+                        editorTransaction = reviewedEditorTransaction,
                     )
                 when (result) {
                     is MerchantRuleSaveResult.Applied -> {
@@ -978,8 +986,8 @@ fun FlowMoneyApp(
                                     merchantOverride = merchantOverride,
                                     existingRule = result.rule,
                                     proposedRule = result.rule,
-                                    editorTransaction = editorTransaction,
-                                    editorDraft = candidateEditorDraft,
+                                    editorTransaction = reviewedEditorTransaction,
+                                    editorDraft = reviewedEditorDraft,
                                 ),
                             applied = result,
                         )
@@ -993,8 +1001,8 @@ fun FlowMoneyApp(
                                 merchantOverride = merchantOverride,
                                 existingRule = result.existingRule,
                                 proposedRule = result.proposedRule,
-                                editorTransaction = editorTransaction,
-                                editorDraft = candidateEditorDraft,
+                                editorTransaction = reviewedEditorTransaction,
+                                editorDraft = reviewedEditorDraft,
                             )
                     }
                 }
@@ -1202,7 +1210,7 @@ fun FlowMoneyApp(
             onViewAllTransactions = {
                 navigationState = navigationState.copy(selectedTab = DashboardTab.Transactions)
             },
-            onDelete = ::deleteImmediately,
+            onDelete = ::requestDelete,
             onAddTransaction = ::openNewTransactionEditor,
             onData = { showDataSheet = true },
             onReview = { navigationState = navigationState.copy(selectedTab = DashboardTab.Review) },
@@ -1293,7 +1301,7 @@ fun FlowMoneyApp(
                     onDelete =
                         editorId?.let { id ->
                             uiState.sortedTransactions.firstOrNull { it.id == id }?.let { transaction ->
-                                { deleteImmediately(transaction, closeEditor = true) }
+                                { requestDelete(transaction, closeEditor = true) }
                             }
                         },
                     onCancel = ::requestEditorDismissal,
@@ -1302,6 +1310,36 @@ fun FlowMoneyApp(
                 )
             }
         }
+    }
+
+    pendingDeleteRequest?.let { request ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!editorMutationBusy) pendingDeleteRequest = null
+            },
+            title = { Text("Delete transaction?") },
+            text = {
+                Text(
+                    "Delete ${request.transaction.deleteDescription()}? " +
+                        "You can restore it with Undo after deletion.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = ::confirmDelete,
+                    enabled = !editorMutationBusy,
+                    modifier = Modifier.testTag("confirm_delete_transaction"),
+                ) { Text("Delete", color = LocalFinanceColors.current.expense) }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { pendingDeleteRequest = null },
+                    enabled = !editorMutationBusy,
+                    modifier = Modifier.testTag("cancel_delete_transaction"),
+                ) { Text("Cancel") }
+            },
+            modifier = Modifier.testTag("delete_transaction_dialog"),
+        )
     }
 
     if (showDiscardDialog) {

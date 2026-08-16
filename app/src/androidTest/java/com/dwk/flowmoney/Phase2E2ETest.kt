@@ -84,25 +84,40 @@ class Phase2E2ETest {
                 source = "simplefin",
                 accountKey = "account-key",
                 accountName = "Checking",
-            )
+            ).copy(providerDescription = "RAW PROVIDER DESCRIPTION")
         seed(original)
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("tab_review").assertIsSelected() }.isSuccess
+        }
         waitForMerchant(original.merchant)
 
-        composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
-        composeRule.onNodeWithTag("merchant_field").performScrollTo().performTextClearance()
-        composeRule.onNodeWithTag("merchant_field").performTextInput("Edited merchant")
+        composeRule.onNodeWithTag("tab_review").assertIsSelected()
+        composeRule.onNodeWithTag("tab_transactions").performClick()
+        composeRule.onNodeWithTag("transaction_content_${original.id}").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("RAW PROVIDER DESCRIPTION").assertIsDisplayed()
+        composeRule.onNodeWithTag("merchant_override_field").performScrollTo().performTextInput("Edited merchant")
         composeRule.activityRule.scenario.recreate()
 
         composeRule
-            .onNodeWithTag("merchant_field")
+            .onNodeWithTag("merchant_override_field")
             .assertTextContains("Edited merchant")
+        composeRule.onNodeWithText("RAW PROVIDER DESCRIPTION").assertIsDisplayed()
         composeRule.onNodeWithTag("save_transaction_button").performClick()
         awaitRows { it.singleOrNull()?.merchant == "Edited merchant" }
 
-        assertEquals(
-            original.copy(merchant = "Edited merchant"),
-            rows().single(),
-        )
+        val saved = rows().single()
+        assertEquals(original.id, saved.id)
+        assertEquals("Edited merchant", saved.merchant)
+        assertEquals("Edited merchant", saved.merchantOverride)
+        assertEquals("Original merchant", saved.providerMerchant)
+        assertEquals("RAW PROVIDER DESCRIPTION", saved.providerDescription)
+        assertEquals(original.source, saved.source)
+        assertEquals(original.accountKey, saved.accountKey)
+        assertEquals(original.accountName, saved.accountName)
+        assertEquals(original.category, saved.category)
+        assertEquals(original.note, saved.note)
+        assertEquals(original.cents, saved.cents)
+        assertEquals(original.reviewedAtEpochMillis, saved.reviewedAtEpochMillis)
     }
 
     @Test
@@ -267,7 +282,7 @@ class Phase2E2ETest {
     }
 
     @Test
-    fun editorDeleteImmediatelyDeletesAndUndoRestoresExactRow() {
+    fun editorDeleteConfirmsThenDeletesAndUndoRestoresExactRow() {
         val dateTime = LocalDateTime.of(LocalDate.of(2026, 7, 10), LocalTime.of(9, 30))
         val original =
             transaction(
@@ -281,6 +296,9 @@ class Phase2E2ETest {
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithText("Delete transaction?").assertIsDisplayed()
+        assertEquals(original, rows().single())
+        composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
         composeRule.onNodeWithText("Undo").assertIsDisplayed()
         awaitRows { it.isEmpty() }
 
@@ -290,7 +308,7 @@ class Phase2E2ETest {
     }
 
     @Test
-    fun talkBackDeleteActionDeletesExactRowAndOffersUndo() {
+    fun talkBackDeleteActionRequiresConfirmationThenOffersUndo() {
         val dateTime = LocalDateTime.of(LocalDate.of(2026, 7, 11), LocalTime.of(10, 45))
         val original =
             transaction(
@@ -311,6 +329,9 @@ class Phase2E2ETest {
 
         composeRule.runOnIdle { action() }
 
+        composeRule.onNodeWithText("Delete transaction?").assertIsDisplayed()
+        assertEquals(original, rows().single())
+        composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
         composeRule.onNodeWithText("Undo").assertIsDisplayed()
         awaitRows { it.isEmpty() }
     }

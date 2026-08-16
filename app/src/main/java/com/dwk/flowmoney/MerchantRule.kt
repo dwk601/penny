@@ -32,7 +32,8 @@ class ReviewUndoToken internal constructor(
 
 /** Opaque state needed to restore both the origin and the exact prior rule. */
 class MerchantRuleUndoToken internal constructor(
-    internal val transactionState: TransactionReviewState,
+    internal val transactionBeforeSave: TransactionEntity,
+    internal val transactionAfterSave: TransactionEntity,
     internal val previousRule: MerchantRuleEntity?,
     internal val appliedRule: MerchantRuleEntity,
 )

@@ -181,8 +181,8 @@ class SyncFoundationDataPathTest {
                 val atomicOrigin = syncedEntity("atomic-origin", 11).copy(merchant = "Atomic Store 12")
                 dao.upsert(atomicOrigin)
                 db.openHelper.writableDatabase.execSQL(
-                    "CREATE TRIGGER fail_origin_rule_update BEFORE UPDATE OF category ON transactions " +
-                        "WHEN OLD.id = 'atomic-origin' " +
+                    "CREATE TRIGGER fail_origin_rule_update BEFORE INSERT ON transactions " +
+                        "WHEN NEW.id = 'atomic-origin' " +
                         "BEGIN SELECT RAISE(ABORT, 'synthetic origin update failure'); END",
                 )
                 assertNotNull(
@@ -192,6 +192,225 @@ class SyncFoundationDataPathTest {
                 )
                 assertTrue(dao.getMerchantRules().isEmpty())
                 assertEquals(atomicOrigin, dao.getAll().single { it.id == atomicOrigin.id })
+            }
+        }
+
+    @Test
+    fun syncedEditorRuleSaveCommitsCompleteEditorUpdateAtomically() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val repository = TransactionRepository(dao) { 7_000L }
+                val origin =
+                    syncedEntity("editor-atomic", 10).copy(
+                        merchant = "Provider Market",
+                        accountKey = "provider-account",
+                        accountName = "Provider Checking",
+                        providerDescription = "RAW BEFORE",
+                    )
+                dao.upsert(origin)
+                val editorUpdate =
+                    origin
+                        .toTransaction()
+                        .copy(
+                            occurredAtEpochMillis = 20,
+                            merchant = "Market Display",
+                            category = "Food",
+                            note = "User note",
+                            cents = -250,
+                            recurringInterval = RecurrenceInterval.Monthly,
+                            merchantOverride = "Market Display",
+                        )
+
+                val applied =
+                    repository.saveAndApplyMerchantRule(
+                        originatingTransactionId = origin.id,
+                        category = editorUpdate.category,
+                        merchantOverride = editorUpdate.merchantOverride,
+                        editorTransaction = editorUpdate,
+                    ) as MerchantRuleSaveResult.Applied
+
+                assertEquals(
+                    origin.copy(
+                        occurredAtEpochMillis = 20,
+                        category = "Food",
+                        note = "User note",
+                        cents = -250,
+                        recurringInterval = "Monthly",
+                        reviewedAtEpochMillis = 7_000L,
+                        merchantOverride = "Market Display",
+                    ),
+                    dao.getAll().single(),
+                )
+                assertEquals(
+                    MerchantRuleEntity("provider market", "Food", "Market Display"),
+                    applied.rule,
+                )
+                assertEquals(applied.rule, dao.getMerchantRules().single())
+            }
+        }
+
+    @Test
+    fun syncedEditorRuleConflictLeavesTransactionAndRuleUntouched() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val repository = TransactionRepository(dao) { 7_100L }
+                val origin = syncedEntity("editor-conflict", 11).copy(merchant = "Conflict Market")
+                val existingRule = MerchantRuleEntity("conflict market", "Travel", "Old display")
+                dao.upsert(origin)
+                dao.insertMerchantRule(existingRule)
+                val editorUpdate =
+                    origin
+                        .toTransaction()
+                        .copy(
+                            merchant = "New display",
+                            category = "Food",
+                            note = "Must not persist",
+                            merchantOverride = "New display",
+                        )
+
+                val result =
+                    repository.saveAndApplyMerchantRule(
+                        originatingTransactionId = origin.id,
+                        category = editorUpdate.category,
+                        merchantOverride = editorUpdate.merchantOverride,
+                        editorTransaction = editorUpdate,
+                    )
+
+                assertTrue(result is MerchantRuleSaveResult.Conflict)
+                assertEquals(origin, dao.getAll().single())
+                assertEquals(existingRule, dao.getMerchantRules().single())
+            }
+        }
+
+    @Test
+    fun syncedEditorRuleUndoRestoresBothAndPreservesLaterProviderRefresh() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val repository = TransactionRepository(dao) { 7_200L }
+                val origin =
+                    syncedEntity("editor-undo", 12).copy(
+                        merchant = "Undo Market",
+                        accountKey = "old-account",
+                        accountName = "Old Checking",
+                        providerDescription = "RAW OLD",
+                    )
+                val previousRule = MerchantRuleEntity("undo market", "Travel", "Old rule display")
+                dao.upsert(origin)
+                dao.insertMerchantRule(previousRule)
+                val editorUpdate =
+                    origin
+                        .toTransaction()
+                        .copy(
+                            occurredAtEpochMillis = 22,
+                            merchant = "New display",
+                            category = "Food",
+                            note = "New note",
+                            cents = -222,
+                            recurringInterval = RecurrenceInterval.Monthly,
+                            merchantOverride = "New display",
+                        )
+
+                val firstSave =
+                    repository.saveAndApplyMerchantRule(
+                        originatingTransactionId = origin.id,
+                        category = editorUpdate.category,
+                        merchantOverride = editorUpdate.merchantOverride,
+                        overwriteConflict = true,
+                        editorTransaction = editorUpdate,
+                    ) as MerchantRuleSaveResult.Applied
+                repository.undoMerchantRuleSave(firstSave.undoToken)
+                assertEquals(origin, dao.getAll().single())
+                assertEquals(previousRule, dao.getMerchantRules().single())
+
+                val secondSave =
+                    repository.saveAndApplyMerchantRule(
+                        originatingTransactionId = origin.id,
+                        category = editorUpdate.category,
+                        merchantOverride = editorUpdate.merchantOverride,
+                        overwriteConflict = true,
+                        editorTransaction = editorUpdate,
+                    ) as MerchantRuleSaveResult.Applied
+                val refreshed =
+                    origin.copy(
+                        occurredAtEpochMillis = 99,
+                        merchant = "Provider Market Refreshed",
+                        cents = -999,
+                        accountKey = "new-account",
+                        accountName = "New Checking",
+                        providerDescription = "RAW REFRESHED",
+                    )
+                dao.upsertSyncedTransactionsIgnoringTombstones(listOf(refreshed))
+                repository.undoMerchantRuleSave(secondSave.undoToken)
+
+                assertEquals(previousRule, dao.getMerchantRules().single())
+                assertEquals(refreshed, dao.getAll().single())
+            }
+        }
+
+    @Test
+    fun syncedEditorRuleFailureRollsBackRuleAndOriginTogether() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val repository = TransactionRepository(dao) { 7_300L }
+                val origin = syncedEntity("editor-rollback", 13).copy(merchant = "Rollback Market")
+                dao.upsert(origin)
+                db.openHelper.writableDatabase.execSQL(
+                    "CREATE TRIGGER fail_editor_origin_write BEFORE INSERT ON transactions " +
+                        "WHEN NEW.id = 'editor-rollback' " +
+                        "BEGIN SELECT RAISE(ABORT, 'synthetic editor write failure'); END",
+                )
+                val editorUpdate =
+                    origin
+                        .toTransaction()
+                        .copy(
+                            merchant = "Rollback display",
+                            category = "Food",
+                            note = "Must roll back",
+                            merchantOverride = "Rollback display",
+                        )
+
+                assertNotNull(
+                    runCatching {
+                        repository.saveAndApplyMerchantRule(
+                            originatingTransactionId = origin.id,
+                            category = editorUpdate.category,
+                            merchantOverride = editorUpdate.merchantOverride,
+                            editorTransaction = editorUpdate,
+                        )
+                    }.exceptionOrNull(),
+                )
+                assertTrue(dao.getMerchantRules().isEmpty())
+                assertEquals(origin, dao.getAll().single())
+            }
+        }
+
+    @Test
+    fun exactDeleteRestorePreservesNullReviewAndClearsSimpleFinTombstone() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val repository = TransactionRepository(dao)
+                val original =
+                    syncedEntity("delete-restore", 14).copy(
+                        category = "Food",
+                        note = "Exact snapshot",
+                        merchantOverride = "Exact display",
+                        reviewedAtEpochMillis = null,
+                    )
+                dao.upsert(original)
+
+                repository.delete(original.id)
+                assertTrue(dao.getAll().isEmpty())
+                assertEquals(listOf(original.id), dao.ignoredTransactionIds(listOf(original.id)))
+
+                repository.restoreDeletedTransaction(original.toTransaction())
+                assertEquals(original, dao.getAll().single())
+                assertNull(dao.getAll().single().reviewedAtEpochMillis)
+                assertTrue(dao.ignoredTransactionIds(listOf(original.id)).isEmpty())
             }
         }
 

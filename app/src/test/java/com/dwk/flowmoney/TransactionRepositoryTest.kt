@@ -147,11 +147,21 @@ class TransactionRepositoryTest {
             )
         }
 
-    @Test fun deletingSyncedRowTombstonesAndUndoClearsTombstone() =
+    @Test fun deletingSyncedRowTombstonesAndExactUndoClearsTombstone() =
         runTest {
             val dao = FakeTransactionDao()
             val repository = TransactionRepository(dao)
-            val synced = transaction(id = "simplefin:acct:tx", merchant = "Synced").copy(source = "simplefin")
+            val synced =
+                transaction(id = "simplefin:acct:tx", merchant = "Synced").copy(
+                    source = "simplefin",
+                    accountKey = "acct",
+                    accountName = "Checking",
+                    reviewedAtEpochMillis = null,
+                    providerDescription = "RAW SYNCED",
+                    merchantOverride = "Display synced",
+                    providerMerchant = "Synced",
+                )
+            val exactSnapshot = synced.toEntity()
 
             repository.upsert(synced)
             repository.delete(synced.id)
@@ -160,10 +170,11 @@ class TransactionRepositoryTest {
             assertThat(dao.ignoredTombstone(synced.id)?.occurredAtEpochMillis).isEqualTo(synced.occurredAtEpochMillis)
             assertThat(repository.load()).isEmpty()
 
-            repository.upsert(synced)
+            repository.restoreDeletedTransaction(synced)
 
             assertThat(dao.ignoredIds()).isEmpty()
-            assertThat(repository.load().single().id).isEqualTo(synced.id)
+            assertThat(dao.getAll().single()).isEqualTo(exactSnapshot)
+            assertThat(dao.getAll().single().reviewedAtEpochMillis).isNull()
         }
 
     @Test fun tombstoneAwareSyncedInsertPreventsReimport() =

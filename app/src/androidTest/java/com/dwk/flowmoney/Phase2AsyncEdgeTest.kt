@@ -356,6 +356,7 @@ class Phase2AsyncEdgeTest {
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
 
         composeRule.onNodeWithText("Could not delete", substring = true).assertIsDisplayed()
         composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
@@ -378,6 +379,7 @@ class Phase2AsyncEdgeTest {
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
         composeRule.waitUntil(5_000) { gateway.rows.value.isEmpty() }
         composeRule.onNodeWithText("Undo").performClick()
 
@@ -403,6 +405,7 @@ class Phase2AsyncEdgeTest {
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
         composeRule.waitUntil(5_000) { gateway.rows.value.isEmpty() }
         composeRule.onNodeWithText("Undo").performClick()
 
@@ -434,6 +437,7 @@ class Phase2AsyncEdgeTest {
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
         composeRule.waitUntil(5_000) { gateway.rows.value.none { it.id == original.id } }
         val undoAction =
             composeRule
@@ -511,6 +515,7 @@ class Phase2AsyncEdgeTest {
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
+        composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
         composeRule.waitUntil(5_000) { deleteStarted.isCompleted }
 
         restoration.emulateSavedInstanceStateRestore()
@@ -538,9 +543,10 @@ class Phase2AsyncEdgeTest {
         setApp(gateway)
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
+        composeRule.onNodeWithTag("delete_transaction_button").performClick()
         val click =
             composeRule
-                .onNodeWithTag("delete_transaction_button")
+                .onNodeWithTag("confirm_delete_transaction")
                 .fetchSemanticsNode()
                 .config[SemanticsActions.OnClick]
                 .action!!
@@ -648,6 +654,8 @@ class Phase2AsyncEdgeTest {
         override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>) = importTransactions(transactions)
 
         override suspend fun delete(id: String) = onDelete(id)
+
+        override suspend fun restoreDeletedTransaction(transaction: Transaction) = onUpsert(transaction)
     }
 
     private class PendingSimpleFinBackend {
