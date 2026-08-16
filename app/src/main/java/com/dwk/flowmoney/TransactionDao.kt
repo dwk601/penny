@@ -343,6 +343,7 @@ interface TransactionDao {
                             ?: origin.reviewedAtEpochMillis
                             ?: reviewedAtEpochMillis,
                     merchantOverride = merchantOverride,
+                    flowKindOverride = editorUpdate.flowKindOverride,
                 )
             }
 
@@ -397,6 +398,7 @@ interface TransactionDao {
                     recurringInterval = token.transactionBeforeSave.recurringInterval,
                     reviewedAtEpochMillis = token.transactionBeforeSave.reviewedAtEpochMillis,
                     merchantOverride = token.transactionBeforeSave.merchantOverride,
+                    flowKindOverride = token.transactionBeforeSave.flowKindOverride,
                 )
             }
         upsert(restored)

@@ -329,6 +329,10 @@ class SyncFirstWorkflowUiTest {
 
         composeRule
             .onNodeWithTag("transaction_editor_form")
+            .performScrollToNode(hasTestTag("transfer_status_control"))
+        composeRule.onNodeWithTag("transfer_status_transfer").performClick().assertIsSelected()
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
             .performScrollToNode(hasTestTag("synced_use_future"))
         composeRule.onNodeWithTag("synced_use_future").performClick()
         composeRule
@@ -349,6 +353,7 @@ class SyncFirstWorkflowUiTest {
             assertEquals("RAW PROVIDER DESCRIPTION 123", futureSave?.providerDescription)
             assertEquals("Provider Cafe", futureSave?.providerMerchant)
             assertEquals("Checking", futureSave?.accountName)
+            assertEquals(FlowKind.TRANSFER, futureSave?.flowKindOverride)
         }
     }
 
@@ -401,6 +406,50 @@ class SyncFirstWorkflowUiTest {
         composeRule.runOnIdle {
             assertEquals(FlowKind.TRANSFER, saved?.flowKind)
             assertEquals(FlowKind.NORMAL, saved?.flowKindOverride)
+        }
+    }
+
+    @Test
+    fun returningToProviderKindClearsOverrideAndAllowsProviderReclassificationAfterRoundTrip() {
+        val transaction = syncedTransaction("round-trip-flow", LocalDate.of(2026, 7, 10))
+        var draft by mutableStateOf(transaction.toEditorDraft())
+        var saved: Transaction? = null
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                TransactionEditor(
+                    transaction = transaction,
+                    draft = draft,
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = { draft = it },
+                    onSave = { saved = it },
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
+            .performScrollToNode(hasTestTag("transfer_status_control"))
+        composeRule.onNodeWithTag("transfer_status_transfer").performClick().assertIsSelected()
+        composeRule.onNodeWithTag("transfer_status_not_transfer").performClick().assertIsSelected()
+        composeRule.onNodeWithTag("save_transaction_button").performClick()
+
+        composeRule.runOnIdle {
+            val savedTransaction = requireNotNull(saved)
+            assertEquals(FlowKind.NORMAL, savedTransaction.flowKind)
+            assertEquals(null, savedTransaction.flowKindOverride)
+
+            val reclassifiedDraft =
+                savedTransaction
+                    .copy(flowKind = FlowKind.TRANSFER)
+                    .toEntity()
+                    .toTransaction()
+                    .toEditorDraft()
+            assertEquals(null, reclassifiedDraft.flowKindOverride)
+            assertEquals(FlowKind.TRANSFER, reclassifiedDraft.effectiveFlowKind)
         }
     }
 

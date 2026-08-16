@@ -78,6 +78,31 @@ class SimpleFinIdentityReconcilerTest {
     }
 
     @Test
+    fun transactionCollisionRetainsFlowCorrectionFromLosingLegacyRow() {
+        val stableAccountId = SimpleFinIdentity.accountId(origin, PROVIDER_CONNECTION_ID, REMOTE_ACCOUNT_ID)
+        val stableTransactionId =
+            SimpleFinIdentity.transactionId(origin, PROVIDER_CONNECTION_ID, REMOTE_ACCOUNT_ID, REMOTE_TRANSACTION_ID)
+        val legacy =
+            transaction(legacyTransactionId(CONNECTION_ONE), legacyAccountId(CONNECTION_ONE)).copy(
+                flowKindOverride = FlowKind.TRANSFER,
+            )
+        val stable = transaction(stableTransactionId, stableAccountId)
+
+        val merged =
+            SimpleFinIdentityReconciler
+                .plan(
+                    origin,
+                    transactions = listOf(legacy, stable),
+                    accounts = listOf(account(stableAccountId, "Checking", 30)),
+                    tombstones = emptyList(),
+                ).transactions
+                .single()
+
+        assertThat(merged.id).isEqualTo(stableTransactionId)
+        assertThat(merged.flowKindOverride).isEqualTo(FlowKind.TRANSFER)
+    }
+
+    @Test
     fun tombstoneWinsEveryCollisionAndAcquiresOccurrenceFromDeletedBankRow() {
         val oldTransactionId = legacyTransactionId(CONNECTION_ONE)
         val oldTransaction = transaction(oldTransactionId, legacyAccountId(CONNECTION_ONE)).copy(occurredAtEpochMillis = 12_345L)

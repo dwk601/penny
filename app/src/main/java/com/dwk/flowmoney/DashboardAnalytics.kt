@@ -124,7 +124,7 @@ object DashboardAnalytics {
     ): List<DailySpend> {
         val spendingByDay = mutableMapOf<LocalDate, Long>()
         transactions.forEach { transaction ->
-            if (transaction.effectiveFlowKind == FlowKind.NORMAL && transaction.cents < 0) {
+            if (transaction.reportingSpendingCategory() != null) {
                 val date = transaction.localDate(zoneId)
                 spendingByDay[date] = (spendingByDay[date] ?: 0L) - transaction.cents.toLong()
             }
@@ -143,13 +143,7 @@ object DashboardAnalytics {
     ): List<CategoryTotal> {
         val totals = mutableMapOf<String, Long>()
         transactions.forEach { transaction ->
-            if (transaction.effectiveFlowKind == FlowKind.NORMAL && transaction.cents < 0) {
-                val category =
-                    if (transaction.isUnreviewed) {
-                        "Other"
-                    } else {
-                        transaction.category.trim().ifBlank { "Other" }
-                    }
+            transaction.reportingSpendingCategory()?.let { category ->
                 totals[category] = (totals[category] ?: 0L) - transaction.cents.toLong()
             }
         }
@@ -187,6 +181,11 @@ object DashboardAnalytics {
         transactions.forEach { months += YearMonth.from(it.localDate(zoneId)) }
         return months.sortedDescending()
     }
+}
+
+internal fun Transaction.reportingSpendingCategory(): String? {
+    if (effectiveFlowKind != FlowKind.NORMAL || cents >= 0) return null
+    return if (isUnreviewed) "Other" else category.trim().ifBlank { "Other" }
 }
 
 internal fun Transaction.localDate(zoneId: ZoneId = ZoneId.systemDefault()): LocalDate =

@@ -9,12 +9,14 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
 import org.junit.Assert.assertEquals
@@ -164,8 +166,47 @@ class InsightsUiTest {
         assertEquals("tx-food", edited?.id)
     }
 
+    @Test
+    fun drillDownExcludesSameDayTransfersAndGroupsUnreviewedNormalSpendingUnderOther() {
+        setScreen(uiState = reportingState())
+
+        composeRule.onNodeWithTag("insight_day_2026-07-10").performClick()
+        composeRule
+            .onNodeWithTag("insights_list")
+            .performScrollToNode(hasTestTag("insight_transaction_tx-food"))
+        composeRule.onNodeWithTag("insight_transaction_tx-food").assertIsDisplayed()
+        composeRule
+            .onNodeWithTag("insights_list")
+            .performScrollToNode(hasTestTag("insight_transaction_tx-unreviewed"))
+        composeRule.onNodeWithTag("insight_transaction_tx-unreviewed").assertIsDisplayed()
+        composeRule.onNodeWithTag("insight_transaction_tx-transfer").assertDoesNotExist()
+
+        composeRule
+            .onNodeWithTag("insights_list")
+            .performScrollToNode(hasTestTag("insight_category_other"))
+        composeRule.onNodeWithTag("insight_category_other").performClick()
+        composeRule.onNodeWithText("Other spending").assertIsDisplayed()
+        composeRule
+            .onNodeWithTag("insights_list")
+            .performScrollToNode(hasTestTag("insight_transaction_tx-unreviewed"))
+        composeRule.onNodeWithTag("insight_transaction_tx-unreviewed").assertIsDisplayed()
+        composeRule.onNodeWithTag("insight_transaction_tx-food").assertDoesNotExist()
+        composeRule.onNodeWithTag("insight_transaction_tx-transfer").assertDoesNotExist()
+    }
+
+    @Test
+    fun overviewRangeCountExcludesTransfers() {
+        setScreen(
+            uiState = reportingState(),
+            selectedTab = DashboardTab.Overview,
+        )
+
+        composeRule.onNodeWithText("3 total · 2 in range").performScrollTo().assertIsDisplayed()
+    }
+
     private fun setScreen(
         uiState: MainUiState,
+        selectedTab: DashboardTab = DashboardTab.Insights,
         onEdit: (Transaction) -> Unit = {},
         onAddTransaction: () -> Unit = {},
         onReview: () -> Unit = {},
@@ -174,7 +215,7 @@ class InsightsUiTest {
             MaterialTheme {
                 FlowMoneyScreen(
                     uiState = uiState,
-                    selectedTab = DashboardTab.Insights,
+                    selectedTab = selectedTab,
                     onChartRangeModeSelected = {},
                     onSelectedMonthChange = {},
                     onEdit = onEdit,
@@ -211,6 +252,56 @@ class InsightsUiTest {
             availableMonths = listOf(YearMonth.of(2026, 7)),
             dailySpending = listOf(DailySpend(DAY, 1_250), DailySpend(ZERO_DAY, 0)),
             categoryTotals = listOf(CategoryTotal("Food", 1_250)),
+        )
+    }
+
+    private fun reportingState(): MainUiState {
+        val occurredAt = DAY.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val transactions =
+            listOf(
+                Transaction(
+                    id = "tx-food",
+                    occurredAtEpochMillis = occurredAt,
+                    merchant = "Lunch",
+                    category = "Food",
+                    note = "",
+                    cents = -1_250,
+                    source = "simplefin",
+                    reviewedAtEpochMillis = 1,
+                ),
+                Transaction(
+                    id = "tx-unreviewed",
+                    occurredAtEpochMillis = occurredAt,
+                    merchant = "Pending trip",
+                    category = "Travel",
+                    note = "",
+                    cents = -500,
+                    source = "simplefin",
+                ),
+                Transaction(
+                    id = "tx-transfer",
+                    occurredAtEpochMillis = occurredAt,
+                    merchant = "Account transfer",
+                    category = "Food",
+                    note = "",
+                    cents = -2_000,
+                    source = "simplefin",
+                    flowKind = FlowKind.TRANSFER,
+                ),
+            )
+        return MainUiState(
+            isLoading = false,
+            sortedTransactions = transactions,
+            recentTransactions = transactions,
+            rangeTransactions = transactions,
+            metrics = DashboardAnalytics.metrics(transactions),
+            dateRange = RANGE,
+            chartRangeMode = ChartRangeMode.Month,
+            selectedMonth = YearMonth.of(2026, 7),
+            availableMonths = listOf(YearMonth.of(2026, 7)),
+            dailySpending = listOf(DailySpend(DAY, 1_750)),
+            categoryTotals = DashboardAnalytics.categoryTotals(transactions),
+            pendingReviewSummary = DashboardAnalytics.unreviewedSpendingSummary(transactions),
         )
     }
 
