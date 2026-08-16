@@ -40,7 +40,7 @@ class SyncFoundationDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_7_8)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_7_8, FlowMoneyDatabase.MIGRATION_8_9)
                     .build()
             try {
                 val rows = migrated.transactionDao().getAll().associateBy { it.id }
@@ -65,6 +65,60 @@ class SyncFoundationDataPathTest {
                         }
                 assertTrue("index_transactions_source_reviewedAtEpochMillis_occurredAtEpochMillis" in indexNames)
                 assertTrue("index_simplefin_ignored_transactions_occurredAtEpochMillis" in indexNames)
+            } finally {
+                migrated.close()
+                context.deleteDatabase(name)
+            }
+        }
+
+    @Test
+    fun version8MigratesTo9WithSignAwareSimpleFinFlowClassification() =
+        runBlocking {
+            val name = "flow-kind-v8-${UUID.randomUUID()}.db"
+            val file = context.getDatabasePath(name)
+            context.deleteDatabase(name)
+            SQLiteDatabase.openOrCreateDatabase(file, null).use { raw ->
+                createVersion8Schema(raw)
+                insertVersion8Transaction(raw, "card-automatic", "simplefin", 100, "AUTOMATIC PAYMENT - THANK")
+                insertVersion8Transaction(raw, "card-thank-you", "simplefin", 100, " payment - thank you ")
+                insertVersion8Transaction(raw, "card-autopay", "simplefin", 100, "AUTOPAY PYMT")
+                insertVersion8Transaction(raw, "bank-autopay", "simplefin", -100, "CREDIT CRD AUTOPAY")
+                insertVersion8Transaction(raw, "bank-cardmember", "simplefin", -100, "CARDMEMBER SERVICE WEB PAY")
+                insertVersion8Transaction(raw, "bank-payment", "simplefin", -100, "CREDIT CARD PAYMENT")
+                insertVersion8Transaction(raw, "wrong-card-sign", "simplefin", -100, "AUTOPAY PYMT")
+                insertVersion8Transaction(raw, "wrong-bank-sign", "simplefin", 100, "CREDIT CARD PAYMENT")
+                insertVersion8Transaction(raw, "near-miss", "simplefin", 100, "AUTOPAY PYMT FEE")
+                insertVersion8Transaction(raw, "p2p", "simplefin", -100, "VENMO PAYMENT")
+                insertVersion8Transaction(raw, "local", "local", 100, "AUTOPAY PYMT")
+                insertVersion8Transaction(raw, "missing-description", "simplefin", 100, null)
+                raw.version = 8
+            }
+
+            val migrated =
+                Room
+                    .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
+                    .addMigrations(FlowMoneyDatabase.MIGRATION_8_9)
+                    .build()
+            try {
+                val rows = migrated.transactionDao().getAll().associateBy { it.id }
+                assertEquals(
+                    setOf(
+                        "card-automatic",
+                        "card-thank-you",
+                        "card-autopay",
+                        "bank-autopay",
+                        "bank-cardmember",
+                        "bank-payment",
+                    ),
+                    rows.values.filter { it.flowKind == FlowKind.TRANSFER }.mapTo(mutableSetOf()) { it.id },
+                )
+                assertTrue(rows.values.all { it.flowKindOverride == null })
+                assertEquals(FlowKind.NORMAL, rows.getValue("wrong-card-sign").effectiveFlowKind)
+                assertEquals(FlowKind.NORMAL, rows.getValue("wrong-bank-sign").effectiveFlowKind)
+                assertEquals(FlowKind.NORMAL, rows.getValue("near-miss").effectiveFlowKind)
+                assertEquals(FlowKind.NORMAL, rows.getValue("p2p").effectiveFlowKind)
+                assertEquals(FlowKind.NORMAL, rows.getValue("local").effectiveFlowKind)
+                assertEquals(FlowKind.NORMAL, rows.getValue("missing-description").effectiveFlowKind)
             } finally {
                 migrated.close()
                 context.deleteDatabase(name)
@@ -576,6 +630,40 @@ class SyncFoundationDataPathTest {
         raw.execSQL(
             "CREATE TABLE simplefin_identity_state (id TEXT NOT NULL PRIMARY KEY DEFAULT 'stable_v2', " +
                 "reconciliationComplete INTEGER NOT NULL DEFAULT 0)",
+        )
+    }
+
+    private fun createVersion8Schema(raw: SQLiteDatabase) {
+        createVersion7Schema(raw)
+        raw.execSQL("ALTER TABLE transactions ADD COLUMN reviewedAtEpochMillis INTEGER")
+        raw.execSQL("ALTER TABLE transactions ADD COLUMN providerDescription TEXT")
+        raw.execSQL("ALTER TABLE transactions ADD COLUMN merchantOverride TEXT")
+        raw.execSQL(
+            "CREATE TABLE merchant_rules (normalizedProviderMerchant TEXT NOT NULL, " +
+                "category TEXT NOT NULL, merchantOverride TEXT, PRIMARY KEY(normalizedProviderMerchant))",
+        )
+        raw.execSQL(
+            "CREATE INDEX index_transactions_source_reviewedAtEpochMillis_occurredAtEpochMillis " +
+                "ON transactions(source, reviewedAtEpochMillis, occurredAtEpochMillis)",
+        )
+        raw.execSQL(
+            "CREATE INDEX index_simplefin_ignored_transactions_occurredAtEpochMillis " +
+                "ON simplefin_ignored_transactions(occurredAtEpochMillis)",
+        )
+    }
+
+    private fun insertVersion8Transaction(
+        raw: SQLiteDatabase,
+        id: String,
+        source: String,
+        cents: Int,
+        providerDescription: String?,
+    ) {
+        raw.execSQL(
+            "INSERT INTO transactions " +
+                "(id, occurredAtEpochMillis, merchant, category, note, cents, source, providerDescription) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            arrayOf<Any?>(id, 1L, id, "Other", "", cents, source, providerDescription),
         )
     }
 

@@ -51,8 +51,11 @@ class SimpleFinIdentityDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_6_7, FlowMoneyDatabase.MIGRATION_7_8)
-                    .build()
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_6_7,
+                        FlowMoneyDatabase.MIGRATION_7_8,
+                        FlowMoneyDatabase.MIGRATION_8_9,
+                    ).build()
             try {
                 assertEquals(
                     "legacy-simplefin-id",
@@ -104,8 +107,11 @@ class SimpleFinIdentityDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_6_7, FlowMoneyDatabase.MIGRATION_7_8)
-                    .build()
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_6_7,
+                        FlowMoneyDatabase.MIGRATION_7_8,
+                        FlowMoneyDatabase.MIGRATION_8_9,
+                    ).build()
             val fake = FakeFunctions()
             fake.credential = CONNECTION_ONE to FIRST_ACCESS_URL
             fake.accountsResult = accountsResult(DELETED_TRANSACTION_ID)

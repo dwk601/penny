@@ -16,9 +16,14 @@ data class Transaction(
     val providerDescription: String? = null,
     val merchantOverride: String? = null,
     val providerMerchant: String? = null,
+    val flowKind: FlowKind = FlowKind.NORMAL,
+    val flowKindOverride: FlowKind? = null,
 ) {
     val isUnreviewed: Boolean
         get() = source == "simplefin" && reviewedAtEpochMillis == null
+
+    val effectiveFlowKind: FlowKind
+        get() = flowKindOverride ?: flowKind
 }
 
 enum class RecurrenceInterval(
