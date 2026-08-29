@@ -30,6 +30,9 @@ data class TransactionEntity(
     val merchantOverride: String? = null,
     @ColumnInfo(defaultValue = "'NORMAL'") val flowKind: FlowKind = FlowKind.NORMAL,
     val flowKindOverride: FlowKind? = null,
+    val locationCity: String? = null,
+    val locationState: String? = null,
+    val locationCountry: String? = null,
 ) {
     val isUnreviewed: Boolean
         get() = source == "simplefin" && reviewedAtEpochMillis == null
@@ -55,6 +58,9 @@ fun Transaction.toEntity(): TransactionEntity =
         merchantOverride = merchantOverride,
         flowKind = flowKind,
         flowKindOverride = flowKindOverride,
+        locationCity = locationCity,
+        locationState = locationState,
+        locationCountry = locationCountry,
     )
 
 fun TransactionEntity.toTransaction(): Transaction =
@@ -75,6 +81,9 @@ fun TransactionEntity.toTransaction(): Transaction =
         providerMerchant = merchant.takeIf { source == "simplefin" },
         flowKind = flowKind,
         flowKindOverride = flowKindOverride,
+        locationCity = locationCity,
+        locationState = locationState,
+        locationCountry = locationCountry,
     )
 
 private fun String.toRecurrenceIntervalOrNull(): RecurrenceInterval? = RecurrenceInterval.entries.firstOrNull { it.name == this }

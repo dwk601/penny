@@ -31,6 +31,9 @@ data class TransactionFilter(
     val source: TransactionSourceFilter = TransactionSourceFilter.All,
     val accountKey: String? = null,
     val unreviewedOnly: Boolean = false,
+    val city: String? = null,
+    val state: String? = null,
+    val country: String? = null,
 )
 
 data class TransactionAccountOption(
@@ -39,6 +42,20 @@ data class TransactionAccountOption(
     val institutionName: String?,
     val label: String,
 )
+
+data class TransactionCityOption(
+    val city: String,
+    val state: String?,
+    val country: String?,
+    val label: String,
+)
+
+enum class TransactionViewMode(
+    val label: String,
+) {
+    List("List"),
+    Map("Map"),
+}
 
 object TransactionFilters {
     fun apply(
@@ -49,12 +66,18 @@ object TransactionFilters {
     ): List<Transaction> {
         val query = filter.where.searchKey()
         val category = filter.category?.searchKey()
+        val city = filter.city?.searchKey()
+        val state = filter.state?.searchKey()
+        val country = filter.country?.searchKey()
         return transactions.filter { transaction ->
             transaction.matchesTime(filter.time, today, zoneId) &&
                 transaction.matchesSource(filter.source) &&
                 (category == null || transaction.category.searchKey() == category) &&
                 (filter.accountKey == null || transaction.accountKey == filter.accountKey) &&
                 (!filter.unreviewedOnly || transaction.isUnreviewed) &&
+                (city == null || transaction.locationCity.searchKey() == city) &&
+                (state == null || transaction.locationState.searchKey() == state) &&
+                (country == null || transaction.locationCountry.searchKey() == country) &&
                 (query.isBlank() || transaction.matchesWhere(query))
         }
     }
@@ -74,6 +97,39 @@ object TransactionFilters {
                 )
             },
         )
+
+    fun cityOptions(transactions: List<Transaction>): List<TransactionCityOption> {
+        val places =
+            transactions.mapNotNull { transaction ->
+                val city = transaction.locationCity.cleanedOrNull() ?: return@mapNotNull null
+                CityPlace(
+                    city = city,
+                    state = transaction.locationState.cleanedOrNull(),
+                    country = transaction.locationCountry.cleanedOrNull(),
+                )
+            }.distinctBy { Triple(it.city.searchKey(), it.state.searchKey(), it.country.searchKey()) }
+        val cityNameCounts = places.groupingBy { it.city.searchKey() }.eachCount()
+        return places.map { place ->
+            val duplicateName = cityNameCounts.getValue(place.city.searchKey()) > 1
+            TransactionCityOption(
+                city = place.city,
+                state = place.state,
+                country = place.country,
+                label =
+                    if (duplicateName) {
+                        listOfNotNull(place.city, place.state, place.country).joinToString(", ")
+                    } else {
+                        place.city
+                    },
+            )
+        }
+    }
+
+    fun stateOptions(transactions: List<Transaction>): List<String> =
+        transactions.mapNotNull { it.locationState.cleanedOrNull() }.distinctBy { it.searchKey() }
+
+    fun countryOptions(transactions: List<Transaction>): List<String> =
+        transactions.mapNotNull { it.locationCountry.cleanedOrNull() }.distinctBy { it.searchKey() }
 }
 
 private fun Transaction.matchesTime(
@@ -107,6 +163,12 @@ private data class AccountOptionData(
     val institutionName: String?,
 )
 
+private data class CityPlace(
+    val city: String,
+    val state: String?,
+    val country: String?,
+)
+
 private fun accountOptionsFrom(options: List<AccountOptionData>): List<TransactionAccountOption> {
     val accountNameCounts = options.groupingBy { it.accountName.searchKey() }.eachCount()
     return options.map { option ->
@@ -129,7 +191,9 @@ private fun String?.accountNameOr(fallback: String): String = cleanedOrNull() ?:
 
 private fun String?.cleanedOrNull(): String? = this?.trim()?.takeIf { it.isNotBlank() }
 
-private fun String.searchKey(): String {
+private fun String?.searchKey(): String {
+    if (this == null) return ""
+
     val normalized =
         Normalizer
             .normalize(this, Normalizer.Form.NFD)

@@ -464,6 +464,9 @@ interface TransactionDao {
                                 accountName = incoming.accountName,
                                 providerDescription = incoming.providerDescription,
                                 flowKind = incoming.flowKind,
+                                locationCity = incoming.locationCity,
+                                locationState = incoming.locationState,
+                                locationCountry = incoming.locationCountry,
                             )
                         providerRefreshed.copy(
                             reviewedAtEpochMillis =
@@ -495,6 +498,15 @@ interface TransactionDao {
             reviewedAtEpochMillis = reviewedAtEpochMillis,
             merchantOverride = merchantOverride,
         )
+
+    suspend fun locationForId(id: String): StoredTransactionLocation? {
+        val row = transactionsForIds(listOf(id)).singleOrNull() ?: return null
+        return StoredTransactionLocation(
+            locationCity = row.locationCity,
+            locationState = row.locationState,
+            locationCountry = row.locationCountry,
+        )
+    }
 
     @Query("SELECT source FROM transactions WHERE id = :id")
     suspend fun sourceForId(id: String): String?
@@ -576,4 +588,7 @@ private fun TransactionEntity.hasSameProviderStateAs(other: TransactionEntity): 
         accountKey == other.accountKey &&
         accountName == other.accountName &&
         providerDescription == other.providerDescription &&
-        flowKind == other.flowKind
+        flowKind == other.flowKind &&
+        locationCity == other.locationCity &&
+        locationState == other.locationState &&
+        locationCountry == other.locationCountry

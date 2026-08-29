@@ -15,14 +15,19 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SimpleFinIgnoredTransactionEntity::class,
         SimpleFinIdentityStateEntity::class,
         MerchantRuleEntity::class,
+        PlaceGeocodeEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = true,
 )
 abstract class FlowMoneyDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
 
     abstract fun simpleFinDao(): SimpleFinDao
+
+    abstract fun placeGeocodeDao(): PlaceGeocodeDao
+
+    abstract fun transactionLocationDao(): TransactionLocationDao
 
     internal abstract fun simpleFinIdentityDao(): SimpleFinIdentityDao
 
@@ -46,6 +51,7 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                         MIGRATION_7_8,
                         MIGRATION_8_9,
                         MIGRATION_9_10,
+                        MIGRATION_10_11,
                     ).build()
                     .also { instance = it }
             }
@@ -193,6 +199,26 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                         "UPDATE transactions SET flowKind = 'TRANSFER' " +
                             "WHERE source = 'simplefin' AND cents > 0 AND flowKind = 'NORMAL' AND " +
                             "UPPER(TRIM(providerDescription)) = 'AUTOMATIC PAYMENT'",
+                    )
+                }
+            }
+
+        internal val MIGRATION_10_11: Migration =
+            object : Migration(10, 11) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN locationCity TEXT")
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN locationState TEXT")
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN locationCountry TEXT")
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS place_geocodes (" +
+                            "placeKey TEXT NOT NULL, " +
+                            "city TEXT, " +
+                            "state TEXT, " +
+                            "country TEXT, " +
+                            "latitude REAL, " +
+                            "longitude REAL, " +
+                            "resolvedAtEpochMillis INTEGER NOT NULL, " +
+                            "PRIMARY KEY(placeKey))",
                     )
                 }
             }

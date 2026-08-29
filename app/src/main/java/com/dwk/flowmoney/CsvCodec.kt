@@ -11,7 +11,9 @@ import java.util.Locale
 object CsvCodec {
     private val legacyHeader = listOf("id", "occurredAtEpochMillis", "merchant", "category", "note", "cents")
     private val v1Header = legacyHeader + "recurring"
-    private val header = v1Header + "flowKind"
+    private val v2Header = v1Header + "flowKind"
+    private val v3Header = v2Header + listOf("locationCity", "locationState", "locationCountry")
+    private val header = v3Header
     private val monarchRequiredColumns = setOf("account name", "category", "description", "person", "date", "amount", "recurring")
     private val monarchDateFormatters =
         listOf(
@@ -35,6 +37,9 @@ object CsvCodec {
                         transaction.cents.toString(),
                         escape(transaction.recurringInterval?.label.orEmpty()),
                         transaction.effectiveFlowKind.name,
+                        escape(transaction.locationCity.orEmpty()),
+                        escape(transaction.locationState.orEmpty()),
+                        escape(transaction.locationCountry.orEmpty()),
                     ).joinToString(","),
                 )
             }
@@ -45,11 +50,18 @@ object CsvCodec {
         if (rows.isEmpty()) return emptyList()
         val first = rows.first().map { it.trim() }
         val isMonarch = first.map(::normalizeHeader).containsAll(monarchRequiredColumns)
-        val dataRows = if (first == header || first == v1Header || first == legacyHeader || isMonarch) rows.drop(1) else rows
+        val dataRows =
+            if (first == v3Header || first == v2Header || first == v1Header || first == legacyHeader || isMonarch) {
+                rows.drop(1)
+            } else {
+                rows
+            }
         require(dataRows.size <= MAX_TRANSACTIONS) { "CSV has too many transactions" }
         val decodedRows =
             when {
-                first == header -> decodeFlowMoney(dataRows, header.size, hasRecurring = true, hasFlowKind = true)
+                first == v3Header ->
+                    decodeFlowMoney(dataRows, v3Header.size, hasRecurring = true, hasFlowKind = true, hasLocation = true)
+                first == v2Header -> decodeFlowMoney(dataRows, v2Header.size, hasRecurring = true, hasFlowKind = true)
                 first == v1Header -> decodeFlowMoney(dataRows, v1Header.size, hasRecurring = true)
                 first == legacyHeader -> decodeFlowMoney(dataRows, legacyHeader.size)
                 isMonarch -> decodeMonarch(first, dataRows)
@@ -70,6 +82,7 @@ object CsvCodec {
         columns: Int,
         hasRecurring: Boolean = false,
         hasFlowKind: Boolean = false,
+        hasLocation: Boolean = false,
     ) = rows.map { row ->
         require(row.size == columns) { "Malformed FlowMoney row" }
         val occurredAtEpochMillis = row[1].trim().toLongOrNull() ?: error("Malformed FlowMoney timestamp")
@@ -81,6 +94,9 @@ object CsvCodec {
             } else {
                 TransactionClassifier.classify(merchant, cents)
             }
+        val locationCity = if (hasLocation) row[8].trim().ifBlank { null } else null
+        val locationState = if (hasLocation) row[9].trim().ifBlank { null } else null
+        val locationCountry = if (hasLocation) row[10].trim().ifBlank { null } else null
         DecodedCsvRow(
             transaction =
                 Transaction(
@@ -92,10 +108,14 @@ object CsvCodec {
                     cents = cents,
                     recurringInterval = if (hasRecurring) parseRecurring(row[6]) else null,
                     flowKind = flowKind,
+                    locationCity = locationCity,
+                    locationState = locationState,
+                    locationCountry = locationCountry,
                 ),
             temporalKind = "epoch-millis",
             temporalValue = occurredAtEpochMillis.toString(),
             identityFlowKind = flowKind.takeIf { hasFlowKind },
+            hasLocation = hasLocation,
         )
     }
 
@@ -189,7 +209,11 @@ object CsvCodec {
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         listOf(
-            if (identity.flowKindName == null) CSV_ID_VERSION_V1 else CSV_ID_VERSION_V2,
+            when {
+                identity.hasLocation -> CSV_ID_VERSION_V3
+                identity.flowKindName != null -> CSV_ID_VERSION_V2
+                else -> CSV_ID_VERSION_V1
+            },
             identity.temporalKind,
             identity.temporalValue,
             identity.merchant,
@@ -199,6 +223,11 @@ object CsvCodec {
             identity.recurringIntervalName,
         ).forEach { value -> digest.updateField(value) }
         identity.flowKindName?.let { digest.updateField(it) }
+        if (identity.hasLocation) {
+            digest.updateField(identity.locationCity)
+            digest.updateField(identity.locationState)
+            digest.updateField(identity.locationCountry)
+        }
         digest.updateField(occurrenceOrdinal.toString())
         return CSV_ID_PREFIX + digest.digest().toLowerHex()
     }
@@ -333,6 +362,7 @@ object CsvCodec {
         val temporalKind: String,
         val temporalValue: String,
         val identityFlowKind: FlowKind? = null,
+        val hasLocation: Boolean = false,
     ) {
         fun identity() =
             CsvRowIdentity(
@@ -344,6 +374,10 @@ object CsvCodec {
                 cents = transaction.cents,
                 recurringIntervalName = transaction.recurringInterval?.name,
                 flowKindName = identityFlowKind?.name,
+                hasLocation = hasLocation,
+                locationCity = transaction.locationCity,
+                locationState = transaction.locationState,
+                locationCountry = transaction.locationCountry,
             )
     }
 
@@ -356,6 +390,10 @@ object CsvCodec {
         val cents: Int,
         val recurringIntervalName: String?,
         val flowKindName: String?,
+        val hasLocation: Boolean = false,
+        val locationCity: String? = null,
+        val locationState: String? = null,
+        val locationCountry: String? = null,
     )
 
     private enum class FieldState { Unquoted, Quoted, AfterQuote }
@@ -367,6 +405,7 @@ object CsvCodec {
     private const val CSV_ID_PREFIX = "csv:"
     private const val CSV_ID_VERSION_V1 = "penny-csv-row-v1"
     private const val CSV_ID_VERSION_V2 = "penny-csv-row-v2"
+    private const val CSV_ID_VERSION_V3 = "penny-csv-row-v3"
     private val CSV_ID = Regex("csv:[0-9a-f]{64}")
     private val HEX_DIGITS = "0123456789abcdef".toCharArray()
     private val FORMULA_PREFIXES = setOf('=', '+', '-', '@')

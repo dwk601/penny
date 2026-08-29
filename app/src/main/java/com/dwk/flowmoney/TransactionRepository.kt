@@ -105,7 +105,19 @@ class TransactionRepository(
             } else {
                 transaction
             }
-        dao.upsertAndClearIgnored(reviewed.toEntity())
+        val entity = reviewed.toEntity()
+        val stored = dao.locationForId(entity.id)
+        val preserved =
+            if (stored == null) {
+                entity
+            } else {
+                entity.copy(
+                    locationCity = stored.locationCity,
+                    locationState = stored.locationState,
+                    locationCountry = stored.locationCountry,
+                )
+            }
+        dao.upsertAndClearIgnored(preserved)
     }
 
     override suspend fun importTransactions(transactions: List<Transaction>): Int {

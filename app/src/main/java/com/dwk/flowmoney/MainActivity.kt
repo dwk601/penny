@@ -2855,13 +2855,36 @@ private fun TransactionsPage(
     var sourceFilterName by rememberSaveable { mutableStateOf(TransactionSourceFilter.All.name) }
     var selectedAccountKey by rememberSaveable { mutableStateOf<String?>(null) }
     var unreviewedOnly by rememberSaveable { mutableStateOf(false) }
+    var selectedCity by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedState by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedCountry by rememberSaveable { mutableStateOf<String?>(null) }
+    var viewModeName by rememberSaveable { mutableStateOf(TransactionViewMode.List.name) }
     var filtersExpanded by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
     val timeFilter = remember(timeFilterName) { TransactionTimeFilter.valueOf(timeFilterName) }
     val sourceFilter = remember(sourceFilterName) { TransactionSourceFilter.valueOf(sourceFilterName) }
+    val viewMode = remember(viewModeName) { TransactionViewMode.valueOf(viewModeName) }
     val categories = remember(sortedTransactions) { TransactionFilters.categories(sortedTransactions) }
     val accountOptions = remember(simpleFinAccounts) { TransactionFilters.accountOptions(simpleFinAccounts) }
+    val cityOptions = remember(sortedTransactions) { TransactionFilters.cityOptions(sortedTransactions) }
+    val stateOptions = remember(sortedTransactions) { TransactionFilters.stateOptions(sortedTransactions) }
+    val countryOptions = remember(sortedTransactions) { TransactionFilters.countryOptions(sortedTransactions) }
+    val geocoder =
+        remember(context) {
+            PlaceGeocoder(FlowMoneyDatabase.get(context).placeGeocodeDao())
+        }
     val filter =
-        remember(timeFilter, selectedCategory, whereFilter, sourceFilter, selectedAccountKey, unreviewedOnly) {
+        remember(
+            timeFilter,
+            selectedCategory,
+            whereFilter,
+            sourceFilter,
+            selectedAccountKey,
+            unreviewedOnly,
+            selectedCity,
+            selectedState,
+            selectedCountry,
+        ) {
             TransactionFilter(
                 time = timeFilter,
                 category = selectedCategory,
@@ -2869,6 +2892,9 @@ private fun TransactionsPage(
                 source = sourceFilter,
                 accountKey = selectedAccountKey,
                 unreviewedOnly = unreviewedOnly,
+                city = selectedCity,
+                state = selectedState,
+                country = selectedCountry,
             )
         }
     val filteredTransactions =
@@ -2884,9 +2910,116 @@ private fun TransactionsPage(
             selectedAccountKey = null
         }
     }
+    LaunchedEffect(cityOptions, selectedCity, selectedState, selectedCountry) {
+        if (selectedCity != null &&
+            cityOptions.none { option ->
+                option.city == selectedCity &&
+                    (selectedState == null || option.state == selectedState) &&
+                    (selectedCountry == null || option.country == selectedCountry)
+            }
+        ) {
+            selectedCity = null
+        }
+    }
+    LaunchedEffect(stateOptions) {
+        if (selectedState != null && stateOptions.none { it == selectedState }) selectedState = null
+    }
+    LaunchedEffect(countryOptions) {
+        if (selectedCountry != null && countryOptions.none { it == selectedCountry }) selectedCountry = null
+    }
     val dayGroups = remember(filteredTransactions) { transactionDayGroups(filteredTransactions) }
 
+    val headerDetail =
+        if (filteredTransactions.size == sortedTransactions.size) {
+            "All time"
+        } else {
+            "${sortedTransactions.size} total"
+        }
+    val clearFilters: () -> Unit = {
+        timeFilterName = TransactionTimeFilter.All.name
+        selectedCategory = null
+        whereFilter = ""
+        sourceFilterName = TransactionSourceFilter.All.name
+        selectedAccountKey = null
+        unreviewedOnly = false
+        selectedCity = null
+        selectedState = null
+        selectedCountry = null
+        filtersExpanded = false
+    }
+    val filterBar: @Composable () -> Unit = {
+        TransactionFilterBar(
+            timeFilter = timeFilter,
+            selectedCategory = selectedCategory,
+            categories = categories,
+            whereFilter = whereFilter,
+            sourceFilter = sourceFilter,
+            selectedAccountKey = selectedAccountKey,
+            accountOptions = accountOptions,
+            unreviewedOnly = unreviewedOnly,
+            selectedCity = selectedCity,
+            selectedState = selectedState,
+            selectedCountry = selectedCountry,
+            cityOptions = cityOptions,
+            stateOptions = stateOptions,
+            countryOptions = countryOptions,
+            viewMode = viewMode,
+            isExpanded = filtersExpanded,
+            onExpandedChange = { filtersExpanded = it },
+            onTimeFilterChange = { timeFilterName = it.name },
+            onCategoryChange = { selectedCategory = it },
+            onWhereFilterChange = { whereFilter = it },
+            onSourceFilterChange = { sourceFilterName = it.name },
+            onAccountChange = { selectedAccountKey = it },
+            onUnreviewedOnlyChange = { unreviewedOnly = it },
+            onCityOptionChange = { option ->
+                if (option == null) {
+                    selectedCity = null
+                } else {
+                    val duplicate =
+                        cityOptions.count { it.city == option.city } > 1
+                    selectedCity = option.city
+                    if (duplicate) {
+                        selectedState = option.state
+                        selectedCountry = option.country
+                    }
+                }
+            },
+            onStateChange = { selectedState = it },
+            onCountryChange = { selectedCountry = it },
+            onViewModeChange = { viewModeName = it.name },
+            onClear = clearFilters,
+        )
+    }
+
     Box(modifier = modifier) {
+        if (viewMode == TransactionViewMode.Map) {
+            Column(
+                modifier =
+                    Modifier
+                        .widthIn(max = 720.dp)
+                        .fillMaxSize()
+                        .align(Alignment.TopCenter),
+            ) {
+                Column(
+                    modifier = Modifier.padding(PagePadding),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    RecentTransactionsHeader(
+                        title = "Transactions",
+                        count = filteredTransactions.size,
+                        detail = headerDetail,
+                    )
+                    filterBar()
+                }
+                TransactionMap(
+                    transactions = filteredTransactions,
+                    geocoder = geocoder,
+                    onEdit = onEdit,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                )
+            }
+        } else {
         LazyColumn(
             modifier =
                 Modifier
@@ -2901,44 +3034,11 @@ private fun TransactionsPage(
                 RecentTransactionsHeader(
                     title = "Transactions",
                     count = filteredTransactions.size,
-                    detail =
-                        if (filteredTransactions.size ==
-                            sortedTransactions.size
-                        ) {
-                            "All time"
-                        } else {
-                            "${sortedTransactions.size} total"
-                        },
+                    detail = headerDetail,
                 )
             }
             item {
-                TransactionFilterBar(
-                    timeFilter = timeFilter,
-                    selectedCategory = selectedCategory,
-                    categories = categories,
-                    whereFilter = whereFilter,
-                    sourceFilter = sourceFilter,
-                    selectedAccountKey = selectedAccountKey,
-                    accountOptions = accountOptions,
-                    unreviewedOnly = unreviewedOnly,
-                    isExpanded = filtersExpanded,
-                    onExpandedChange = { filtersExpanded = it },
-                    onTimeFilterChange = { timeFilterName = it.name },
-                    onCategoryChange = { selectedCategory = it },
-                    onWhereFilterChange = { whereFilter = it },
-                    onSourceFilterChange = { sourceFilterName = it.name },
-                    onAccountChange = { selectedAccountKey = it },
-                    onUnreviewedOnlyChange = { unreviewedOnly = it },
-                    onClear = {
-                        timeFilterName = TransactionTimeFilter.All.name
-                        selectedCategory = null
-                        whereFilter = ""
-                        sourceFilterName = TransactionSourceFilter.All.name
-                        selectedAccountKey = null
-                        unreviewedOnly = false
-                        filtersExpanded = false
-                    },
-                )
+                filterBar()
             }
             if (sortedTransactions.isEmpty()) {
                 item {
@@ -3000,6 +3100,7 @@ private fun TransactionsPage(
                 }
             }
         }
+        }
     }
 }
 
@@ -3054,6 +3155,13 @@ private fun TransactionFilterBar(
     selectedAccountKey: String?,
     accountOptions: List<TransactionAccountOption>,
     unreviewedOnly: Boolean,
+    selectedCity: String?,
+    selectedState: String?,
+    selectedCountry: String?,
+    cityOptions: List<TransactionCityOption>,
+    stateOptions: List<String>,
+    countryOptions: List<String>,
+    viewMode: TransactionViewMode,
     isExpanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     onTimeFilterChange: (TransactionTimeFilter) -> Unit,
@@ -3062,17 +3170,31 @@ private fun TransactionFilterBar(
     onSourceFilterChange: (TransactionSourceFilter) -> Unit,
     onAccountChange: (String?) -> Unit,
     onUnreviewedOnlyChange: (Boolean) -> Unit,
+    onCityOptionChange: (TransactionCityOption?) -> Unit,
+    onStateChange: (String?) -> Unit,
+    onCountryChange: (String?) -> Unit,
+    onViewModeChange: (TransactionViewMode) -> Unit,
     onClear: () -> Unit,
 ) {
     var accountMenuExpanded by rememberSaveable { mutableStateOf(false) }
     val selectedAccountLabel = accountOptions.firstOrNull { it.accountKey == selectedAccountKey }?.label
+    val selectedCityLabel =
+        cityOptions
+            .firstOrNull { option ->
+                option.city == selectedCity &&
+                    (selectedState == null || option.state == selectedState) &&
+                    (selectedCountry == null || option.country == selectedCountry)
+            }?.label ?: selectedCity
     val hasActiveFilter =
         timeFilter != TransactionTimeFilter.All ||
             selectedCategory != null ||
             whereFilter.isNotBlank() ||
             sourceFilter != TransactionSourceFilter.All ||
             selectedAccountKey != null ||
-            unreviewedOnly
+            unreviewedOnly ||
+            selectedCity != null ||
+            selectedState != null ||
+            selectedCountry != null
     val summary =
         buildList {
             if (timeFilter != TransactionTimeFilter.All) add(timeFilter.label)
@@ -3080,6 +3202,9 @@ private fun TransactionFilterBar(
             if (sourceFilter != TransactionSourceFilter.All) add(sourceFilter.label)
             selectedAccountLabel?.let { add(it) }
             if (unreviewedOnly) add("Needs review")
+            selectedCityLabel?.let { add(it) }
+            if (selectedState != null && selectedCityLabel?.contains(selectedState) != true) add(selectedState)
+            selectedCountry?.let { add(it) }
             if (whereFilter.isNotBlank()) add("“${whereFilter.trim()}”")
         }.joinToString(" · ").ifBlank { "All transactions" }
 
@@ -3094,6 +3219,23 @@ private fun TransactionFilterBar(
             ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        FlowRow(
+            modifier =
+                Modifier
+                    .selectableGroup()
+                    .testTag("transaction_view_mode_group"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TransactionViewMode.entries.forEach { mode ->
+                SuggestionChip(
+                    label = mode.label,
+                    selected = viewMode == mode,
+                    testTag = "transaction_view_${mode.name.lowercase(Locale.US)}",
+                    onClick = { onViewModeChange(mode) },
+                )
+            }
+        }
         OutlinedTextField(
             value = whereFilter,
             onValueChange = onWhereFilterChange,
@@ -3280,6 +3422,92 @@ private fun TransactionFilterBar(
                             testTag = "transaction_category_filter_${category.toCategoryChipTagSuffix()}",
                             onClick = { onCategoryChange(category) },
                         )
+                    }
+                }
+                if (cityOptions.isNotEmpty()) {
+                    SectionLabel("City")
+                    FlowRow(
+                        modifier =
+                            Modifier
+                                .selectableGroup()
+                                .testTag("transaction_city_filter_group"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SuggestionChip(
+                            label = "Any city",
+                            selected = selectedCity == null,
+                            testTag = "transaction_city_filter_all",
+                            onClick = { onCityOptionChange(null) },
+                        )
+                        cityOptions.forEach { option ->
+                            val selected =
+                                option.city == selectedCity &&
+                                    (selectedState == null || option.state == selectedState) &&
+                                    (selectedCountry == null || option.country == selectedCountry) &&
+                                    (
+                                        cityOptions.count { it.city == option.city } == 1 ||
+                                            (option.state == selectedState && option.country == selectedCountry)
+                                    )
+                            SuggestionChip(
+                                label = option.label,
+                                selected = selected,
+                                testTag = "transaction_city_filter_${option.label.toCategoryChipTagSuffix()}",
+                                onClick = { onCityOptionChange(option) },
+                            )
+                        }
+                    }
+                }
+                if (stateOptions.isNotEmpty()) {
+                    SectionLabel("State")
+                    FlowRow(
+                        modifier =
+                            Modifier
+                                .selectableGroup()
+                                .testTag("transaction_state_filter_group"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SuggestionChip(
+                            label = "Any state",
+                            selected = selectedState == null,
+                            testTag = "transaction_state_filter_all",
+                            onClick = { onStateChange(null) },
+                        )
+                        stateOptions.forEach { state ->
+                            SuggestionChip(
+                                label = state,
+                                selected = selectedState == state,
+                                testTag = "transaction_state_filter_${state.toCategoryChipTagSuffix()}",
+                                onClick = { onStateChange(state) },
+                            )
+                        }
+                    }
+                }
+                if (countryOptions.isNotEmpty()) {
+                    SectionLabel("Country")
+                    FlowRow(
+                        modifier =
+                            Modifier
+                                .selectableGroup()
+                                .testTag("transaction_country_filter_group"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SuggestionChip(
+                            label = "Any country",
+                            selected = selectedCountry == null,
+                            testTag = "transaction_country_filter_all",
+                            onClick = { onCountryChange(null) },
+                        )
+                        countryOptions.forEach { country ->
+                            SuggestionChip(
+                                label = country,
+                                selected = selectedCountry == country,
+                                testTag = "transaction_country_filter_${country.toCategoryChipTagSuffix()}",
+                                onClick = { onCountryChange(country) },
+                            )
+                        }
                     }
                 }
                 if (hasActiveFilter) {
