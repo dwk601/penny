@@ -10,6 +10,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -387,6 +388,226 @@ class TransactionDaoDataPathTest {
                 assertEquals(snapshot.count, repository.restoreRange(snapshot))
                 assertEquals(listOf(transaction), dao.getAll())
                 assertEquals(listOf(tombstone), database.simpleFinIdentityDao().tombstones())
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun providerRefreshRewritesLocationWhileEveryLocalEditSurvives() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val existing =
+                    entity("simplefin:origin:account:tx", 1).copy(
+                        source = "simplefin",
+                        accountKey = "simplefin:v2:first",
+                        accountName = "Checking",
+                        providerDescription = "TRADER JOES #123, PORTLAND OR",
+                        category = "Groceries",
+                        note = "local note",
+                        merchantOverride = "Trader Joe's",
+                        reviewedAtEpochMillis = 77L,
+                        flowKindOverride = FlowKind.TRANSFER,
+                        recurringInterval = "Monthly",
+                        locationCity = "PORTLAND",
+                        locationState = "OR",
+                        locationCountry = null,
+                    )
+                dao.upsert(existing)
+
+                val incoming =
+                    entity(existing.id, 2).copy(
+                        merchant = "TRADER JOES",
+                        source = "simplefin",
+                        accountKey = "simplefin:v2:second",
+                        accountName = "Renamed Checking",
+                        providerDescription = "TRADER JOES #123, MINNEAPOLIS MN",
+                        category = "Other",
+                        note = "",
+                        cents = -999,
+                        locationCity = "MINNEAPOLIS",
+                        locationState = "MN",
+                        locationCountry = null,
+                    )
+                val result = dao.upsertSyncedTransactionsIgnoringTombstones(listOf(incoming), reviewedAtEpochMillis = 500L)
+
+                val refreshed = dao.getAll().single()
+                assertEquals(SyncedTransactionWriteResult(inserted = 0, updated = 1, skipped = 0), result)
+                // Provider-owned halves are refreshed, including the new location columns.
+                assertEquals("MINNEAPOLIS", refreshed.locationCity)
+                assertEquals("MN", refreshed.locationState)
+                assertNull(refreshed.locationCountry)
+                assertEquals("simplefin:v2:second", refreshed.accountKey)
+                assertEquals("TRADER JOES #123, MINNEAPOLIS MN", refreshed.providerDescription)
+                assertEquals(-999, refreshed.cents)
+                // Locally-owned halves survive untouched.
+                assertEquals("Groceries", refreshed.category)
+                assertEquals("local note", refreshed.note)
+                assertEquals("Trader Joe's", refreshed.merchantOverride)
+                assertEquals(77L, refreshed.reviewedAtEpochMillis!!)
+                assertEquals(FlowKind.TRANSFER, refreshed.flowKindOverride)
+                assertEquals("Monthly", refreshed.recurringInterval)
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun providerRefreshClearsAStaleLocationAndNeverWritesOverALocalRow() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val staleSynced =
+                    entity("synced", 1).copy(
+                        source = "simplefin",
+                        providerDescription = "TRADER JOES #123, PORTLAND OR",
+                        locationCity = "PORTLAND",
+                        locationState = "OR",
+                    )
+                val localRow =
+                    entity("collision", 1).copy(
+                        source = "local",
+                        category = "Home",
+                        locationCity = "AUSTIN",
+                        locationState = "TX",
+                    )
+                dao.upsertAll(listOf(staleSynced, localRow))
+
+                val result =
+                    dao.upsertSyncedTransactionsIgnoringTombstones(
+                        listOf(
+                            entity("synced", 1).copy(
+                                source = "simplefin",
+                                providerDescription = "STARBUCKS STORE SEATTLE WA",
+                                locationCity = null,
+                                locationState = null,
+                                locationCountry = null,
+                            ),
+                            entity("collision", 9).copy(
+                                source = "simplefin",
+                                category = "Provider",
+                                locationCity = "MINNEAPOLIS",
+                                locationState = "MN",
+                            ),
+                        ),
+                        reviewedAtEpochMillis = 500L,
+                    )
+
+                val rows = dao.getAll().associateBy { it.id }
+                assertEquals(SyncedTransactionWriteResult(inserted = 0, updated = 1, skipped = 1), result)
+                assertNull(rows.getValue("synced").locationCity)
+                assertNull(rows.getValue("synced").locationState)
+                // The local row is source-guarded: nothing from the provider lands on it.
+                assertEquals("AUSTIN", rows.getValue("collision").locationCity)
+                assertEquals("TX", rows.getValue("collision").locationState)
+                assertEquals("local", rows.getValue("collision").source)
+                assertEquals("Home", rows.getValue("collision").category)
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun merchantRuleUndoTreatsAChangedLocationAsNewProviderStateAndKeepsIt() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val origin =
+                    entity("simplefin:origin:account:tx", 1).copy(
+                        merchant = "TRADER JOES",
+                        source = "simplefin",
+                        category = "Other",
+                        note = "before",
+                        providerDescription = "TRADER JOES #123, PORTLAND OR",
+                        locationCity = "PORTLAND",
+                        locationState = "OR",
+                    )
+                dao.upsert(origin)
+                val applied =
+                    dao.saveAndApplyMerchantRule(
+                        originatingTransactionId = origin.id,
+                        category = "Groceries",
+                        merchantOverride = "Trader Joe's",
+                        reviewedAtEpochMillis = 10L,
+                        overwriteConflict = false,
+                    ) as MerchantRuleSaveResult.Applied
+
+                // A later sync moves only the location; nothing else about the row changes.
+                dao.upsert(dao.getAll().single().copy(locationCity = "MINNEAPOLIS", locationState = "MN"))
+
+                dao.undoMerchantRuleSave(applied.undoToken)
+
+                val restored = dao.getAll().single()
+                assertEquals("MINNEAPOLIS", restored.locationCity)
+                assertEquals("MN", restored.locationState)
+                assertEquals("Other", restored.category)
+                assertEquals("before", restored.note)
+                assertNull(restored.merchantOverride)
+                assertNull(restored.reviewedAtEpochMillis)
+                assertEquals(emptyList<MerchantRuleEntity>(), dao.getMerchantRules())
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun merchantRuleUndoWithAnUnchangedLocationRestoresTheExactPreviousRow() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val origin =
+                    entity("simplefin:origin:account:tx", 1).copy(
+                        merchant = "TRADER JOES",
+                        source = "simplefin",
+                        category = "Other",
+                        note = "before",
+                        providerDescription = "TRADER JOES #123, PORTLAND OR",
+                        locationCity = "PORTLAND",
+                        locationState = "OR",
+                    )
+                dao.upsert(origin)
+                val applied =
+                    dao.saveAndApplyMerchantRule(
+                        originatingTransactionId = origin.id,
+                        category = "Groceries",
+                        merchantOverride = "Trader Joe's",
+                        reviewedAtEpochMillis = 10L,
+                        overwriteConflict = false,
+                    ) as MerchantRuleSaveResult.Applied
+
+                assertEquals("PORTLAND", dao.getAll().single().locationCity)
+                assertEquals("Groceries", dao.getAll().single().category)
+
+                dao.undoMerchantRuleSave(applied.undoToken)
+
+                assertEquals(origin, dao.getAll().single())
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun locationForIdReadsStoredColumnsAndReturnsNullForUnknownRows() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                dao.upsertAll(
+                    listOf(
+                        entity("located", 1).copy(locationCity = "PORTLAND", locationState = "OR", locationCountry = "US"),
+                        entity("unlocated", 2),
+                    ),
+                )
+
+                assertEquals(
+                    StoredTransactionLocation(locationCity = "PORTLAND", locationState = "OR", locationCountry = "US"),
+                    dao.locationForId("located"),
+                )
+                assertEquals(
+                    StoredTransactionLocation(locationCity = null, locationState = null, locationCountry = null),
+                    dao.locationForId("unlocated"),
+                )
+                assertNull(dao.locationForId("missing"))
             } finally {
                 database.close()
             }

@@ -192,6 +192,138 @@ class TransactionFiltersTest {
         assertThat(filter.source).isEqualTo(TransactionSourceFilter.All)
         assertThat(filter.accountKey).isNull()
         assertThat(filter.unreviewedOnly).isFalse()
+        assertThat(filter.city).isNull()
+        assertThat(filter.state).isNull()
+        assertThat(filter.country).isNull()
+    }
+
+    @Test
+    fun locationFiltersComposeWithEveryPreExistingFilter() {
+        val matching =
+            transaction(
+                id = "match",
+                merchant = "Corner Shop",
+                category = "Café",
+                note = "Team lunch",
+                source = "simplefin",
+                accountKey = "account-key",
+                city = "Portland",
+                state = "OR",
+                country = "US",
+            )
+        val transactions =
+            listOf(
+                matching,
+                matching.copy(id = "old", occurredAtEpochMillis = epochMillis(today.minusDays(8))),
+                matching.copy(id = "category", category = "Travel"),
+                matching.copy(id = "manual", source = "local"),
+                matching.copy(id = "account", accountKey = "other-key"),
+                matching.copy(id = "reviewed", reviewedAtEpochMillis = 1L),
+                matching.copy(id = "where", merchant = "Other", note = "Other"),
+                matching.copy(id = "city", locationCity = "Seattle"),
+                matching.copy(id = "state", locationState = "WA"),
+                matching.copy(id = "country", locationCountry = "CA"),
+                matching.copy(id = "no-location", locationCity = null, locationState = null, locationCountry = null),
+            )
+
+        val filter =
+            TransactionFilter(
+                time = TransactionTimeFilter.Week,
+                category = "cafe",
+                where = "team lunch",
+                source = TransactionSourceFilter.Synced,
+                accountKey = "account-key",
+                unreviewedOnly = true,
+                city = "Portland",
+                state = "OR",
+                country = "US",
+            )
+
+        assertThat(apply(transactions, filter)).containsExactly("match")
+        assertThat(apply(transactions, TransactionFilter(city = "Portland")))
+            .containsExactly("match", "old", "category", "manual", "account", "reviewed", "where", "state", "country")
+            .inOrder()
+        assertThat(apply(transactions, TransactionFilter(state = "WA"))).containsExactly("state")
+        assertThat(apply(transactions, TransactionFilter(country = "CA"))).containsExactly("country")
+    }
+
+    @Test
+    fun locationFilterMatchingUsesTheSharedSearchKeyNormalization() {
+        val transactions =
+            listOf(
+                transaction(id = "accented", city = "  SÃO   Paulo ", state = " sp ", country = "BR"),
+                transaction(id = "other", city = "Sao Paolo", state = "SP", country = "BR"),
+            )
+
+        assertThat(apply(transactions, TransactionFilter(city = "sao paulo"))).containsExactly("accented")
+        assertThat(apply(transactions, TransactionFilter(city = "  SAO    PAULO  "))).containsExactly("accented")
+        assertThat(apply(transactions, TransactionFilter(state = "SP")))
+            .containsExactly("accented", "other")
+            .inOrder()
+        assertThat(apply(transactions, TransactionFilter(country = "br")))
+            .containsExactly("accented", "other")
+            .inOrder()
+        assertThat(apply(transactions, TransactionFilter(city = "saopaulo"))).isEmpty()
+    }
+
+    @Test
+    fun blankLocationFilterValuesOnlyMatchRowsWithoutThatLocationPart() {
+        val transactions =
+            listOf(
+                transaction(id = "located", city = "Portland", state = "OR"),
+                transaction(id = "unlocated"),
+            )
+
+        assertThat(apply(transactions, TransactionFilter(city = "   "))).containsExactly("unlocated")
+        assertThat(apply(transactions, TransactionFilter(country = ""))).containsExactly("located", "unlocated").inOrder()
+    }
+
+    @Test
+    fun cityOptionsDisambiguateRepeatedCityNamesAndKeepUniqueNamesSimple() {
+        val transactions =
+            listOf(
+                transaction(id = "1", city = "Portland", state = "OR", country = "US"),
+                transaction(id = "2", city = "Portland", state = "ME", country = "US"),
+                transaction(id = "3", city = "Seattle", state = "WA", country = "US"),
+                transaction(id = "4", city = "Paris", state = null, country = "FR"),
+                transaction(id = "5", city = "Paris", state = "TX", country = null),
+                transaction(id = "6", city = "  portland ", state = " or ", country = " us "),
+                transaction(id = "7", city = "   ", state = "XX"),
+                transaction(id = "8"),
+            )
+
+        assertThat(TransactionFilters.cityOptions(transactions))
+            .containsExactly(
+                TransactionCityOption(city = "Portland", state = "OR", country = "US", label = "Portland, OR, US"),
+                TransactionCityOption(city = "Portland", state = "ME", country = "US", label = "Portland, ME, US"),
+                TransactionCityOption(city = "Seattle", state = "WA", country = "US", label = "Seattle"),
+                TransactionCityOption(city = "Paris", state = null, country = "FR", label = "Paris, FR"),
+                TransactionCityOption(city = "Paris", state = "TX", country = null, label = "Paris, TX"),
+            ).inOrder()
+    }
+
+    @Test
+    fun stateAndCountryOptionsDeduplicateByNormalizedKeyInEncounterOrder() {
+        val transactions =
+            listOf(
+                transaction(id = "1", city = "Portland", state = "OR", country = "US"),
+                transaction(id = "2", city = "Salem", state = " or ", country = " us "),
+                transaction(id = "3", city = "Seattle", state = "WA", country = "US"),
+                transaction(id = "4", city = "Paris", state = "   ", country = "FR"),
+                transaction(id = "5"),
+            )
+
+        assertThat(TransactionFilters.stateOptions(transactions)).containsExactly("OR", "WA").inOrder()
+        assertThat(TransactionFilters.countryOptions(transactions)).containsExactly("US", "FR").inOrder()
+        assertThat(TransactionFilters.stateOptions(emptyList())).isEmpty()
+        assertThat(TransactionFilters.countryOptions(emptyList())).isEmpty()
+        assertThat(TransactionFilters.cityOptions(emptyList())).isEmpty()
+    }
+
+    @Test
+    fun viewModeExposesExactlyListAndMapLabels() {
+        assertThat(TransactionViewMode.entries.map { it.name }).containsExactly("List", "Map").inOrder()
+        assertThat(TransactionViewMode.entries.map { it.label }).containsExactly("List", "Map").inOrder()
     }
 
     private fun apply(
@@ -209,6 +341,9 @@ class TransactionFiltersTest {
         accountKey: String? = null,
         accountName: String? = null,
         reviewedAtEpochMillis: Long? = null,
+        city: String? = null,
+        state: String? = null,
+        country: String? = null,
     ): Transaction =
         Transaction(
             id = id,
@@ -221,6 +356,9 @@ class TransactionFiltersTest {
             accountKey = accountKey,
             accountName = accountName,
             reviewedAtEpochMillis = reviewedAtEpochMillis,
+            locationCity = city,
+            locationState = state,
+            locationCountry = country,
         )
 
     private fun epochMillis(date: LocalDate): Long = date.atStartOfDay(utc).toInstant().toEpochMilli()
