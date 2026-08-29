@@ -9,10 +9,10 @@ umask 077
 readonly PACKAGE="com.dwk.flowmoney"
 readonly ACTIVITY="com.dwk.flowmoney/.MainActivity"
 readonly WIDGET_PROVIDER="com.dwk.flowmoney.PennyWidgetProvider"
-readonly OLD_VERSION_NAME_DEFAULT="1.0.13"
-readonly OLD_VERSION_CODE_DEFAULT="113"
-readonly NEW_VERSION_NAME_DEFAULT="1.0.14"
-readonly NEW_VERSION_CODE_DEFAULT="114"
+readonly OLD_VERSION_NAME_DEFAULT="1.1.3"
+readonly OLD_VERSION_CODE_DEFAULT="119"
+readonly NEW_VERSION_NAME_DEFAULT="1.1.4"
+readonly NEW_VERSION_CODE_DEFAULT="120"
 readonly PRE_DB_USER_VERSION_DEFAULT="10"
 readonly POST_DB_USER_VERSION_DEFAULT="11"
 readonly PARSEABLE_TX_ID="upgrade-simplefin-parseable"
@@ -71,8 +71,8 @@ usage() {
 Usage:
   scripts/verify-upgrade.sh \
     --serial emulator-5554 \
-    --old-apk /secure/archive/Penny-v1.0.13-debug.apk \
-    --new-apk /secure/candidate/Penny-v1.0.14-debug.apk \
+    --old-apk /secure/archive/Penny-v1.1.3-debug.apk \
+    --new-apk /secure/candidate/Penny-v1.1.4-debug.apk \
     [--output-dir captures/upgrade-rehearsal-YYYYmmddTHHMMSSZ] \
     [--with-simplefin-credential]
 
@@ -83,14 +83,17 @@ Required safety properties:
     this script will never uninstall it or clear its data.
   * The candidate is installed only with: adb -s SERIAL install -r NEW_APK.
     There is no downgrade, uninstall, clear-data, or replacement fallback.
-  * The APKs must be package com.dwk.flowmoney, versions 1.0.13/113 and
-    1.0.14/114, and have the same single signing-certificate SHA-256 digest.
+  * The APKs must be package com.dwk.flowmoney, versions 1.1.3/119 and
+    1.1.4/120 unless overridden, and have the same single signing-certificate
+    SHA-256 digest.
   * Archived and candidate snapshots use distinct Room/SQLite user_version
     values (defaults 10 and 11). A single --db-user-version is rejected.
 
 Options:
-  --old-version-code N       Expected archived versionCode (default: 113)
-  --new-version-code N       Expected candidate versionCode (default: 114)
+  --old-version-name NAME    Expected archived versionName (default: 1.1.3)
+  --new-version-name NAME    Expected candidate versionName (default: 1.1.4)
+  --old-version-code N       Expected archived versionCode (default: 119)
+  --new-version-code N       Expected candidate versionCode (default: 120)
   --pre-db-user-version N    Expected archived Room/SQLite user_version (default: 10)
   --post-db-user-version N   Expected candidate Room/SQLite user_version (default: 11)
   --with-simplefin-credential
@@ -161,6 +164,15 @@ validate_db_user_versions() {
 		die "candidate DB user_version must be greater than archived DB user_version"
 }
 
+validate_apk_version_names() {
+	[[ -n "${OLD_VERSION_NAME//[[:space:]]/}" ]] || die "--old-version-name must be nonblank"
+	[[ -n "${NEW_VERSION_NAME//[[:space:]]/}" ]] || die "--new-version-name must be nonblank"
+}
+
+replace_confirmation_token() {
+	printf 'REPLACE-%s-WITH-%s\n' "$OLD_VERSION_NAME" "$NEW_VERSION_NAME"
+}
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--serial)
@@ -181,6 +193,16 @@ while [[ $# -gt 0 ]]; do
 	--output-dir)
 		require_value "$1" "${2:-}"
 		OUTPUT_DIR="$2"
+		shift 2
+		;;
+	--old-version-name)
+		require_value "$1" "${2:-}"
+		OLD_VERSION_NAME="$2"
+		shift 2
+		;;
+	--new-version-name)
+		require_value "$1" "${2:-}"
+		NEW_VERSION_NAME="$2"
 		shift 2
 		;;
 	--old-version-code)
@@ -231,6 +253,7 @@ done
 [[ "$OLD_VERSION_CODE" =~ ^[0-9]+$ ]] || die "--old-version-code must be an integer"
 [[ "$NEW_VERSION_CODE" =~ ^[0-9]+$ ]] || die "--new-version-code must be an integer"
 ((NEW_VERSION_CODE > OLD_VERSION_CODE)) || die "candidate versionCode must be greater than archived versionCode"
+validate_apk_version_names
 validate_db_user_versions
 
 sdk_roots() {
@@ -1098,14 +1121,19 @@ schema_without_expected_post_delta() {
 assert_pre_migration_schema() {
 	local db="$1"
 	local label="$2"
-	schema_has_column "$db" transactions locationCity &&
+	if schema_has_column "$db" transactions locationCity; then
 		die "$label already has transactions.locationCity"
-	schema_has_column "$db" transactions locationState &&
+	fi
+	if schema_has_column "$db" transactions locationState; then
 		die "$label already has transactions.locationState"
-	schema_has_column "$db" transactions locationCountry &&
+	fi
+	if schema_has_column "$db" transactions locationCountry; then
 		die "$label already has transactions.locationCountry"
-	schema_has_table "$db" place_geocodes &&
+	fi
+	if schema_has_table "$db" place_geocodes; then
 		die "$label already has place_geocodes"
+	fi
+	return 0
 }
 
 assert_post_migration_schema() {
@@ -2044,7 +2072,7 @@ self_test_expect_error() {
 }
 
 self_test_version_options() {
-	local help_text
+	local help_text token
 	if [[ "$PRE_DB_USER_VERSION" == "$PRE_DB_USER_VERSION_DEFAULT" &&
 		"$POST_DB_USER_VERSION" == "$POST_DB_USER_VERSION_DEFAULT" &&
 		"$PRE_DB_USER_VERSION_DEFAULT" == "10" &&
@@ -2054,10 +2082,28 @@ self_test_version_options() {
 		self_test_fail "default DB user versions were $PRE_DB_USER_VERSION->$POST_DB_USER_VERSION"
 	fi
 
+	if [[ "$OLD_VERSION_NAME" == "1.1.3" && "$OLD_VERSION_CODE" == "119" &&
+		"$NEW_VERSION_NAME" == "1.1.4" && "$NEW_VERSION_CODE" == "120" ]]; then
+		self_test_pass "default APK versions are 1.1.3/119 -> 1.1.4/120"
+	else
+		self_test_fail "default APK versions were $OLD_VERSION_NAME/$OLD_VERSION_CODE -> $NEW_VERSION_NAME/$NEW_VERSION_CODE"
+	fi
+
+	token="$(replace_confirmation_token)"
+	if [[ "$token" == "REPLACE-1.1.3-WITH-1.1.4" ]]; then
+		self_test_pass "REPLACE token is derived from selected version names"
+	else
+		self_test_fail "REPLACE token was $token"
+	fi
+
 	help_text="$(self_test_run_script --help)"
 	if printf '%s\n' "$help_text" | grep -Fq -- '--pre-db-user-version' &&
 		printf '%s\n' "$help_text" | grep -Fq -- '--post-db-user-version' &&
 		printf '%s\n' "$help_text" | grep -Fq 'defaults 10 and 11' &&
+		printf '%s\n' "$help_text" | grep -Fq -- '--old-version-name' &&
+		printf '%s\n' "$help_text" | grep -Fq -- '--new-version-name' &&
+		printf '%s\n' "$help_text" | grep -Fq '1.1.3/119' &&
+		printf '%s\n' "$help_text" | grep -Fq '1.1.4/120' &&
 		! printf '%s\n' "$help_text" | grep -Eq -- '--db-user-version N'; then
 		self_test_pass "help describes distinct pre/post DB user versions"
 	else
@@ -2079,11 +2125,25 @@ self_test_version_options() {
 	self_test_expect_error "missing --pre-db-user-version value is rejected" \
 		'--pre-db-user-version requires a value' \
 		--pre-db-user-version
+	self_test_expect_error "missing --old-version-name value is rejected" \
+		'--old-version-name requires a value' \
+		--old-version-name
+	self_test_expect_error "blank --old-version-name is rejected" \
+		'--old-version-name must be nonblank' \
+		--old-version-name ' ' --self-test
+	self_test_expect_error "blank --new-version-name is rejected" \
+		'--new-version-name must be nonblank' \
+		--new-version-name ' ' --self-test
 
 	if validate_db_user_versions; then
 		self_test_pass "validate_db_user_versions accepts 10 then 11"
 	else
 		self_test_fail "validate_db_user_versions rejected 10 then 11"
+	fi
+	if validate_apk_version_names; then
+		self_test_pass "validate_apk_version_names accepts default names"
+	else
+		self_test_fail "validate_apk_version_names rejected default names"
 	fi
 }
 
@@ -2406,6 +2466,27 @@ EOF
 	fi
 }
 
+self_test_pre_schema_success() {
+	local test_root="$1"
+	local db="$test_root/pre-schema-v10.db"
+	local status
+	self_test_create_v10_db "$db"
+	if (
+		assert_pre_migration_schema "$db" "self-test v10"
+		printf 'continued\n'
+	) >"$test_root/pre-schema-success.log" 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	chmod 600 "$test_root/pre-schema-success.log"
+	if [[ $status -eq 0 ]] && grep -Fq 'continued' "$test_root/pre-schema-success.log"; then
+		self_test_pass "assert_pre_migration_schema returns 0 on v10 and does not abort"
+	else
+		self_test_fail "assert_pre_migration_schema aborted or returned nonzero on v10"
+	fi
+}
+
 run_self_tests() {
 	local test_root helper_output target mode
 	test_root="$(mktemp -d "${TMPDIR:-/tmp}/penny-upgrade-self-test.XXXXXX")"
@@ -2460,6 +2541,7 @@ run_self_tests() {
 
 	SQLITE3_BIN="$(command -v sqlite3 || true)"
 	if [[ -x "$SQLITE3_BIN" ]]; then
+		self_test_pre_schema_success "$test_root"
 		self_test_delta_logic "$test_root"
 		self_test_backfill_wait "$test_root"
 	else
@@ -2521,7 +2603,7 @@ create_canonical_fingerprint "10-archived" "$OUTPUT_DIR/10-archived/widget/widge
 	"$PRE_DB_USER_VERSION"
 
 BASELINE_UID="$(package_uid)"
-confirm_exact "REPLACE-1.0.13-WITH-1.0.14" \
+confirm_exact "$(replace_confirmation_token)" \
 	"Baseline artifacts are complete. The next and only install command is adb -s $SERIAL install -r NEW_APK. Stop now if any baseline check is uncertain."
 
 install_candidate_replacement_only
