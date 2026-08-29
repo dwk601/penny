@@ -2,13 +2,19 @@ package com.dwk.flowmoney
 
 import android.app.Application
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
 
 class FlowMoneyApplication : Application() {
+    internal val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         // ponytail: block startup once so a migrated credential cannot outlive its deleted profile.
         runBlocking { SimpleFinMigrationCleanup.run(this@FlowMoneyApplication) }
+        TransactionLocationBackfill.start(this)
     }
 }
 

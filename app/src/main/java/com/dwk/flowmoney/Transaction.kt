@@ -18,6 +18,9 @@ data class Transaction(
     val providerMerchant: String? = null,
     val flowKind: FlowKind = FlowKind.NORMAL,
     val flowKindOverride: FlowKind? = null,
+    val locationCity: String? = null,
+    val locationState: String? = null,
+    val locationCountry: String? = null,
 ) {
     val isUnreviewed: Boolean
         get() = source == "simplefin" && reviewedAtEpochMillis == null

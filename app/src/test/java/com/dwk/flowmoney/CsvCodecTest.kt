@@ -18,7 +18,7 @@ class CsvCodecTest {
         )
 
     @Test
-    fun csvV2RoundTripPreservesEffectiveFlowKindButReplacesIncomingIds() {
+    fun csvRoundTripPreservesEffectiveFlowKindButReplacesIncomingIds() {
         val overridden =
             sample.copy(
                 id = "tx-override",
@@ -26,8 +26,12 @@ class CsvCodecTest {
                 flowKindOverride = FlowKind.TRANSFER,
             )
         val csv = CsvCodec.encode(listOf(sample, overridden))
+        // Export is v3 now: the three location columns are appended after flowKind.
         assertThat(csv.lineSequence().first())
-            .isEqualTo("id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind")
+            .isEqualTo(
+                "id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind," +
+                    "locationCity,locationState,locationCountry",
+            )
         assertThat(csv).doesNotContain("flowKindOverride")
         assertThat(csv).contains("\"Coffee, Inc.\"")
         assertThat(csv).contains("\"latte \"\"oat\"\"\"")
@@ -342,6 +346,196 @@ class CsvCodecTest {
         assertThat(csv).contains("'\n-category")
         assertThat(csv).contains("'\u0000@note")
     }
+
+    @Test
+    fun csvV3RoundTripPreservesLocationsWithoutInventingACountry() {
+        val located =
+            sample.copy(
+                id = "tx-located",
+                locationCity = "Salt Lake City",
+                locationState = "UT",
+            )
+        val fullyLocated = sample.copy(id = "tx-full", locationCity = "Paris", locationState = null, locationCountry = "FR")
+        val unlocated = sample.copy(id = "tx-bare")
+
+        val csv = CsvCodec.encode(listOf(located, fullyLocated, unlocated))
+        val decoded = CsvCodec.decode(csv)
+
+        assertThat(csv).contains("Salt Lake City,UT,")
+        assertThat(decoded).hasSize(3)
+        assertThat(decoded[0]).isEqualTo(located.copy(id = decoded[0].id))
+        assertThat(decoded[1]).isEqualTo(fullyLocated.copy(id = decoded[1].id))
+        assertThat(decoded[2]).isEqualTo(unlocated.copy(id = decoded[2].id))
+        assertThat(decoded[2].locationCity).isNull()
+        assertThat(decoded[2].locationState).isNull()
+        assertThat(decoded[2].locationCountry).isNull()
+        assertThat(decoded.map { it.id }.toSet()).hasSize(3)
+        decoded.forEach { assertCsvId(it.id) }
+
+        // A second pass over the same export reproduces exactly the same identities.
+        assertThat(CsvCodec.decode(csv).map { it.id })
+            .containsExactlyElementsIn(decoded.map { it.id })
+            .inOrder()
+    }
+
+    @Test
+    fun syncedExportThenLocalImportKeepsStableIdsAcrossRepeatedRoundTrips() {
+        val synced =
+            listOf(
+                sample.copy(
+                    id = "simplefin:origin:account:one",
+                    source = "simplefin",
+                    accountKey = "simplefin:v2:account",
+                    accountName = "Checking",
+                    providerDescription = "TRADER JOES #123, PORTLAND OR",
+                    providerMerchant = "TRADER JOES",
+                    reviewedAtEpochMillis = 42L,
+                    locationCity = "PORTLAND",
+                    locationState = "OR",
+                ),
+                sample.copy(
+                    id = "simplefin:origin:account:two",
+                    source = "simplefin",
+                    providerDescription = "STARBUCKS STORE SEATTLE WA",
+                    note = "no parseable location",
+                ),
+            )
+
+        val firstExport = CsvCodec.encode(synced)
+        val firstImport = CsvCodec.decode(firstExport)
+        val secondExport = CsvCodec.encode(firstImport)
+        val secondImport = CsvCodec.decode(secondExport)
+
+        // Everything except the id column survives the synced -> CSV -> local round trip untouched.
+        assertThat(secondExport.withoutIdColumn()).isEqualTo(firstExport.withoutIdColumn())
+        assertThat(secondImport.map { it.id }).containsExactlyElementsIn(firstImport.map { it.id }).inOrder()
+        assertThat(firstImport[0].locationCity).isEqualTo("PORTLAND")
+        assertThat(firstImport[0].locationState).isEqualTo("OR")
+        assertThat(firstImport[0].locationCountry).isNull()
+        assertThat(firstImport[1].locationCity).isNull()
+        firstImport.forEach { transaction ->
+            assertCsvId(transaction.id)
+            assertThat(transaction.id).isNotEqualTo("simplefin:origin:account:one")
+        }
+    }
+
+    @Test
+    fun addingLocationColumnsLeftEveryOlderImportIdentityByteForByteIdentical() {
+        val v1Csv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents,recurring
+            ignored,1766145600000,AUTOPAY PYMT,Other,legacy v1,500,Weekly
+            """.trimIndent()
+        val v2Csv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind
+            ignored,1766145600000,AUTOPAY PYMT,Other,legacy v2,500,Weekly,TRANSFER
+            """.trimIndent()
+        val legacyCsv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents
+            ignored,1766145600000,CREDIT CARD PAYMENT,Other,,-500
+            """.trimIndent()
+        val monarchCsv =
+            """
+            "Account name","Category","Description","Person","Date","Amount","Recurring"
+            "Checking","Other","PAYMENT - THANK YOU","","June 1, 2026",5.00,"No"
+            """.trimIndent()
+
+        val v1 = CsvCodec.decode(v1Csv).single()
+        val v2 = CsvCodec.decode(v2Csv).single()
+        val legacy = CsvCodec.decode(legacyCsv).single()
+        val monarch = CsvCodec.decode(monarchCsv).single()
+
+        assertThat(v1.id).isEqualTo("csv:8b1a1c85a305d2e07bef77943b38d0f35ed03023a6f911cc05445558d866afd4")
+        assertThat(v2.id).isEqualTo("csv:9bb0ee5924e20651889e6dd67e9ded57b42b0d990dff41d80f58fe7b856e2d0b")
+        assertThat(legacy.id).isEqualTo("csv:59a791499168bb7684f7a5e80f2b28442e613f2b551207b5e8ba0e7006674d97")
+        assertThat(monarch.id).isEqualTo("csv:6e2ab23479f34195cd8c5b3c5750f7083dcb111fc3caaf1b8ccca74a114714da")
+
+        listOf(v1, v2, legacy, monarch).forEach { transaction ->
+            assertThat(transaction.locationCity).isNull()
+            assertThat(transaction.locationState).isNull()
+            assertThat(transaction.locationCountry).isNull()
+        }
+        assertThat(v2.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(v2.recurringInterval).isEqualTo(RecurrenceInterval.Weekly)
+    }
+
+    @Test
+    fun v3IdentityIsVersionedSoBlankLocationCellsNeverCollideWithV2Rows() {
+        val v3Csv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind,locationCity,locationState,locationCountry
+            ignored,1766145600000,AUTOPAY PYMT,Other,legacy v3,500,Weekly,TRANSFER,Portland,OR,
+            """.trimIndent()
+        val v3BlankCsv =
+            """
+            id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind,locationCity,locationState,locationCountry
+            ignored,1766145600000,AUTOPAY PYMT,Other,legacy v2,500,Weekly,TRANSFER,,,
+            """.trimIndent()
+
+        val located = CsvCodec.decode(v3Csv).single()
+        val blank = CsvCodec.decode(v3BlankCsv).single()
+
+        assertThat(located.locationCity).isEqualTo("Portland")
+        assertThat(located.locationState).isEqualTo("OR")
+        assertThat(located.locationCountry).isNull()
+        assertThat(located.id).isEqualTo("csv:f55e00dd6622f4ca05e12b3556ba102f590c1fc300bbfbea2fe597cea6fe8440")
+
+        assertThat(blank.locationCity).isNull()
+        assertThat(blank.id).isEqualTo("csv:adffde07895f0186321969b33077b7f6274e8b7889e02912d7f8e11e455674c3")
+        // Same visible fields as the pinned v2 row above, different identity version.
+        assertThat(blank.id).isNotEqualTo("csv:9bb0ee5924e20651889e6dd67e9ded57b42b0d990dff41d80f58fe7b856e2d0b")
+    }
+
+    @Test
+    fun v3RowsWithTheWrongColumnCountAreRejected() {
+        val header =
+            "id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind," +
+                "locationCity,locationState,locationCountry"
+
+        assertThat(
+            runCatching { CsvCodec.decode("$header\nignored,1,Coffee,Food,note,-1,,NORMAL,Portland,OR") }.isFailure,
+        ).isTrue()
+        assertThat(
+            runCatching { CsvCodec.decode("$header\nignored,1,Coffee,Food,note,-1,,NORMAL,Portland,OR,US,extra") }.isFailure,
+        ).isTrue()
+        assertThat(
+            runCatching { CsvCodec.decode("$header\nignored,1,Coffee,Food,note,-1,,NOPE,Portland,OR,US") }.isFailure,
+        ).isTrue()
+    }
+
+    @Test
+    fun exportNeutralizesFormulaPrefixesInsideLocationCells() {
+        val csv =
+            CsvCodec.encode(
+                listOf(
+                    sample.copy(
+                        locationCity = "=HYPERLINK(\"http://evil\")",
+                        locationState = "+OR",
+                        locationCountry = "-US",
+                    ),
+                    sample.copy(id = "tx-2", locationCity = "@Portland", locationState = "\uFEFF =WA", locationCountry = "US"),
+                ),
+            )
+
+        assertThat(csv).contains("'=HYPERLINK")
+        assertThat(csv).contains("'+OR")
+        assertThat(csv).contains("'-US")
+        assertThat(csv).contains("'@Portland")
+        assertThat(csv).contains("'\uFEFF =WA")
+        assertThat(csv).doesNotContain(",=HYPERLINK")
+        assertThat(csv).doesNotContain(",+OR")
+        assertThat(csv).doesNotContain(",@Portland")
+
+        val decoded = CsvCodec.decode(csv)
+        assertThat(decoded[0].locationCity).isEqualTo("'=HYPERLINK(\"http://evil\")")
+        assertThat(decoded[0].locationState).isEqualTo("'+OR")
+        assertThat(decoded[1].locationCity).isEqualTo("'@Portland")
+    }
+
+    /** Drops the leading id cell; every fixture id in this file is comma-free. */
+    private fun String.withoutIdColumn(): String = lineSequence().joinToString("\n") { it.substringAfter(',') }
 
     private fun assertCsvId(id: String) {
         assertThat(id).matches("csv:[0-9a-f]{64}")

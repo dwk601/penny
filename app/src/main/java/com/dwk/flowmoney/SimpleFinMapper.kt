@@ -34,6 +34,7 @@ object SimpleFinMapper {
                         }
                     val accountKey = SimpleFinIdentity.accountId(origin, account.providerConnectionId, account.id)
                     val providerMerchant = tx.payee?.takeIf { it.isNotBlank() } ?: tx.description
+                    val location = TransactionLocation.parse(tx.description)
                     TransactionEntity(
                         id =
                             SimpleFinIdentity.transactionId(
@@ -52,6 +53,9 @@ object SimpleFinMapper {
                         accountName = account.name,
                         providerDescription = tx.description,
                         flowKind = TransactionClassifier.classify(tx.description, cents),
+                        locationCity = location?.city,
+                        locationState = location?.state,
+                        locationCountry = location?.country,
                     )
                 }
             }
