@@ -65,6 +65,7 @@ fun TransactionMap(
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val mapViewRef = remember { arrayOfNulls<MapView>(1) }
+    val fittedCameraKey = remember { arrayOfNulls<Set<String>>(1) }
     var mappedPlaces by remember { mutableStateOf<List<MappedTransactionPlace>>(emptyList()) }
     var unmappable by remember { mutableStateOf<List<Transaction>>(emptyList()) }
     var selectedPlace by remember { mutableStateOf<MappedTransactionPlace?>(null) }
@@ -144,6 +145,7 @@ fun TransactionMap(
                 bindPlaceMarkers(
                     mapView = mapView,
                     places = mappedPlaces,
+                    fittedCameraKey = fittedCameraKey,
                     onPlaceTap = { selectedPlace = it },
                 )
             },
@@ -153,6 +155,7 @@ fun TransactionMap(
                 if (mapViewRef[0] === mapView) {
                     mapViewRef[0] = null
                 }
+                fittedCameraKey[0] = null
             },
             modifier = Modifier.fillMaxSize(),
         )
@@ -292,6 +295,7 @@ private fun configureOsmdroid(context: android.content.Context) {
 private fun bindPlaceMarkers(
     mapView: MapView,
     places: List<MappedTransactionPlace>,
+    fittedCameraKey: Array<Set<String>?>,
     onPlaceTap: (MappedTransactionPlace) -> Unit,
 ) {
     if (mapView.context == null) return
@@ -311,7 +315,9 @@ private fun bindPlaceMarkers(
             }
         mapView.overlays.add(marker)
     }
-    if (places.isNotEmpty()) {
+    val cameraKey =
+        places.map { place -> "${place.placeKey}|${place.latitude}|${place.longitude}" }.toSet()
+    if (places.isNotEmpty() && cameraKey != fittedCameraKey[0]) {
         val points = places.map { GeoPoint(it.latitude, it.longitude) }
         if (points.size == 1) {
             mapView.controller.setZoom(10.0)
@@ -319,6 +325,9 @@ private fun bindPlaceMarkers(
         } else {
             mapView.zoomToBoundingBox(BoundingBox.fromGeoPoints(points), false, 80)
         }
+        fittedCameraKey[0] = cameraKey
+    } else if (places.isEmpty()) {
+        fittedCameraKey[0] = emptySet()
     }
     mapView.invalidate()
 }

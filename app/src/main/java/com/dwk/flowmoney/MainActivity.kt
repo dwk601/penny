@@ -2871,7 +2871,10 @@ private fun TransactionsPage(
     val countryOptions = remember(sortedTransactions) { TransactionFilters.countryOptions(sortedTransactions) }
     val geocoder =
         remember(context) {
-            PlaceGeocoder(FlowMoneyDatabase.get(context).placeGeocodeDao())
+            PlaceGeocoder(
+                dao = FlowMoneyDatabase.get(context).placeGeocodeDao(),
+                context = context,
+            )
         }
     val filter =
         remember(
@@ -2976,12 +2979,18 @@ private fun TransactionsPage(
                 if (option == null) {
                     selectedCity = null
                 } else {
-                    val duplicate =
-                        cityOptions.count { it.city == option.city } > 1
+                    val duplicate = cityOptions.count { it.city == option.city } > 1
                     selectedCity = option.city
                     if (duplicate) {
                         selectedState = option.state
                         selectedCountry = option.country
+                    } else {
+                        if (selectedState != null && selectedState != option.state) {
+                            selectedState = null
+                        }
+                        if (selectedCountry != null && selectedCountry != option.country) {
+                            selectedCountry = null
+                        }
                     }
                 }
             },
