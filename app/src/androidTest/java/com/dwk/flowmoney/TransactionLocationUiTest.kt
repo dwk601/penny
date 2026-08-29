@@ -110,9 +110,28 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithTag("transactions_unmappable").assertDoesNotExist()
     }
 
+    @Test fun theMapCanBeLeftAndReenteredRepeatedly() {
+        setTransactionsTab()
+
+        repeat(3) {
+            composeRule.onNodeWithTag("transaction_view_map").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("transactions_map").assertExists()
+            // Leaving the map releases the osmdroid view; re-entering must build a usable one.
+            composeRule.onNodeWithTag("transactions_unmappable").assertExists()
+
+            composeRule.onNodeWithTag("transaction_view_list").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("transactions_list").assertExists()
+            composeRule.onNodeWithTag("transactions_map").assertDoesNotExist()
+        }
+
+        assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")
+    }
+
     /**
-     * Minimal reproduction of the crash the two page-level map tests hit. The map is only ever
-     * reachable by toggling into it, which means it is always composed after the first frame.
+     * Regression guard for the detach crash: the map is only ever reachable by toggling into it,
+     * which means it is always composed after the first frame.
      */
     @Test fun theMapSurvivesBeingComposedAfterTheFirstFrame() {
         val geocoder = PlaceGeocoder(FlowMoneyDatabase.get(context).placeGeocodeDao())
