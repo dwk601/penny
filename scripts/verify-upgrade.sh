@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Rehearse Penny's v1.0.13 -> v1.0.14 replacement upgrade on an Android emulator.
+# Rehearse Penny's replacement upgrade, including the Room 10 -> 11
+# transaction-location schema/backfill, on an Android emulator.
 # This script intentionally has no uninstall or package-data-clear operation.
 
 set -Eeuo pipefail
@@ -12,7 +13,20 @@ readonly OLD_VERSION_NAME_DEFAULT="1.0.13"
 readonly OLD_VERSION_CODE_DEFAULT="113"
 readonly NEW_VERSION_NAME_DEFAULT="1.0.14"
 readonly NEW_VERSION_CODE_DEFAULT="114"
-readonly DB_USER_VERSION_DEFAULT="6"
+readonly PRE_DB_USER_VERSION_DEFAULT="10"
+readonly POST_DB_USER_VERSION_DEFAULT="11"
+readonly PARSEABLE_TX_ID="upgrade-simplefin-parseable"
+readonly UNPARSEABLE_TX_ID="upgrade-simplefin-unparseable"
+readonly LOCAL_EXPENSE_TX_ID="upgrade-local-expense"
+readonly LOCAL_INCOME_TX_ID="upgrade-local-income"
+readonly PARSEABLE_PROVIDER_DESCRIPTION="REHEARSAL CAFE #1001 AUSTIN TX"
+readonly UNPARSEABLE_PROVIDER_DESCRIPTION="REHEARSAL CAFE STORE SEATTLE WA"
+readonly EXPECTED_BACKFILL_CITY="AUSTIN"
+readonly EXPECTED_BACKFILL_STATE="TX"
+readonly MERCHANT_RULE_KEY="rehearsal cafe"
+readonly BACKFILL_COMPLETION_PREFS_RELATIVE="shared_prefs/transaction_location_backfill.xml"
+readonly BACKFILL_COMPLETION_PREF_NAME="v11_location_backfill_complete"
+readonly SEED_MARKER_EXPECTED="4|1|1|1|1|1|1|1"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -25,7 +39,8 @@ OLD_VERSION_NAME="$OLD_VERSION_NAME_DEFAULT"
 OLD_VERSION_CODE="$OLD_VERSION_CODE_DEFAULT"
 NEW_VERSION_NAME="$NEW_VERSION_NAME_DEFAULT"
 NEW_VERSION_CODE="$NEW_VERSION_CODE_DEFAULT"
-DB_USER_VERSION="$DB_USER_VERSION_DEFAULT"
+PRE_DB_USER_VERSION="$PRE_DB_USER_VERSION_DEFAULT"
+POST_DB_USER_VERSION="$POST_DB_USER_VERSION_DEFAULT"
 WITH_SIMPLEFIN_CREDENTIAL=0
 DRY_RUN=0
 SELF_TEST=0
@@ -34,6 +49,8 @@ DEVICE_MUTATED=0
 UI_DUMP_TIMEOUT_SECONDS=15
 UI_DUMP_MAX_ATTEMPTS=3
 UI_DUMP_RETRY_DELAY_SECONDS=1
+BACKFILL_POLL_TIMEOUT_SECONDS=60
+BACKFILL_POLL_INTERVAL_SECONDS=1
 
 ADB_BIN=""
 APKANALYZER_BIN=""
@@ -68,11 +85,14 @@ Required safety properties:
     There is no downgrade, uninstall, clear-data, or replacement fallback.
   * The APKs must be package com.dwk.flowmoney, versions 1.0.13/113 and
     1.0.14/114, and have the same single signing-certificate SHA-256 digest.
+  * Archived and candidate snapshots use distinct Room/SQLite user_version
+    values (defaults 10 and 11). A single --db-user-version is rejected.
 
 Options:
   --old-version-code N       Expected archived versionCode (default: 113)
   --new-version-code N       Expected candidate versionCode (default: 114)
-  --db-user-version N        Expected Room/SQLite user_version (default: 6)
+  --pre-db-user-version N    Expected archived Room/SQLite user_version (default: 10)
+  --post-db-user-version N   Expected candidate Room/SQLite user_version (default: 11)
   --with-simplefin-credential
                              Pause after the archived app starts so the operator
                              can connect SimpleFIN inside the app. No token or
@@ -98,8 +118,11 @@ Interactive steps:
 Artifacts:
   The output directory is mode 0700 and contains mode-0600 run-as snapshots,
   including the DB/WAL/SHM when present, both preference files, files/,
-  no_backup/, and simplefin_access_url.bin when present. It can contain private
-  financial data and encrypted credential material; store and delete it safely.
+  no_backup/, and simplefin_access_url.bin when present. Canonical comparison
+  preserves credentials/widget/files/settings and pre-existing logical rows,
+  and permits only the expected 10->11 location schema/backfill/completion
+  deltas. It can contain private financial data and encrypted credential
+  material; store and delete it safely.
 USAGE
 }
 
@@ -129,6 +152,13 @@ require_value() {
 	local option="$1"
 	local value="${2:-}"
 	[[ -n "$value" ]] || die "$option requires a value"
+}
+
+validate_db_user_versions() {
+	[[ "$PRE_DB_USER_VERSION" =~ ^[0-9]+$ ]] || die "--pre-db-user-version must be an integer"
+	[[ "$POST_DB_USER_VERSION" =~ ^[0-9]+$ ]] || die "--post-db-user-version must be an integer"
+	((POST_DB_USER_VERSION > PRE_DB_USER_VERSION)) ||
+		die "candidate DB user_version must be greater than archived DB user_version"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -163,10 +193,18 @@ while [[ $# -gt 0 ]]; do
 		NEW_VERSION_CODE="$2"
 		shift 2
 		;;
-	--db-user-version)
+	--pre-db-user-version)
 		require_value "$1" "${2:-}"
-		DB_USER_VERSION="$2"
+		PRE_DB_USER_VERSION="$2"
 		shift 2
+		;;
+	--post-db-user-version)
+		require_value "$1" "${2:-}"
+		POST_DB_USER_VERSION="$2"
+		shift 2
+		;;
+	--db-user-version)
+		die "--db-user-version is not accepted because a single user_version cannot describe the 10->11 migration; use --pre-db-user-version and --post-db-user-version"
 		;;
 	--with-simplefin-credential)
 		WITH_SIMPLEFIN_CREDENTIAL=1
@@ -192,8 +230,8 @@ done
 
 [[ "$OLD_VERSION_CODE" =~ ^[0-9]+$ ]] || die "--old-version-code must be an integer"
 [[ "$NEW_VERSION_CODE" =~ ^[0-9]+$ ]] || die "--new-version-code must be an integer"
-[[ "$DB_USER_VERSION" =~ ^[0-9]+$ ]] || die "--db-user-version must be an integer"
 ((NEW_VERSION_CODE > OLD_VERSION_CODE)) || die "candidate versionCode must be greater than archived versionCode"
+validate_db_user_versions
 
 sdk_roots() {
 	local local_sdk=""
@@ -507,12 +545,15 @@ Resolved tools:
 
 Read/write plan (actual mode only):
   1. Require a fresh/restored QEMU AVD and install archived $OLD_VERSION_NAME/$OLD_VERSION_CODE.
-  2. Snapshot, seed deterministic DB rows and both preference contracts, and verify quick_check.
+  2. Snapshot, seed deterministic v$PRE_DB_USER_VERSION rows (local, parseable/unparseable
+     SimpleFIN, profile/account/tombstone/merchant rule) and both preference contracts, and verify quick_check.
   3. Require one launcher-bound Penny widget and capture the baseline canonical fingerprint,
      using a sorted file type/content manifest rather than tar metadata for files/.
   4. Run exactly: adb -s SERIAL install -r NEW_APK
-  5. Fail closed on package, certificate, version, UID, widget, quick_check, or fingerprint mismatch.
-  6. Prove a selected non-Overview tab before HOME, then require the widget body to
+  5. Poll for the asynchronous location backfill completion preference, then fail closed on
+     package, certificate, version, UID, widget, quick_check, preserved-data, or unexpected-delta mismatch.
+  6. Permit only the expected $PRE_DB_USER_VERSION->$POST_DB_USER_VERSION location schema/backfill/completion deltas.
+  7. Prove a selected non-Overview tab before HOME, then require the widget body to
      return to selected Overview; verify the Add editor and retain secure snapshots.
 EOF
 }
@@ -739,6 +780,8 @@ capture_snapshot() {
 	capture_remote_file "shared_prefs/flow_money.xml" "$raw/shared_prefs/flow_money.xml" "$prefs_required" "$manifest"
 	capture_remote_file "shared_prefs/simplefin_migration_cleanup.xml" \
 		"$raw/shared_prefs/simplefin_migration_cleanup.xml" "$prefs_required" "$manifest"
+	capture_remote_file "$BACKFILL_COMPLETION_PREFS_RELATIVE" \
+		"$raw/$BACKFILL_COMPLETION_PREFS_RELATIVE" optional "$manifest"
 	capture_remote_dir "files" "$raw/files.tar" optional "$manifest"
 	capture_remote_dir "no_backup" "$raw/no_backup.tar" optional "$manifest"
 	capture_remote_file "no_backup/simplefin_access_url.bin" \
@@ -854,8 +897,9 @@ seed_database_and_preferences() {
 
 	sqlite_quick_check "$seed_dir/db-source" "$seed_dir/db-working" >"$seed_dir/initial-quick-check.txt"
 	seed_db="$seed_dir/db-working/flow_money.db"
-	[[ "$("$SQLITE3_BIN" -batch "$seed_db" 'PRAGMA user_version;' | tr -d '\r')" == "$DB_USER_VERSION" ]] ||
-		die "Archived database user_version is not $DB_USER_VERSION"
+	[[ "$("$SQLITE3_BIN" -batch "$seed_db" 'PRAGMA user_version;' | tr -d '\r')" == "$PRE_DB_USER_VERSION" ]] ||
+		die "Archived database user_version is not $PRE_DB_USER_VERSION"
+	assert_pre_migration_schema "$seed_db" "archived seed"
 
 	now_ms=$(($(date +%s) * 1000))
 	expense_ms=$((now_ms - 86400000))
@@ -865,11 +909,20 @@ seed_database_and_preferences() {
 PRAGMA foreign_keys=ON;
 BEGIN IMMEDIATE;
 INSERT INTO transactions
-    (id, occurredAtEpochMillis, merchant, category, note, cents, recurringInterval, source, accountKey, accountName)
+    (id, occurredAtEpochMillis, merchant, category, note, cents, recurringInterval, source,
+     accountKey, accountName, reviewedAtEpochMillis, providerDescription, merchantOverride,
+     flowKind, flowKindOverride)
 VALUES
-    ('upgrade-local-expense', $expense_ms, 'Rehearsal Market', 'Groceries', 'v1.0.13 replacement marker', -1234, 'Monthly', 'local', NULL, NULL),
-    ('upgrade-local-income', $income_ms, 'Rehearsal Payroll', 'Salary', 'v1.0.13 replacement marker', 250000, NULL, 'local', NULL, NULL),
-    ('upgrade-simplefin-transaction', $expense_ms, 'Rehearsal SimpleFIN Merchant', 'Shopping', 'v1.0.13 replacement marker', -5678, NULL, 'simplefin', 'upgrade-account-001', 'Upgrade Checking');
+    ('$LOCAL_EXPENSE_TX_ID', $expense_ms, 'Rehearsal Market', 'Groceries', 'v10 replacement marker',
+     -1234, 'Monthly', 'local', NULL, NULL, NULL, NULL, NULL, 'NORMAL', NULL),
+    ('$LOCAL_INCOME_TX_ID', $income_ms, 'Rehearsal Payroll', 'Salary', 'v10 replacement marker',
+     250000, NULL, 'local', NULL, NULL, NULL, NULL, NULL, 'NORMAL', NULL),
+    ('$PARSEABLE_TX_ID', $expense_ms, 'Rehearsal Cafe', 'Coffee', 'v10 replacement marker',
+     -5678, NULL, 'simplefin', 'upgrade-account-001', 'Upgrade Checking', NULL,
+     '$PARSEABLE_PROVIDER_DESCRIPTION', NULL, 'NORMAL', NULL),
+    ('$UNPARSEABLE_TX_ID', $expense_ms, 'Rehearsal Cafe Store', 'Coffee', 'v10 replacement marker',
+     -4321, NULL, 'simplefin', 'upgrade-account-001', 'Upgrade Checking', NULL,
+     '$UNPARSEABLE_PROVIDER_DESCRIPTION', NULL, 'NORMAL', NULL);
 INSERT OR IGNORE INTO simplefin_profile
     (id, connectionId, connectedAtEpochMillis, lastSyncAttemptAtEpochMillis,
      lastSuccessfulSyncAtEpochMillis, lastError, isPaused, automaticSyncsPerDay)
@@ -887,15 +940,16 @@ VALUES
      '1234.56', '1200.00', $((now_ms / 1000)), $now_ms);
 INSERT INTO simplefin_ignored_transactions (transactionId, ignoredAtEpochMillis)
 VALUES ('upgrade-ignored-transaction', $now_ms);
+INSERT INTO merchant_rules (normalizedProviderMerchant, category, merchantOverride)
+VALUES ('$MERCHANT_RULE_KEY', 'Coffee', 'Rehearsal Cafe');
 COMMIT;
 PRAGMA wal_checkpoint(FULL);
 SQL
 
 	local marker_counts
-	marker_counts="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$seed_db" \
-		"SELECT (SELECT count(*) FROM transactions WHERE id LIKE 'upgrade-%'), (SELECT count(*) FROM transactions WHERE id='upgrade-local-expense' AND recurringInterval='Monthly'), (SELECT count(*) FROM simplefin_profile WHERE id='default'), (SELECT count(*) FROM simplefin_accounts WHERE accountId='upgrade-account-001'), (SELECT count(*) FROM simplefin_ignored_transactions WHERE transactionId='upgrade-ignored-transaction');" |
-		tr -d '\r')"
-	[[ "$marker_counts" == "3|1|1|1|1" ]] || die "Seed marker verification failed (expected 3|1|1|1|1, got $marker_counts)"
+	marker_counts="$(query_seed_marker_counts "$seed_db")"
+	[[ "$marker_counts" == "$SEED_MARKER_EXPECTED" ]] ||
+		die "Seed marker verification failed (expected $SEED_MARKER_EXPECTED, got $marker_counts)"
 	[[ "$("$SQLITE3_BIN" -batch "$seed_db" 'PRAGMA quick_check;' | tr -d '\r')" == "ok" ]] ||
 		die "Seed database quick_check failed"
 
@@ -910,7 +964,7 @@ SQL
 	install_private_file "$seed_dir/preferences/flow_money.xml" "shared_prefs/flow_money.xml"
 	install_private_file "$seed_dir/preferences/simplefin_migration_cleanup.xml" \
 		"shared_prefs/simplefin_migration_cleanup.xml"
-	log "Seeded representative transactions, preferences, and SimpleFIN profile/account/ignored rows"
+	log "Seeded local rows, parseable/unparseable SimpleFIN descriptors, merchant rule, and SimpleFIN profile/account/ignored rows"
 }
 
 capture_widget_record() {
@@ -968,6 +1022,280 @@ verify_pref_contracts() {
 	grep -Eq '<boolean[[:space:]]+name="v5_disconnection_complete"[[:space:]]+value="true"[[:space:]]*/>' \
 		"$raw/shared_prefs/simplefin_migration_cleanup.xml" ||
 		die "simplefin_migration_cleanup.xml completion key is not true"
+}
+
+completion_preference_is_true() {
+	local file="$1"
+	[[ -f "$file" ]] || return 1
+	grep -Eq '<boolean[[:space:]]+name="'"$BACKFILL_COMPLETION_PREF_NAME"'"[[:space:]]+value="true"[[:space:]]*/>' "$file"
+}
+
+query_seed_marker_counts() {
+	local db="$1"
+	"$SQLITE3_BIN" -batch -noheader -separator '|' "$db" \
+		"SELECT (SELECT count(*) FROM transactions WHERE id LIKE 'upgrade-%'), (SELECT count(*) FROM transactions WHERE id='$LOCAL_EXPENSE_TX_ID' AND recurringInterval='Monthly'), (SELECT count(*) FROM transactions WHERE id='$PARSEABLE_TX_ID' AND source='simplefin' AND providerDescription='$PARSEABLE_PROVIDER_DESCRIPTION'), (SELECT count(*) FROM transactions WHERE id='$UNPARSEABLE_TX_ID' AND source='simplefin' AND providerDescription='$UNPARSEABLE_PROVIDER_DESCRIPTION'), (SELECT count(*) FROM simplefin_profile WHERE id='default'), (SELECT count(*) FROM simplefin_accounts WHERE accountId='upgrade-account-001'), (SELECT count(*) FROM simplefin_ignored_transactions WHERE transactionId='upgrade-ignored-transaction'), (SELECT count(*) FROM merchant_rules WHERE normalizedProviderMerchant='$MERCHANT_RULE_KEY');" |
+		tr -d '\r'
+}
+
+sqlite_user_version() {
+	"$SQLITE3_BIN" -batch -noheader "$1" 'PRAGMA user_version;' | tr -d '\r'
+}
+
+schema_has_table() {
+	local db="$1"
+	local table="$2"
+	local count
+	count="$("$SQLITE3_BIN" -batch -noheader "$db" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='$table';" | tr -d '\r')"
+	[[ "$count" == "1" ]]
+}
+
+schema_has_column() {
+	local db="$1"
+	local table="$2"
+	local column="$3"
+	local count
+	count="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$db" "PRAGMA table_info($table);" | awk -F'|' -v column="$column" 'BEGIN {count=0} $2 == column {count++} END {print count+0}')"
+	[[ "$count" == "1" ]]
+}
+
+dump_schema_contract() {
+	local db="$1"
+	local destination="$2"
+	local part="${destination}.part"
+	local table count
+	{
+		printf 'user_version:%s\n' "$(sqlite_user_version "$db")"
+		while IFS= read -r table; do
+			[[ -n "$table" ]] || continue
+			[[ "$table" =~ ^[A-Za-z0-9_]+$ ]] || die "Refusing to dump unsafe table name: $table"
+			printf 'table:%s\n' "$table"
+			"$SQLITE3_BIN" -batch -noheader -separator '|' "$db" "PRAGMA table_info($table);" |
+				awk -F'|' '{printf "col:%s|%s|%s|%s\n", $2, toupper($3), $4, $6}'
+			"$SQLITE3_BIN" -batch -noheader -separator '|' "$db" "PRAGMA index_list($table);" |
+				awk -F'|' 'NF {printf "index:%s|%s|%s\n", $2, $3, $4}'
+		done < <("$SQLITE3_BIN" -batch -noheader "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'room_master_table' ORDER BY name;")
+		count="$("$SQLITE3_BIN" -batch -noheader "$db" "SELECT count(*) FROM sqlite_master WHERE type IN ('view','trigger') AND name NOT LIKE 'sqlite_%';" | tr -d '\r')"
+		printf 'extra_objects:%s\n' "$count"
+	} >"$part"
+	mv "$part" "$destination"
+	chmod 600 "$destination"
+}
+
+schema_without_expected_post_delta() {
+	awk '
+		BEGIN { skip=0 }
+		/^user_version:/ { next }
+		/^table:place_geocodes$/ { skip=1; next }
+		/^table:/ { skip=0 }
+		skip { next }
+		/^col:locationCity\|/ { next }
+		/^col:locationState\|/ { next }
+		/^col:locationCountry\|/ { next }
+		{ print }
+	' "$1"
+}
+
+assert_pre_migration_schema() {
+	local db="$1"
+	local label="$2"
+	schema_has_column "$db" transactions locationCity &&
+		die "$label already has transactions.locationCity"
+	schema_has_column "$db" transactions locationState &&
+		die "$label already has transactions.locationState"
+	schema_has_column "$db" transactions locationCountry &&
+		die "$label already has transactions.locationCountry"
+	schema_has_table "$db" place_geocodes &&
+		die "$label already has place_geocodes"
+}
+
+assert_post_migration_schema() {
+	local db="$1"
+	local label="$2"
+	local spec expected count
+	schema_has_column "$db" transactions locationCity ||
+		die "$label is missing transactions.locationCity"
+	schema_has_column "$db" transactions locationState ||
+		die "$label is missing transactions.locationState"
+	schema_has_column "$db" transactions locationCountry ||
+		die "$label is missing transactions.locationCountry"
+	schema_has_table "$db" place_geocodes ||
+		die "$label is missing place_geocodes"
+	spec="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$db" 'PRAGMA table_info(transactions);' |
+		awk -F'|' '$2=="locationCity" || $2=="locationState" || $2=="locationCountry" {
+			printf "%s|%s|%s|%s\n", $2, toupper($3), $4, $6
+		}')"
+	expected=$'locationCity|TEXT|0|0\nlocationState|TEXT|0|0\nlocationCountry|TEXT|0|0'
+	[[ "$spec" == "$expected" ]] ||
+		die "$label location columns are not nullable TEXT without a primary-key role: $spec"
+	spec="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$db" 'PRAGMA table_info(place_geocodes);' |
+		awk -F'|' '{printf "%s|%s|%s|%s\n", $2, toupper($3), $4, $6}')"
+	expected=$'placeKey|TEXT|1|1\ncity|TEXT|0|0\nstate|TEXT|0|0\ncountry|TEXT|0|0\nlatitude|REAL|0|0\nlongitude|REAL|0|0\nresolvedAtEpochMillis|INTEGER|1|0'
+	[[ "$spec" == "$expected" ]] ||
+		die "$label place_geocodes shape is not entity-compatible: $spec"
+	count="$("$SQLITE3_BIN" -batch -noheader "$db" 'SELECT count(*) FROM place_geocodes;' | tr -d '\r')"
+	[[ "$count" == "0" ]] ||
+		die "$label place_geocodes has $count unexpected row(s); the table must be empty after schema/backfill"
+}
+
+dump_preexisting_logical() {
+	local db="$1"
+	local destination="$2"
+	"$SQLITE3_BIN" -batch -bail "$db" >"$destination" <<'SQL'
+.mode quote
+SELECT 'transactions', id, occurredAtEpochMillis, merchant, category, note, cents,
+       recurringInterval, source, accountKey, accountName, reviewedAtEpochMillis,
+       providerDescription, merchantOverride, flowKind, flowKindOverride
+FROM transactions ORDER BY id;
+SELECT 'simplefin_profile', id, connectionId, connectedAtEpochMillis,
+       lastSyncAttemptAtEpochMillis, lastSuccessfulSyncAtEpochMillis, lastError,
+       isPaused, automaticSyncsPerDay
+FROM simplefin_profile ORDER BY id;
+SELECT 'simplefin_accounts', accountId, name, currency, institutionName,
+       balanceAmount, availableBalanceAmount, balanceDateEpochSeconds, lastSeenAtEpochMillis
+FROM simplefin_accounts ORDER BY accountId;
+SELECT 'simplefin_ignored_transactions', transactionId, ignoredAtEpochMillis, occurredAtEpochMillis
+FROM simplefin_ignored_transactions ORDER BY transactionId;
+SELECT 'simplefin_identity_state', id, reconciliationComplete
+FROM simplefin_identity_state ORDER BY id;
+SELECT 'merchant_rules', normalizedProviderMerchant, category, merchantOverride
+FROM merchant_rules ORDER BY normalizedProviderMerchant;
+SQL
+	chmod 600 "$destination"
+}
+
+dump_location_values() {
+	local db="$1"
+	local destination="$2"
+	"$SQLITE3_BIN" -batch -bail "$db" >"$destination" <<'SQL'
+.mode quote
+SELECT id, locationCity, locationState, locationCountry
+FROM transactions ORDER BY id;
+SQL
+	chmod 600 "$destination"
+}
+
+assert_expected_backfill() {
+	local db="$1"
+	local label="$2"
+	local parseable other_located
+	parseable="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$db" \
+		"SELECT IFNULL(locationCity, '<NULL>'), IFNULL(locationState, '<NULL>'), IFNULL(locationCountry, '<NULL>') FROM transactions WHERE id='$PARSEABLE_TX_ID';" |
+		tr -d '\r')"
+	[[ "$parseable" == "$EXPECTED_BACKFILL_CITY|$EXPECTED_BACKFILL_STATE|<NULL>" ]] ||
+		die "$label parseable SimpleFIN backfill was $parseable, expected $EXPECTED_BACKFILL_CITY|$EXPECTED_BACKFILL_STATE|<NULL>"
+	other_located="$("$SQLITE3_BIN" -batch -noheader "$db" \
+		"SELECT count(*) FROM transactions WHERE id != '$PARSEABLE_TX_ID' AND (locationCity IS NOT NULL OR locationState IS NOT NULL OR locationCountry IS NOT NULL);" |
+		tr -d '\r')"
+	[[ "$other_located" == "0" ]] ||
+		die "$label has $other_located unexpected located row(s); unparseable SimpleFIN and local rows must remain null"
+}
+
+assert_completion_preference() {
+	local raw="$1"
+	local expected="$2"
+	local file="$raw/$BACKFILL_COMPLETION_PREFS_RELATIVE"
+	if [[ "$expected" == "present" ]]; then
+		completion_preference_is_true "$file" ||
+			die "Location backfill completion preference is missing or not true"
+	elif completion_preference_is_true "$file"; then
+		die "Location backfill completion preference is present before the candidate upgrade"
+	fi
+}
+
+fetch_remote_backfill_preference() {
+	local destination="$1"
+	rm -f "$destination"
+	if remote_exists "$BACKFILL_COMPLETION_PREFS_RELATIVE"; then
+		adb_cmd exec-out run-as "$PACKAGE" cat "$BACKFILL_COMPLETION_PREFS_RELATIVE" >"$destination.part"
+		mv "$destination.part" "$destination"
+		chmod 600 "$destination"
+		return 0
+	fi
+	return 1
+}
+
+wait_for_location_backfill_completion() {
+	local poll_dir="${1:-$OUTPUT_DIR/20-candidate/backfill-poll}"
+	local elapsed=0
+	local attempt=1
+	local probe
+	mkdir -p "$poll_dir"
+	chmod 700 "$poll_dir"
+	while ((elapsed < BACKFILL_POLL_TIMEOUT_SECONDS)); do
+		probe="$poll_dir/attempt-${attempt}.xml"
+		if fetch_remote_backfill_preference "$probe" && completion_preference_is_true "$probe"; then
+			log "Location backfill completion preference observed after ${elapsed}s"
+			return 0
+		fi
+		if [[ ! -f "$probe" ]]; then
+			printf 'MISSING\n' >"$probe"
+			chmod 600 "$probe"
+		fi
+		sleep "$BACKFILL_POLL_INTERVAL_SECONDS"
+		elapsed=$((elapsed + BACKFILL_POLL_INTERVAL_SECONDS))
+		attempt=$((attempt + 1))
+	done
+	die "Timed out after ${BACKFILL_POLL_TIMEOUT_SECONDS}s waiting for location backfill completion preference"
+}
+
+assert_expected_schema_delta() {
+	local pre_schema="$1"
+	local post_schema="$2"
+	local pre_stripped post_stripped
+	grep -Fq 'table:place_geocodes' "$pre_schema" &&
+		die "Archived schema already contains place_geocodes"
+	grep -Eq '^col:location(City|State|Country)\|' "$pre_schema" &&
+		die "Archived schema already contains transaction location columns"
+	grep -Fq 'table:place_geocodes' "$post_schema" ||
+		die "Candidate schema is missing place_geocodes"
+	grep -Eq '^col:locationCity\|' "$post_schema" ||
+		die "Candidate schema is missing transactions.locationCity"
+	grep -Eq '^col:locationState\|' "$post_schema" ||
+		die "Candidate schema is missing transactions.locationState"
+	grep -Eq '^col:locationCountry\|' "$post_schema" ||
+		die "Candidate schema is missing transactions.locationCountry"
+	pre_stripped="$(schema_without_expected_post_delta "$pre_schema")"
+	post_stripped="$(schema_without_expected_post_delta "$post_schema")"
+	if [[ "$pre_stripped" != "$post_stripped" ]]; then
+		warn "Schema changed beyond the expected 10->11 location delta:"
+		diff -u <(printf '%s\n' "$pre_stripped") <(printf '%s\n' "$post_stripped") >&2 || true
+		die "Candidate schema has unexpected changes besides location columns and place_geocodes"
+	fi
+}
+
+assert_upgrade_delta() {
+	local archived="$1"
+	local candidate="$2"
+	local archived_db="$archived/canonical/db-working/flow_money.db"
+	local candidate_db="$candidate/canonical/db-working/flow_money.db"
+
+	[[ "$(sqlite_user_version "$archived_db")" == "$PRE_DB_USER_VERSION" ]] ||
+		die "Archived snapshot user_version is not $PRE_DB_USER_VERSION"
+	[[ "$(sqlite_user_version "$candidate_db")" == "$POST_DB_USER_VERSION" ]] ||
+		die "Candidate snapshot user_version is not $POST_DB_USER_VERSION"
+
+	assert_pre_migration_schema "$archived_db" "archived snapshot"
+	assert_post_migration_schema "$candidate_db" "candidate snapshot"
+	assert_expected_schema_delta "$archived/canonical/database-schema.txt" \
+		"$candidate/canonical/database-schema.txt"
+
+	if ! cmp -s "$archived/canonical/database-logical.txt" "$candidate/canonical/database-logical.txt"; then
+		warn "Pre-existing logical values changed across replacement:"
+		diff -u "$archived/canonical/database-logical.txt" "$candidate/canonical/database-logical.txt" >&2 || true
+		die "Pre-existing logical database values are not unchanged"
+	fi
+
+	assert_expected_backfill "$candidate_db" "candidate snapshot"
+	assert_completion_preference "$archived/raw" absent
+	assert_completion_preference "$candidate/raw" present
+
+	if ! cmp -s "$archived/canonical/fingerprint-components.txt" \
+		"$candidate/canonical/fingerprint-components.txt"; then
+		warn "Preserved canonical fingerprint components differ (hashes only):"
+		diff -u "$archived/canonical/fingerprint-components.txt" \
+			"$candidate/canonical/fingerprint-components.txt" >&2 || true
+		die "Data/settings/files/credential/widget canonical fingerprint mismatch"
+	fi
 }
 
 canonicalize_tar_directory() {
@@ -1056,40 +1384,32 @@ PY
 create_canonical_fingerprint() {
 	local snapshot_name="$1"
 	local widget_canonical="$2"
+	local expected_user_version="$3"
 	local dir="$OUTPUT_DIR/$snapshot_name"
 	local raw="$dir/raw"
 	local canonical="$dir/canonical"
 	local db="$canonical/db-working/flow_money.db"
 	local credential_component="MISSING"
 	local files_component="MISSING"
+	local marker_counts
 	mkdir -p "$canonical"
 
 	sqlite_quick_check "$raw/databases" "$canonical/db-working" >"$canonical/sqlite-quick-check.txt"
-	[[ "$("$SQLITE3_BIN" -batch "$db" 'PRAGMA user_version;' | tr -d '\r')" == "$DB_USER_VERSION" ]] ||
-		die "$snapshot_name database user_version is not $DB_USER_VERSION"
+	[[ "$(sqlite_user_version "$db")" == "$expected_user_version" ]] ||
+		die "$snapshot_name database user_version is not $expected_user_version"
 
-	"$SQLITE3_BIN" -batch -bail "$db" >"$canonical/database-logical.txt" <<'SQL'
-.mode quote
-SELECT 'transactions', id, occurredAtEpochMillis, merchant, category, note, cents,
-       recurringInterval, source, accountKey, accountName
-FROM transactions ORDER BY id;
-SELECT 'simplefin_profile', id, connectionId, connectedAtEpochMillis,
-       lastSyncAttemptAtEpochMillis, lastSuccessfulSyncAtEpochMillis, lastError,
-       isPaused, automaticSyncsPerDay
-FROM simplefin_profile ORDER BY id;
-SELECT 'simplefin_accounts', accountId, name, currency, institutionName,
-       balanceAmount, availableBalanceAmount, balanceDateEpochSeconds, lastSeenAtEpochMillis
-FROM simplefin_accounts ORDER BY accountId;
-SELECT 'simplefin_ignored_transactions', transactionId, ignoredAtEpochMillis
-FROM simplefin_ignored_transactions ORDER BY transactionId;
-SQL
-	chmod 600 "$canonical/database-logical.txt"
+	dump_preexisting_logical "$db" "$canonical/database-logical.txt"
+	dump_schema_contract "$db" "$canonical/database-schema.txt"
+	if schema_has_column "$db" transactions locationCity; then
+		dump_location_values "$db" "$canonical/database-location.txt"
+	else
+		printf 'ABSENT\n' >"$canonical/database-location.txt"
+		chmod 600 "$canonical/database-location.txt"
+	fi
 
-	local marker_counts
-	marker_counts="$("$SQLITE3_BIN" -batch -noheader -separator '|' "$db" \
-		"SELECT (SELECT count(*) FROM transactions WHERE id LIKE 'upgrade-%'), (SELECT count(*) FROM transactions WHERE id='upgrade-local-expense' AND recurringInterval='Monthly'), (SELECT count(*) FROM simplefin_profile WHERE id='default'), (SELECT count(*) FROM simplefin_accounts WHERE accountId='upgrade-account-001'), (SELECT count(*) FROM simplefin_ignored_transactions WHERE transactionId='upgrade-ignored-transaction');" |
-		tr -d '\r')"
-	[[ "$marker_counts" == "3|1|1|1|1" ]] || die "$snapshot_name seed rows or Monthly recurrence are missing/duplicated: $marker_counts"
+	marker_counts="$(query_seed_marker_counts "$db")"
+	[[ "$marker_counts" == "$SEED_MARKER_EXPECTED" ]] ||
+		die "$snapshot_name seed rows or Monthly recurrence are missing/duplicated: $marker_counts"
 
 	verify_pref_contracts "$raw"
 	if [[ -f "$raw/no_backup/simplefin_access_url.bin" ]]; then
@@ -1702,6 +2022,390 @@ SH
 	fi
 }
 
+self_test_run_script() {
+	"$SCRIPT_DIR/verify-upgrade.sh" "$@"
+}
+
+self_test_expect_error() {
+	local name="$1"
+	local expected="$2"
+	shift 2
+	local output status
+	if output="$(self_test_run_script "$@" 2>&1)"; then
+		status=0
+	else
+		status=$?
+	fi
+	if [[ $status -ne 0 ]] && printf '%s\n' "$output" | grep -Fq -- "$expected"; then
+		self_test_pass "$name"
+	else
+		self_test_fail "$name"
+	fi
+}
+
+self_test_version_options() {
+	local help_text
+	if [[ "$PRE_DB_USER_VERSION" == "$PRE_DB_USER_VERSION_DEFAULT" &&
+		"$POST_DB_USER_VERSION" == "$POST_DB_USER_VERSION_DEFAULT" &&
+		"$PRE_DB_USER_VERSION_DEFAULT" == "10" &&
+		"$POST_DB_USER_VERSION_DEFAULT" == "11" ]]; then
+		self_test_pass "default DB user versions are distinct 10 and 11"
+	else
+		self_test_fail "default DB user versions were $PRE_DB_USER_VERSION->$POST_DB_USER_VERSION"
+	fi
+
+	help_text="$(self_test_run_script --help)"
+	if printf '%s\n' "$help_text" | grep -Fq -- '--pre-db-user-version' &&
+		printf '%s\n' "$help_text" | grep -Fq -- '--post-db-user-version' &&
+		printf '%s\n' "$help_text" | grep -Fq 'defaults 10 and 11' &&
+		! printf '%s\n' "$help_text" | grep -Eq -- '--db-user-version N'; then
+		self_test_pass "help describes distinct pre/post DB user versions"
+	else
+		self_test_fail "help does not describe distinct pre/post DB user versions"
+	fi
+
+	self_test_expect_error "single --db-user-version is rejected" \
+		'not accepted because a single user_version cannot describe the 10->11 migration' \
+		--db-user-version 10 --self-test
+	self_test_expect_error "non-integer --pre-db-user-version is rejected" \
+		'--pre-db-user-version must be an integer' \
+		--pre-db-user-version abc --self-test
+	self_test_expect_error "non-integer --post-db-user-version is rejected" \
+		'--post-db-user-version must be an integer' \
+		--post-db-user-version abc --self-test
+	self_test_expect_error "post DB user version must be greater than pre" \
+		'candidate DB user_version must be greater than archived DB user_version' \
+		--pre-db-user-version 10 --post-db-user-version 10 --self-test
+	self_test_expect_error "missing --pre-db-user-version value is rejected" \
+		'--pre-db-user-version requires a value' \
+		--pre-db-user-version
+
+	if validate_db_user_versions; then
+		self_test_pass "validate_db_user_versions accepts 10 then 11"
+	else
+		self_test_fail "validate_db_user_versions rejected 10 then 11"
+	fi
+}
+
+self_test_write_xml_prefs() {
+	local destination="$1"
+	local complete="${2:-0}"
+	write_seed_preferences "$destination"
+	if [[ "$complete" == "1" ]]; then
+		cat >"$destination/transaction_location_backfill.xml" <<EOF
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <boolean name="$BACKFILL_COMPLETION_PREF_NAME" value="true" />
+</map>
+EOF
+		chmod 600 "$destination/transaction_location_backfill.xml"
+	fi
+}
+
+self_test_create_v10_db() {
+	local db="$1"
+	rm -f "$db"
+	"$SQLITE3_BIN" -batch -bail "$db" <<SQL
+PRAGMA user_version=$PRE_DB_USER_VERSION_DEFAULT;
+CREATE TABLE transactions (
+  id TEXT NOT NULL PRIMARY KEY,
+  occurredAtEpochMillis INTEGER NOT NULL,
+  merchant TEXT NOT NULL,
+  category TEXT NOT NULL,
+  note TEXT NOT NULL,
+  cents INTEGER NOT NULL,
+  recurringInterval TEXT,
+  source TEXT NOT NULL DEFAULT 'local',
+  accountKey TEXT,
+  accountName TEXT,
+  reviewedAtEpochMillis INTEGER,
+  providerDescription TEXT,
+  merchantOverride TEXT,
+  flowKind TEXT NOT NULL DEFAULT 'NORMAL',
+  flowKindOverride TEXT
+);
+CREATE TABLE simplefin_profile (
+  id TEXT NOT NULL DEFAULT 'default' PRIMARY KEY,
+  connectionId TEXT NOT NULL DEFAULT 'legacy',
+  connectedAtEpochMillis INTEGER,
+  lastSyncAttemptAtEpochMillis INTEGER,
+  lastSuccessfulSyncAtEpochMillis INTEGER,
+  lastError TEXT,
+  isPaused INTEGER NOT NULL DEFAULT 0,
+  automaticSyncsPerDay INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE simplefin_accounts (
+  accountId TEXT NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  currency TEXT,
+  institutionName TEXT,
+  balanceAmount TEXT,
+  availableBalanceAmount TEXT,
+  balanceDateEpochSeconds INTEGER,
+  lastSeenAtEpochMillis INTEGER NOT NULL
+);
+CREATE TABLE simplefin_ignored_transactions (
+  transactionId TEXT NOT NULL PRIMARY KEY,
+  ignoredAtEpochMillis INTEGER NOT NULL,
+  occurredAtEpochMillis INTEGER
+);
+CREATE TABLE simplefin_identity_state (
+  id TEXT NOT NULL DEFAULT 'stable_v2' PRIMARY KEY,
+  reconciliationComplete INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE merchant_rules (
+  normalizedProviderMerchant TEXT NOT NULL PRIMARY KEY,
+  category TEXT NOT NULL,
+  merchantOverride TEXT
+);
+INSERT INTO transactions
+    (id, occurredAtEpochMillis, merchant, category, note, cents, recurringInterval, source,
+     accountKey, accountName, providerDescription, flowKind)
+VALUES
+    ('$LOCAL_EXPENSE_TX_ID', 1, 'Rehearsal Market', 'Groceries', 'marker', -1234, 'Monthly', 'local',
+     NULL, NULL, NULL, 'NORMAL'),
+    ('$LOCAL_INCOME_TX_ID', 2, 'Rehearsal Payroll', 'Salary', 'marker', 250000, NULL, 'local',
+     NULL, NULL, NULL, 'NORMAL'),
+    ('$PARSEABLE_TX_ID', 3, 'Rehearsal Cafe', 'Coffee', 'marker', -5678, NULL, 'simplefin',
+     'upgrade-account-001', 'Upgrade Checking', '$PARSEABLE_PROVIDER_DESCRIPTION', 'NORMAL'),
+    ('$UNPARSEABLE_TX_ID', 4, 'Rehearsal Cafe Store', 'Coffee', 'marker', -4321, NULL, 'simplefin',
+     'upgrade-account-001', 'Upgrade Checking', '$UNPARSEABLE_PROVIDER_DESCRIPTION', 'NORMAL');
+INSERT INTO simplefin_profile (id, connectionId, lastError, isPaused, automaticSyncsPerDay)
+VALUES ('default', 'upgrade-rehearsal-connection', 'paused', 1, 4);
+INSERT INTO simplefin_accounts (accountId, name, currency, institutionName, lastSeenAtEpochMillis)
+VALUES ('upgrade-account-001', 'Upgrade Checking', 'USD', 'Rehearsal Credit Union', 1);
+INSERT INTO simplefin_ignored_transactions (transactionId, ignoredAtEpochMillis)
+VALUES ('upgrade-ignored-transaction', 1);
+INSERT INTO merchant_rules (normalizedProviderMerchant, category, merchantOverride)
+VALUES ('$MERCHANT_RULE_KEY', 'Coffee', 'Rehearsal Cafe');
+SQL
+}
+
+self_test_migrate_to_v11() {
+	local db="$1"
+	"$SQLITE3_BIN" -batch -bail "$db" <<SQL
+PRAGMA user_version=$POST_DB_USER_VERSION_DEFAULT;
+ALTER TABLE transactions ADD COLUMN locationCity TEXT;
+ALTER TABLE transactions ADD COLUMN locationState TEXT;
+ALTER TABLE transactions ADD COLUMN locationCountry TEXT;
+CREATE TABLE IF NOT EXISTS place_geocodes (
+  placeKey TEXT NOT NULL,
+  city TEXT,
+  state TEXT,
+  country TEXT,
+  latitude REAL,
+  longitude REAL,
+  resolvedAtEpochMillis INTEGER NOT NULL,
+  PRIMARY KEY(placeKey)
+);
+UPDATE transactions
+SET locationCity='$EXPECTED_BACKFILL_CITY', locationState='$EXPECTED_BACKFILL_STATE', locationCountry=NULL
+WHERE id='$PARSEABLE_TX_ID';
+SQL
+}
+
+self_test_write_snapshot() {
+	local snapshot="$1"
+	local db="$2"
+	local complete="$3"
+	mkdir -p "$snapshot/canonical/db-working" "$snapshot/raw/shared_prefs"
+	cp "$db" "$snapshot/canonical/db-working/flow_money.db"
+	dump_preexisting_logical "$snapshot/canonical/db-working/flow_money.db" \
+		"$snapshot/canonical/database-logical.txt"
+	dump_schema_contract "$snapshot/canonical/db-working/flow_money.db" \
+		"$snapshot/canonical/database-schema.txt"
+	self_test_write_xml_prefs "$snapshot/raw/shared_prefs" "$complete"
+	cat >"$snapshot/canonical/fingerprint-components.txt" <<'EOF'
+database_logical_sha256=TEST
+flow_money_preferences_sha256=TEST
+simplefin_cleanup_preferences_sha256=TEST
+files_manifest=MISSING
+simplefin_credential=MISSING
+widget_binding_sha256=TEST
+EOF
+	chmod 600 "$snapshot/canonical/fingerprint-components.txt"
+}
+
+self_test_delta_case() {
+	local test_root="$1"
+	local name="$2"
+	local expectation="$3"
+	local mutator="$4"
+	local expected_message="${5:-}"
+	local work="$test_root/delta-$name"
+	local output status
+	rm -rf "$work"
+	mkdir -p "$work"
+	self_test_create_v10_db "$work/v10.db"
+	cp "$work/v10.db" "$work/v11.db"
+	self_test_migrate_to_v11 "$work/v11.db"
+	self_test_write_snapshot "$work/10-archived" "$work/v10.db" 0
+	self_test_write_snapshot "$work/20-candidate" "$work/v11.db" 1
+	if [[ -n "$mutator" ]]; then
+		"$mutator" "$work"
+	fi
+	if (
+		assert_upgrade_delta "$work/10-archived" "$work/20-candidate"
+	) >"$work/output.log" 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	chmod 600 "$work/output.log"
+	if [[ "$expectation" == "pass" ]]; then
+		if [[ $status -eq 0 ]]; then
+			self_test_pass "delta logic accepts $name"
+		else
+			self_test_fail "delta logic rejected $name"
+		fi
+	elif [[ $status -ne 0 ]] && grep -Fq "$expected_message" "$work/output.log"; then
+		self_test_pass "delta logic rejects $name"
+	else
+		self_test_fail "delta logic did not reject $name with: $expected_message"
+	fi
+}
+
+self_test_mutate_extra_column() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		'ALTER TABLE transactions ADD COLUMN sneaky TEXT;'
+	dump_schema_contract "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"$1/20-candidate/canonical/database-schema.txt"
+}
+
+self_test_mutate_extra_table() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		'CREATE TABLE sneaky_table (id TEXT PRIMARY KEY);'
+	dump_schema_contract "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"$1/20-candidate/canonical/database-schema.txt"
+}
+
+self_test_mutate_logical() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"UPDATE transactions SET merchant='tampered' WHERE id='$LOCAL_EXPENSE_TX_ID';"
+	dump_preexisting_logical "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"$1/20-candidate/canonical/database-logical.txt"
+}
+
+self_test_mutate_missing_backfill() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"UPDATE transactions SET locationCity=NULL, locationState=NULL, locationCountry=NULL WHERE id='$PARSEABLE_TX_ID';"
+}
+
+self_test_mutate_unparseable_located() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"UPDATE transactions SET locationCity='SEATTLE', locationState='WA' WHERE id='$UNPARSEABLE_TX_ID';"
+}
+
+self_test_mutate_local_located() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"UPDATE transactions SET locationCity='AUSTIN' WHERE id='$LOCAL_EXPENSE_TX_ID';"
+}
+
+self_test_mutate_inferred_country() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"UPDATE transactions SET locationCountry='US' WHERE id='$PARSEABLE_TX_ID';"
+}
+
+self_test_mutate_missing_completion() {
+	rm -f "$1/20-candidate/raw/$BACKFILL_COMPLETION_PREFS_RELATIVE"
+}
+
+self_test_mutate_fingerprint() {
+	printf 'tampered\n' >"$1/20-candidate/canonical/fingerprint-components.txt"
+	chmod 600 "$1/20-candidate/canonical/fingerprint-components.txt"
+}
+
+self_test_mutate_geocode_row() {
+	"$SQLITE3_BIN" -batch -bail "$1/20-candidate/canonical/db-working/flow_money.db" \
+		"INSERT INTO place_geocodes (placeKey, city, state, country, latitude, longitude, resolvedAtEpochMillis) VALUES ('austin|tx|', 'AUSTIN', 'TX', NULL, 30.27, -97.74, 1);"
+}
+
+self_test_mutate_pre_location_columns() {
+	"$SQLITE3_BIN" -batch -bail "$1/10-archived/canonical/db-working/flow_money.db" <<'SQL'
+ALTER TABLE transactions ADD COLUMN locationCity TEXT;
+ALTER TABLE transactions ADD COLUMN locationState TEXT;
+ALTER TABLE transactions ADD COLUMN locationCountry TEXT;
+SQL
+	dump_schema_contract "$1/10-archived/canonical/db-working/flow_money.db" \
+		"$1/10-archived/canonical/database-schema.txt"
+}
+
+self_test_delta_logic() {
+	local test_root="$1"
+	self_test_delta_case "$test_root" expected-10-11 pass ""
+	self_test_delta_case "$test_root" extra-column reject self_test_mutate_extra_column \
+		'unexpected changes besides location columns and place_geocodes'
+	self_test_delta_case "$test_root" extra-table reject self_test_mutate_extra_table \
+		'unexpected changes besides location columns and place_geocodes'
+	self_test_delta_case "$test_root" logical-tamper reject self_test_mutate_logical \
+		'Pre-existing logical database values are not unchanged'
+	self_test_delta_case "$test_root" missing-backfill reject self_test_mutate_missing_backfill \
+		'parseable SimpleFIN backfill'
+	self_test_delta_case "$test_root" unparseable-located reject self_test_mutate_unparseable_located \
+		'unexpected located row'
+	self_test_delta_case "$test_root" local-located reject self_test_mutate_local_located \
+		'unexpected located row'
+	self_test_delta_case "$test_root" inferred-country reject self_test_mutate_inferred_country \
+		'parseable SimpleFIN backfill'
+	self_test_delta_case "$test_root" missing-completion reject self_test_mutate_missing_completion \
+		'Location backfill completion preference is missing or not true'
+	self_test_delta_case "$test_root" fingerprint-tamper reject self_test_mutate_fingerprint \
+		'Data/settings/files/credential/widget canonical fingerprint mismatch'
+	self_test_delta_case "$test_root" geocode-row reject self_test_mutate_geocode_row \
+		'place_geocodes has 1 unexpected row'
+	self_test_delta_case "$test_root" pre-has-location reject self_test_mutate_pre_location_columns \
+		'already has transactions.locationCity'
+}
+
+self_test_backfill_wait() {
+	local test_root="$1"
+	local output status attempt_dir
+
+	if (
+		BACKFILL_POLL_TIMEOUT_SECONDS=3
+		BACKFILL_POLL_INTERVAL_SECONDS=0
+		attempt_dir=0
+		fetch_remote_backfill_preference() {
+			attempt_dir=$((attempt_dir + 1))
+			if ((attempt_dir >= 2)); then
+				cat >"$1" <<EOF
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <boolean name="$BACKFILL_COMPLETION_PREF_NAME" value="true" />
+</map>
+EOF
+				chmod 600 "$1"
+				return 0
+			fi
+			return 1
+		}
+		wait_for_location_backfill_completion "$test_root/wait-success/backfill-poll"
+	) >"$test_root/wait-success.log" 2>&1; then
+		self_test_pass "backfill wait observes completion before timeout"
+	else
+		self_test_fail "backfill wait did not observe a later completion preference"
+	fi
+	chmod 600 "$test_root/wait-success.log"
+
+	if (
+		BACKFILL_POLL_TIMEOUT_SECONDS=1
+		BACKFILL_POLL_INTERVAL_SECONDS=1
+		fetch_remote_backfill_preference() { return 1; }
+		wait_for_location_backfill_completion "$test_root/wait-timeout/backfill-poll"
+	) >"$test_root/wait-timeout.log" 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	chmod 600 "$test_root/wait-timeout.log"
+	if [[ $status -ne 0 ]] && grep -Fq 'Timed out after 1s waiting for location backfill completion preference' \
+		"$test_root/wait-timeout.log"; then
+		self_test_pass "backfill wait fails closed when completion never appears"
+	else
+		self_test_fail "backfill wait did not fail closed on timeout"
+	fi
+}
+
 run_self_tests() {
 	local test_root helper_output target mode
 	test_root="$(mktemp -d "${TMPDIR:-/tmp}/penny-upgrade-self-test.XXXXXX")"
@@ -1752,6 +2456,15 @@ run_self_tests() {
 	self_test_preflight_case "$test_root" secondary-user reject "Current Android user is 10" emulator-5554 device "" 1 emulator ranchu ranchu $'FlowMoney_API_35\nOK\n' 0 10
 
 	self_test_ui_capture "$test_root"
+	self_test_version_options
+
+	SQLITE3_BIN="$(command -v sqlite3 || true)"
+	if [[ -x "$SQLITE3_BIN" ]]; then
+		self_test_delta_logic "$test_root"
+		self_test_backfill_wait "$test_root"
+	else
+		self_test_fail "sqlite3 is required for version-delta self-tests"
+	fi
 	rm -rf "$test_root"
 	if [[ $SELF_TEST_FAILURE_COUNT -ne 0 ]]; then
 		die "$SELF_TEST_FAILURE_COUNT mock self-test(s) failed"
@@ -1804,7 +2517,8 @@ capture_widget_record "$OUTPUT_DIR/10-archived/widget"
 capture_screen "$OUTPUT_DIR/10-archived/widget/baseline-widget.png"
 force_stop_app
 capture_snapshot "10-archived" required
-create_canonical_fingerprint "10-archived" "$OUTPUT_DIR/10-archived/widget/widget-canonical.txt"
+create_canonical_fingerprint "10-archived" "$OUTPUT_DIR/10-archived/widget/widget-canonical.txt" \
+	"$PRE_DB_USER_VERSION"
 
 BASELINE_UID="$(package_uid)"
 confirm_exact "REPLACE-1.0.13-WITH-1.0.14" \
@@ -1822,6 +2536,7 @@ cmp -s "$OUTPUT_DIR/10-archived/widget/widget-canonical.txt" \
 	die "Widget binding changed during adb install -r"
 
 launch_app
+wait_for_location_backfill_completion
 shell_cmd input keyevent HOME >/dev/null
 sleep 1
 capture_screen "$OUTPUT_DIR/20-candidate/widget-postlaunch.png"
@@ -1832,20 +2547,19 @@ cmp -s "$OUTPUT_DIR/10-archived/widget/widget-canonical.txt" \
 	"$OUTPUT_DIR/20-candidate/widget-final/widget-canonical.txt" ||
 	die "Widget binding changed after candidate launch/routes"
 capture_snapshot "20-candidate" required
-create_canonical_fingerprint "20-candidate" "$OUTPUT_DIR/20-candidate/widget-final/widget-canonical.txt"
-
-if ! cmp -s "$OUTPUT_DIR/10-archived/canonical/fingerprint-components.txt" \
-	"$OUTPUT_DIR/20-candidate/canonical/fingerprint-components.txt"; then
-	warn "Canonical fingerprint components differ (hashes only):"
-	diff -u "$OUTPUT_DIR/10-archived/canonical/fingerprint-components.txt" \
-		"$OUTPUT_DIR/20-candidate/canonical/fingerprint-components.txt" >&2 || true
-	die "Data/settings/files/credential/widget canonical fingerprint mismatch"
-fi
+create_canonical_fingerprint "20-candidate" "$OUTPUT_DIR/20-candidate/widget-final/widget-canonical.txt" \
+	"$POST_DB_USER_VERSION"
+assert_upgrade_delta "$OUTPUT_DIR/10-archived" "$OUTPUT_DIR/20-candidate"
 
 cat >"$OUTPUT_DIR/result.txt" <<EOF
 PASS
 package=$PACKAGE
 transition=$OLD_VERSION_NAME/$OLD_VERSION_CODE->$NEW_VERSION_NAME/$NEW_VERSION_CODE
+db_user_version=$PRE_DB_USER_VERSION->$POST_DB_USER_VERSION
+schema_delta=transactions.locationCity,locationState,locationCountry;place_geocodes
+backfill_delta=parseable=$EXPECTED_BACKFILL_CITY/$EXPECTED_BACKFILL_STATE/null;unparseable=null;local=untouched
+completion_preference=$BACKFILL_COMPLETION_PREF_NAME
+migration_backfill=validated
 certificate_sha256=$NEW_CERT
 uid=$BASELINE_UID
 sqlite_quick_check=ok
@@ -1857,6 +2571,6 @@ EOF
 chmod 600 "$OUTPUT_DIR/result.txt"
 
 COMPLETED=1
-log "PASS: replacement-only upgrade preserved the canonical contract."
+log "PASS: replacement-only $PRE_DB_USER_VERSION->$POST_DB_USER_VERSION upgrade preserved pre-existing data and validated the location migration/backfill."
 log "Sensitive artifacts: $OUTPUT_DIR"
 log "The encrypted SimpleFIN blob is not portable without the original Android Keystore key; never test restoration by uninstalling."
