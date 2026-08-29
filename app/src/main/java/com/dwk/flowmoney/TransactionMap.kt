@@ -64,7 +64,7 @@ fun TransactionMap(
     modifier: Modifier = Modifier,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
-    var mapViewRef by remember { mutableStateOf<MapView?>(null) }
+    val mapViewRef = remember { arrayOfNulls<MapView>(1) }
     var mappedPlaces by remember { mutableStateOf<List<MappedTransactionPlace>>(emptyList()) }
     var unmappable by remember { mutableStateOf<List<Transaction>>(emptyList()) }
     var selectedPlace by remember { mutableStateOf<MappedTransactionPlace?>(null) }
@@ -134,7 +134,10 @@ fun TransactionMap(
                     setMultiTouchControls(true)
                     controller.setZoom(3.0)
                     controller.setCenter(GeoPoint(39.8283, -98.5795))
-                    mapViewRef = this
+                    mapViewRef[0] = this
+                    if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                        onResume()
+                    }
                 }
             },
             update = { mapView ->
@@ -143,6 +146,13 @@ fun TransactionMap(
                     places = mappedPlaces,
                     onPlaceTap = { selectedPlace = it },
                 )
+            },
+            onRelease = { mapView ->
+                mapView.onPause()
+                mapView.onDetach()
+                if (mapViewRef[0] === mapView) {
+                    mapViewRef[0] = null
+                }
             },
             modifier = Modifier.fillMaxSize(),
         )
@@ -160,24 +170,19 @@ fun TransactionMap(
         }
     }
 
-    DisposableEffect(lifecycleOwner, mapViewRef) {
-        val mapView = mapViewRef
+    DisposableEffect(lifecycleOwner) {
         val observer =
             LifecycleEventObserver { _, event ->
                 when (event) {
-                    Lifecycle.Event.ON_RESUME -> mapView?.onResume()
-                    Lifecycle.Event.ON_PAUSE -> mapView?.onPause()
+                    Lifecycle.Event.ON_RESUME -> mapViewRef[0]?.onResume()
+                    Lifecycle.Event.ON_PAUSE -> mapViewRef[0]?.onPause()
                     else -> Unit
                 }
             }
         lifecycleOwner.lifecycle.addObserver(observer)
-        if (mapView != null && lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-            mapView.onResume()
-        }
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            mapView?.onPause()
-            mapView?.onDetach()
+            mapViewRef[0]?.onPause()
         }
     }
 
@@ -289,6 +294,7 @@ private fun bindPlaceMarkers(
     places: List<MappedTransactionPlace>,
     onPlaceTap: (MappedTransactionPlace) -> Unit,
 ) {
+    if (mapView.context == null) return
     val existing = mapView.overlays.filterIsInstance<Marker>()
     existing.forEach { mapView.overlays.remove(it) }
     places.forEach { place ->
