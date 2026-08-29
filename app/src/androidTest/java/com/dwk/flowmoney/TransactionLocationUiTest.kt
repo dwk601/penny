@@ -215,6 +215,122 @@ class TransactionLocationUiTest {
         assertHidden("tx-seattle", "tx-nowhere")
     }
 
+    @Test fun aUniqueCitySelectionClearsAConflictingStateAndAppliesTheCity() {
+        setTransactionsTab()
+        expandFilters()
+
+        // Oregon is active, then the user picks Seattle, which is in Washington.
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_or").performClick()
+        composeRule.waitForIdle()
+        assertVisible("tx-portland-or")
+        assertHidden("tx-seattle")
+
+        scrollTo("transaction_city_filter_group")
+        composeRule.onNodeWithTag("transaction_city_filter_seattle").performClick()
+        composeRule.waitForIdle()
+
+        assertVisible("tx-seattle")
+        assertHidden("tx-portland-or", "tx-portland-me", "tx-nowhere")
+        composeRule.onNodeWithTag("transaction_city_filter_seattle").assertIsSelected()
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_all").assertIsSelected()
+        composeRule.onNodeWithTag("transaction_state_filter_or").assertIsNotSelected()
+    }
+
+    @Test fun aUniqueCitySelectionClearsBothAConflictingStateAndCountry() {
+        transactions = allTransactions + toronto
+        setTransactionsTab()
+        expandFilters()
+
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_or").performClick()
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_us").performClick()
+        composeRule.waitForIdle()
+        assertVisible("tx-portland-or")
+        assertHidden("tx-toronto")
+
+        scrollTo("transaction_city_filter_group")
+        composeRule.onNodeWithTag("transaction_city_filter_toronto").performClick()
+        composeRule.waitForIdle()
+
+        assertVisible("tx-toronto")
+        assertHidden("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_all").assertIsSelected()
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_all").assertIsSelected()
+    }
+
+    @Test fun aUniqueCitySelectionKeepsAnAlreadyAgreeingStateAndCountry() {
+        transactions = allTransactions + toronto
+        setTransactionsTab()
+        expandFilters()
+
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_wa").performClick()
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_us").performClick()
+        composeRule.waitForIdle()
+
+        scrollTo("transaction_city_filter_group")
+        composeRule.onNodeWithTag("transaction_city_filter_seattle").performClick()
+        composeRule.waitForIdle()
+
+        assertVisible("tx-seattle")
+        assertHidden("tx-portland-or", "tx-portland-me", "tx-toronto", "tx-nowhere")
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_wa").assertIsSelected()
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_us").assertIsSelected()
+    }
+
+    @Test fun duplicateCityDisambiguationStillOverridesAConflictingStateAndCountry() {
+        transactions = allTransactions + toronto
+        setTransactionsTab()
+        expandFilters()
+
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_on").performClick()
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_ca").performClick()
+        composeRule.waitForIdle()
+        assertVisible("tx-toronto")
+
+        // A duplicated city name still pins state and country to that exact place.
+        scrollTo("transaction_city_filter_group")
+        composeRule.onNodeWithTag("transaction_city_filter_portlandmeus").performClick()
+        composeRule.waitForIdle()
+
+        assertVisible("tx-portland-me")
+        assertHidden("tx-portland-or", "tx-seattle", "tx-toronto", "tx-nowhere")
+        scrollTo("transaction_state_filter_group")
+        composeRule.onNodeWithTag("transaction_state_filter_me").assertIsSelected()
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_us").assertIsSelected()
+    }
+
+    @Test fun clearingTheCityLeavesTheOtherLocationFiltersAlone() {
+        setTransactionsTab()
+        expandFilters()
+
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_us").performClick()
+        scrollTo("transaction_city_filter_group")
+        composeRule.onNodeWithTag("transaction_city_filter_seattle").performClick()
+        composeRule.waitForIdle()
+        assertVisible("tx-seattle")
+
+        composeRule.onNodeWithTag("transaction_city_filter_all").performClick()
+        composeRule.waitForIdle()
+
+        assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle")
+        assertHidden("tx-nowhere")
+        scrollTo("transaction_country_filter_group")
+        composeRule.onNodeWithTag("transaction_country_filter_us").assertIsSelected()
+    }
+
     @Test fun stateAndCountryFiltersNarrowTheListIndependently() {
         setTransactionsTab()
         expandFilters()
@@ -353,6 +469,9 @@ class TransactionLocationUiTest {
                 transaction("tx-seattle", "Pike Place", "Food", "Seattle", "WA", "US"),
                 transaction("tx-nowhere", "Rent", "Home", null, null, null),
             )
+
+        /** Only used by the conflict tests, so the shared fixture above stays untouched. */
+        val toronto = transaction("tx-toronto", "Tim Hortons", "Coffee", "Toronto", "ON", "CA")
 
         fun transaction(
             id: String,

@@ -1,26 +1,31 @@
 package com.dwk.flowmoney
 
 import android.content.Context
+import android.location.Geocoder
+import android.os.Looper
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.ByteArrayInputStream
-import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import java.io.IOException
 
 /**
- * Geocoding is a third-party lookup on the user's spending history, so it must be cached, capped
- * per session, and must never turn a bad answer into a permanent coordinate. Every request here is
- * served by an injected fake connection: this test never touches the network.
+ * The geocoder against the real `place_geocodes` table and the real platform seam.
+ *
+ * Nothing here depends on a geocoding backend actually being installed on the device: the
+ * framework-backed cases assert invariants that must hold whether the platform answers, returns
+ * nothing, or is absent entirely.
  */
 @RunWith(AndroidJUnit4::class)
 class PlaceGeocoderDataPathTest {
@@ -36,171 +41,216 @@ class PlaceGeocoderDataPathTest {
         context.deleteDatabase("flow_money.db")
     }
 
-    @Test fun parsesOnlyWellFormedCoordinateArrays() {
-        assertEquals(
-            GeocodeBodyParse.Coordinates to (45.5152 to -122.6784),
-            parseGeocodeBody("""[{"lat":"45.5152","lon":"-122.6784","display_name":"Portland"}]"""),
-        )
-        listOf("", "   ", "[]", "[ ]").forEach { body ->
-            assertEquals("body=$body", GeocodeBodyParse.Empty, parseGeocodeBody(body).first)
-            assertNull(parseGeocodeBody(body).second)
-        }
-        listOf(
-            "{not json",
-            """{"results":[]}""",
-            "[1,2,3]",
-            """[{"lat":"nope","lon":"-122.6"}]""",
-            """[{"lon":"-122.6"}]""",
-            """[{"lat":"NaN","lon":"Infinity"}]""",
-        ).forEach { body ->
-            assertEquals("body=$body", GeocodeBodyParse.Malformed, parseGeocodeBody(body).first)
-            assertNull(parseGeocodeBody(body).second)
+    @Test fun theAndroidLookupIsUnavailableWheneverNoGeocoderBackendIsPresent() {
+        val outcome = AndroidGeocoderLookup(context).lookup("Portland, OR, US")
+
+        if (!Geocoder.isPresent()) {
+            assertEquals(PlaceGeocodeLookupOutcome.Unavailable, outcome)
+        } else {
+            assertTrue(
+                "unexpected outcome $outcome",
+                outcome is PlaceGeocodeLookupOutcome.Coordinates ||
+                    outcome == PlaceGeocodeLookupOutcome.NoMatch ||
+                    outcome == PlaceGeocodeLookupOutcome.Unavailable,
+            )
+            (outcome as? PlaceGeocodeLookupOutcome.Coordinates)?.let { coordinates ->
+                assertTrue(coordinates.latitude.isFinite())
+                assertTrue(coordinates.longitude.isFinite())
+            }
         }
     }
 
-    @Test fun resolvedCoordinatesAreCachedAndServedWithoutASecondRequest() =
+    @Test fun theAndroidLookupNeverThrowsForHostileOrEmptyQueries() {
+        val lookup = AndroidGeocoderLookup(context)
+
+        listOf("", "   ", "?????", "\u0000", "x".repeat(2_000), "Portland, OR, US").forEach { query ->
+            val outcome = runCatching { lookup.lookup(query) }
+            assertTrue("threw for '$query': ${outcome.exceptionOrNull()}", outcome.isSuccess)
+            assertNotNull(outcome.getOrNull())
+        }
+    }
+
+    @Test fun theFrameworkBackedGeocoderOnlyEverCachesAnAnswerThePlatformGave() =
         runBlocking {
             withDao { dao ->
-                val transport = FakeTransport(status = 200, body = """[{"lat":"45.5152","lon":"-122.6784"}]""")
-                val geocoder = geocoder(dao, transport)
+                val geocoder = PlaceGeocoder(dao = dao, context = context, now = { NOW })
 
-                assertEquals(PlaceGeocodeResult.Resolved(45.5152, -122.6784), geocoder.resolve("PORTLAND", "OR", null))
-                assertEquals(1, transport.requests)
-                assertTrue(transport.disconnected)
-                assertEquals("nominatim.openstreetmap.org", transport.lastUrl?.host)
-                assertTrue(transport.lastUrl.toString().contains("q=PORTLAND%2C+OR"))
+                val result = geocoder.resolve("Portland", "OR", "US")
+                val cached = dao.get("portland|or|us")
 
-                val cached = requireNotNull(dao.get("portland|or|"))
-                assertEquals(45.5152, cached.latitude ?: 0.0, 0.0)
-                assertEquals(-122.6784, cached.longitude ?: 0.0, 0.0)
-                assertEquals("PORTLAND", cached.city)
-                assertEquals("OR", cached.state)
-
-                assertEquals(PlaceGeocodeResult.Resolved(45.5152, -122.6784), geocoder.resolve("  portland ", "or", null))
-                assertEquals("normalized keys must hit the same cache row", 1, transport.requests)
-
-                // A brand new geocoder still reads the cache instead of the network.
-                val transportTwo = FakeTransport(status = 200, body = "[]")
-                assertEquals(
-                    PlaceGeocodeResult.Resolved(45.5152, -122.6784),
-                    geocoder(dao, transportTwo).resolve("PORTLAND", "OR", null),
-                )
-                assertEquals(0, transportTwo.requests)
+                when (result) {
+                    is PlaceGeocodeResult.Resolved -> {
+                        assertNotNull(cached)
+                        assertTrue(result.latitude.isFinite())
+                        assertEquals(result.latitude, cached!!.latitude!!, 0.0)
+                        assertEquals(result.longitude, cached.longitude!!, 0.0)
+                        assertEquals(NOW, cached.resolvedAtEpochMillis)
+                    }
+                    PlaceGeocodeResult.RetryableMiss -> {
+                        assertNotNull(cached)
+                        assertNull(cached!!.latitude)
+                        assertNull(cached.longitude)
+                    }
+                    PlaceGeocodeResult.Unavailable -> assertNull("an outage must not be cached", cached)
+                }
             }
         }
 
-    @Test fun missesAreCachedForTheTtlAndRetriedAfterIt() =
+    @Test fun theDefaultDispatcherKeepsTheFrameworkLookupOffTheMainThread() =
+        runBlocking {
+            withDao { dao ->
+                val mainThread = Looper.getMainLooper().thread
+                var lookupThread: Thread? = null
+                var callerThread: Thread? = null
+                val geocoder =
+                    PlaceGeocoder(
+                        dao = dao,
+                        lookup = {
+                            lookupThread = Thread.currentThread()
+                            PlaceGeocodeLookupOutcome.Coordinates(45.5152, -122.6784)
+                        },
+                        now = { NOW },
+                    )
+
+                withContext(Dispatchers.Main) {
+                    callerThread = Thread.currentThread()
+                    geocoder.resolve("Portland", "OR", "US")
+                }
+
+                assertEquals(mainThread, callerThread)
+                assertNotNull(lookupThread)
+                assertFalse("the geocoder must not block the main thread", lookupThread === mainThread)
+                assertEquals(45.5152, dao.get("portland|or|us")!!.latitude!!, 0.0)
+            }
+        }
+
+    @Test fun anUnavailableOrFailingBackendLeavesTheRealTableEmpty() =
+        runBlocking {
+            withDao { dao ->
+                val unavailable = PlaceGeocoder(dao = dao, lookup = { PlaceGeocodeLookupOutcome.Unavailable }, now = { NOW })
+                assertEquals(PlaceGeocodeResult.Unavailable, unavailable.resolve("Portland", "OR", "US"))
+                assertNull(dao.get("portland|or|us"))
+
+                val throwing = PlaceGeocoder(dao = dao, lookup = { throw IOException("backend offline") }, now = { NOW })
+                assertEquals(PlaceGeocodeResult.Unavailable, throwing.resolve("Seattle", "WA", "US"))
+                assertNull(dao.get("seattle|wa|us"))
+            }
+        }
+
+    @Test fun zeroResultsPersistARetryableMissThatExpiresWithItsTtl() =
         runBlocking {
             withDao { dao ->
                 var now = 1_000_000L
-                val transport = FakeTransport(status = 200, body = "[]")
+                var lookups = 0
                 val geocoder =
                     PlaceGeocoder(
                         dao = dao,
+                        lookup = {
+                            lookups++
+                            PlaceGeocodeLookupOutcome.NoMatch
+                        },
                         now = { now },
-                        openConnection = transport::open,
-                        maxNetworkLookupsPerSession = 10,
                         missTtlMillis = 1_000L,
                     )
 
-                assertEquals(PlaceGeocodeResult.RetryableMiss, geocoder.resolve("NOWHERE", "ZZ", null))
-                assertEquals(1, transport.requests)
-                val cached = requireNotNull(dao.get("nowhere|zz|"))
+                assertEquals(PlaceGeocodeResult.RetryableMiss, geocoder.resolve("Nowhere", "ZZ", null))
+                val cached = dao.get("nowhere|zz|")!!
                 assertNull(cached.latitude)
                 assertNull(cached.longitude)
+                assertEquals("Nowhere", cached.city)
+                assertEquals(1, lookups)
 
-                assertEquals(PlaceGeocodeResult.RetryableMiss, geocoder.resolve("NOWHERE", "ZZ", null))
-                assertEquals("a cached miss inside the TTL must not hit the network", 1, transport.requests)
+                now += 999L
+                assertEquals(PlaceGeocodeResult.RetryableMiss, geocoder.resolve("Nowhere", "ZZ", null))
+                assertEquals("a miss inside its TTL is served from the table", 1, lookups)
 
-                now += 1_001L
-                assertEquals(PlaceGeocodeResult.RetryableMiss, geocoder.resolve("NOWHERE", "ZZ", null))
-                assertEquals("an expired miss is retried", 2, transport.requests)
+                now += 2L
+                assertEquals(PlaceGeocodeResult.RetryableMiss, geocoder.resolve("Nowhere", "ZZ", null))
+                assertEquals(2, lookups)
+                assertEquals(1_001_001L, dao.get("nowhere|zz|")!!.resolvedAtEpochMillis)
             }
         }
 
-    @Test fun absentPlacesAreRetryableAndEverythingElseIsUnavailableAndUncached() =
+    @Test fun resolvedCoordinatesSurviveInTheTableFarBeyondTheMissTtlAndAcrossSessions() =
         runBlocking {
             withDao { dao ->
-                val notFound = FakeTransport(status = 404, body = "")
-                assertEquals(PlaceGeocodeResult.RetryableMiss, geocoder(dao, notFound).resolve("GONE", "ZZ", null))
-                assertEquals(1, notFound.requests)
-                assertTrue(dao.get("gone|zz|") != null)
-
-                listOf(
-                    FakeTransport(status = 200, body = "{not json"),
-                    FakeTransport(status = 500, body = "server exploded"),
-                    FakeTransport(status = 429, body = "[]"),
-                    FakeTransport(status = 301, body = """[{"lat":"1","lon":"2"}]"""),
-                ).forEachIndexed { index, transport ->
-                    val city = "BROKEN$index"
-                    assertEquals(PlaceGeocodeResult.Unavailable, geocoder(dao, transport).resolve(city, "ZZ", null))
-                    assertEquals(1, transport.requests)
-                    assertTrue(transport.disconnected)
-                    assertNull(
-                        "a failed lookup must not be cached",
-                        dao.get(TransactionLocation.placeKey(city, "ZZ", null)!!),
-                    )
-                }
-            }
-        }
-
-    @Test fun transportFailuresAndOversizeBodiesDegradeToUnavailableWithoutCaching() =
-        runBlocking {
-            withDao { dao ->
-                val throwing =
-                    PlaceGeocoder(
-                        dao = dao,
-                        now = { 1L },
-                        openConnection = { error("no network in tests") },
-                    )
-                assertEquals(PlaceGeocodeResult.Unavailable, throwing.resolve("PORTLAND", "OR", null))
-                assertNull(dao.get("portland|or|"))
-
-                val oversize = FakeTransport(status = 200, body = "[" + "\"x\",".repeat(40_000) + "\"x\"]")
-                assertEquals(PlaceGeocodeResult.Unavailable, geocoder(dao, oversize).resolve("HUGE", "ZZ", null))
-                assertNull(dao.get("huge|zz|"))
-            }
-        }
-
-    @Test fun theSessionLookupCapStopsFurtherNetworkWorkButKeepsServingTheCache() =
-        runBlocking {
-            withDao { dao ->
-                val transport = FakeTransport(status = 200, body = """[{"lat":"45.5152","lon":"-122.6784"}]""")
+                var now = 1_000L
+                var lookups = 0
+                val resolved = PlaceGeocodeResult.Resolved(45.5152, -122.6784)
                 val geocoder =
                     PlaceGeocoder(
                         dao = dao,
-                        now = { 1L },
-                        openConnection = transport::open,
-                        maxNetworkLookupsPerSession = 1,
+                        lookup = {
+                            lookups++
+                            PlaceGeocodeLookupOutcome.Coordinates(45.5152, -122.6784)
+                        },
+                        now = { now },
+                        missTtlMillis = 1L,
                     )
 
-                assertEquals(PlaceGeocodeResult.Resolved(45.5152, -122.6784), geocoder.resolve("PORTLAND", "OR", null))
-                assertEquals(PlaceGeocodeResult.Unavailable, geocoder.resolve("SEATTLE", "WA", null))
-                assertEquals(1, transport.requests)
-                assertNull(dao.get("seattle|wa|"))
-                // The already-cached place keeps resolving even after the cap is reached.
-                assertEquals(PlaceGeocodeResult.Resolved(45.5152, -122.6784), geocoder.resolve("PORTLAND", "OR", null))
-                assertEquals(1, transport.requests)
+                assertEquals(resolved, geocoder.resolve("Portland", "OR", "US"))
+                now += 10L * 365 * 24 * 60 * 60 * 1000
+                assertEquals(resolved, geocoder.resolve("Portland", "OR", "US"))
+                assertEquals(resolved, geocoder.resolve("  portland  ", "or", " US "))
+                assertEquals(1, lookups)
+
+                val freshSession = PlaceGeocoder(dao = dao, lookup = { PlaceGeocodeLookupOutcome.Unavailable }, now = { now })
+                assertEquals(resolved, freshSession.resolve("Portland", "OR", "US"))
             }
         }
 
-    @Test fun anUnusableCityIsRejectedBeforeAnyRequestIsMade() =
+    @Test fun theSessionBudgetIsEnforcedAgainstTheRealTable() =
         runBlocking {
             withDao { dao ->
-                val transport = FakeTransport(status = 200, body = """[{"lat":"1","lon":"2"}]""")
-                val geocoder = geocoder(dao, transport)
+                val queries = mutableListOf<String>()
+                val geocoder =
+                    PlaceGeocoder(
+                        dao = dao,
+                        lookup = { query ->
+                            queries += query
+                            PlaceGeocodeLookupOutcome.Coordinates(1.0, 2.0)
+                        },
+                        now = { NOW },
+                        maxLookupsPerSession = 2,
+                    )
 
-                listOf("", "   ", "\u00A0").forEach { city ->
-                    assertEquals(PlaceGeocodeResult.Unavailable, geocoder.resolve(city, "OR", null))
-                }
-                assertEquals(0, transport.requests)
+                assertEquals(PlaceGeocodeResult.Resolved(1.0, 2.0), geocoder.resolve("Portland", "OR", "US"))
+                assertEquals(PlaceGeocodeResult.Resolved(1.0, 2.0), geocoder.resolve("Seattle", "WA", "US"))
+                assertEquals(PlaceGeocodeResult.Unavailable, geocoder.resolve("Boston", "MA", "US"))
+
+                assertEquals(listOf("Portland, OR, US", "Seattle, WA, US"), queries)
+                assertNull(dao.get("boston|ma|us"))
+                // A place already in the table is still served after the budget is spent.
+                assertEquals(PlaceGeocodeResult.Resolved(1.0, 2.0), geocoder.resolve("Portland", "OR", "US"))
+                assertEquals(2, queries.size)
             }
         }
 
-    private fun geocoder(
-        dao: PlaceGeocodeDao,
-        transport: FakeTransport,
-    ) = PlaceGeocoder(dao = dao, now = { 1L }, openConnection = transport::open)
+    @Test fun placeKeyNormalizationMeansOneRowPerPlaceInTheTable() =
+        runBlocking {
+            withDao { dao ->
+                var lookups = 0
+                val geocoder =
+                    PlaceGeocoder(
+                        dao = dao,
+                        lookup = {
+                            lookups++
+                            PlaceGeocodeLookupOutcome.Coordinates(1.0, 2.0)
+                        },
+                        now = { NOW },
+                    )
+
+                geocoder.resolve("Salt Lake City", "UT", "US")
+                geocoder.resolve("  SALT   LAKE  CITY ", " ut ", " us ")
+
+                assertEquals(1, lookups)
+                assertNotNull(dao.get("salt lake city|ut|us"))
+                // Distinct places do not collide on the key.
+                geocoder.resolve("Salt Lake City", "UT", null)
+                assertEquals(2, lookups)
+                assertNotNull(dao.get("salt lake city|ut|"))
+            }
+        }
 
     private inline fun withDao(block: (PlaceGeocodeDao) -> Unit) {
         val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
@@ -211,43 +261,7 @@ class PlaceGeocoderDataPathTest {
         }
     }
 
-    private class FakeTransport(
-        private val status: Int,
-        private val body: String,
-    ) {
-        var requests = 0
-        var disconnected = false
-        var lastUrl: URL? = null
-
-        fun open(url: URL): HttpURLConnection {
-            requests++
-            lastUrl = url
-            return FakeConnection(url, status, body) { disconnected = true }
-        }
-    }
-
-    private class FakeConnection(
-        url: URL,
-        private val status: Int,
-        body: String,
-        private val onDisconnect: () -> Unit,
-    ) : HttpURLConnection(url) {
-        private val bytes = body.toByteArray(Charsets.UTF_8)
-
-        override fun connect() = Unit
-
-        override fun disconnect() {
-            onDisconnect()
-        }
-
-        override fun usingProxy() = false
-
-        override fun getResponseCode() = status
-
-        override fun getInputStream(): InputStream = ByteArrayInputStream(bytes)
-
-        override fun getErrorStream(): InputStream = ByteArrayInputStream(bytes)
-
-        override fun getContentLengthLong(): Long = bytes.size.toLong()
+    private companion object {
+        const val NOW = 1_700_000_000_000
     }
 }

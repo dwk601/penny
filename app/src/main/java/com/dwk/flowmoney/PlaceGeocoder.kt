@@ -1,5 +1,7 @@
 package com.dwk.flowmoney
 
+import android.content.Context
+import android.location.Geocoder
 import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.Insert
@@ -7,14 +9,13 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import org.json.JSONArray
-import org.json.JSONException
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.util.Locale
 
 @Entity(tableName = "place_geocodes")
 data class PlaceGeocodeEntity(
@@ -53,23 +54,46 @@ sealed class PlaceGeocodeResult {
     data object Unavailable : PlaceGeocodeResult()
 }
 
-internal enum class GeocodeBodyParse {
-    Coordinates,
-    Empty,
-    Malformed,
+sealed class PlaceGeocodeLookupOutcome {
+    data class Coordinates(
+        val latitude: Double,
+        val longitude: Double,
+    ) : PlaceGeocodeLookupOutcome()
+
+    data object NoMatch : PlaceGeocodeLookupOutcome()
+
+    data object Unavailable : PlaceGeocodeLookupOutcome()
+}
+
+fun interface PlaceGeocodeLookup {
+    fun lookup(query: String): PlaceGeocodeLookupOutcome
 }
 
 class PlaceGeocoder(
     private val dao: PlaceGeocodeDao,
+    private val lookup: PlaceGeocodeLookup = PlaceGeocodeLookup { PlaceGeocodeLookupOutcome.Unavailable },
     private val now: () -> Long = System::currentTimeMillis,
-    private val openConnection: (URL) -> HttpURLConnection = { url ->
-        url.openConnection() as? HttpURLConnection
-            ?: error("Geocoder did not open an HTTP connection")
-    },
-    private val maxNetworkLookupsPerSession: Int = MAX_NETWORK_LOOKUPS_PER_SESSION,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val maxLookupsPerSession: Int = MAX_LOOKUPS_PER_SESSION,
     private val missTtlMillis: Long = MISS_TTL_MILLIS,
 ) {
-    private var networkLookupsThisSession = 0
+    constructor(
+        dao: PlaceGeocodeDao,
+        context: Context,
+        now: () -> Long = System::currentTimeMillis,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+        maxLookupsPerSession: Int = MAX_LOOKUPS_PER_SESSION,
+        missTtlMillis: Long = MISS_TTL_MILLIS,
+    ) : this(
+        dao = dao,
+        lookup = AndroidGeocoderLookup(context.applicationContext),
+        now = now,
+        ioDispatcher = ioDispatcher,
+        maxLookupsPerSession = maxLookupsPerSession,
+        missTtlMillis = missTtlMillis,
+    )
+
+    private var lookupsThisSession = 0
 
     suspend fun resolve(
         city: String,
@@ -80,144 +104,107 @@ class PlaceGeocoder(
         val cached = dao.get(placeKey)
         val cachedResult = cached?.toResult(nowMillis = now(), missTtlMillis = missTtlMillis)
         if (cachedResult != null) return cachedResult
-        if (networkLookupsThisSession >= maxNetworkLookupsPerSession) return PlaceGeocodeResult.Unavailable
+        if (lookupsThisSession >= maxLookupsPerSession) return PlaceGeocodeResult.Unavailable
 
-        networkLookupsThisSession++
-        val fetched =
-            try {
-                fetchNominatim(city = city, state = state, country = country)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                return PlaceGeocodeResult.Unavailable
-            }
-
-        currentCoroutineContext().ensureActive()
-        when (fetched.classification) {
-            PlaceGeocodeClassification.Unavailable -> return PlaceGeocodeResult.Unavailable
-            PlaceGeocodeClassification.Resolved,
-            PlaceGeocodeClassification.RetryableMiss,
-            -> {
-                dao.upsert(
-                    PlaceGeocodeEntity(
-                        placeKey = placeKey,
-                        city = city,
-                        state = state,
-                        country = country,
-                        latitude = fetched.latitude,
-                        longitude = fetched.longitude,
-                        resolvedAtEpochMillis = now(),
-                    ),
-                )
-            }
-        }
-        val latitude = fetched.latitude
-        val longitude = fetched.longitude
-        return when (fetched.classification) {
-            PlaceGeocodeClassification.Resolved ->
-                if (latitude == null || longitude == null) {
-                    PlaceGeocodeResult.Unavailable
-                } else {
-                    PlaceGeocodeResult.Resolved(latitude = latitude, longitude = longitude)
-                }
-            PlaceGeocodeClassification.RetryableMiss -> PlaceGeocodeResult.RetryableMiss
-            PlaceGeocodeClassification.Unavailable -> PlaceGeocodeResult.Unavailable
-        }
-    }
-
-    private suspend fun fetchNominatim(
-        city: String,
-        state: String?,
-        country: String?,
-    ): FetchedGeocode {
-        val query =
-            buildString {
-                append(city)
-                state?.takeIf { it.isNotBlank() }?.let { append(", ").append(it) }
-                country?.takeIf { it.isNotBlank() }?.let { append(", ").append(it) }
-            }
-        val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.name())
-        val url = URL("$NOMINATIM_ENDPOINT?format=jsonv2&limit=1&q=$encoded")
-        val connection = openConnection(url)
-        return try {
-            connection.requestMethod = "GET"
-            connection.instanceFollowRedirects = false
-            connection.connectTimeout = CONNECT_TIMEOUT_MILLIS
-            connection.readTimeout = READ_TIMEOUT_MILLIS
-            connection.setRequestProperty("User-Agent", USER_AGENT)
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Accept-Language", "en")
-            val status = connection.responseCode
-            val stream =
-                if (status >= 400) {
-                    connection.errorStream ?: connection.inputStream
-                } else {
-                    connection.inputStream
-                }
-            val body =
-                if (stream == null) {
-                    ""
-                } else {
-                    StrictUtf8Reader.read(
-                        stream,
-                        maxBytes = MAX_GEOCODE_BODY_BYTES,
-                        advertisedLength = connection.contentLengthLong,
-                    )
+        lookupsThisSession++
+        val query = locationQuery(city, state, country)
+        return withContext(ioDispatcher) {
+            val outcome =
+                try {
+                    lookup.lookup(query)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: IOException) {
+                    PlaceGeocodeLookupOutcome.Unavailable
+                } catch (_: Exception) {
+                    PlaceGeocodeLookupOutcome.Unavailable
                 }
             currentCoroutineContext().ensureActive()
-            val (parse, coordinates) = parseGeocodeBody(body)
-            val classification = classifyGeocodeOutcome(status, parse)
-            FetchedGeocode(
-                classification = classification,
-                latitude = coordinates?.first,
-                longitude = coordinates?.second,
-            )
-        } finally {
-            connection.disconnect()
+            when (classifyGeocodeLookup(outcome)) {
+                PlaceGeocodeClassification.Unavailable -> PlaceGeocodeResult.Unavailable
+                PlaceGeocodeClassification.RetryableMiss -> {
+                    dao.upsert(
+                        PlaceGeocodeEntity(
+                            placeKey = placeKey,
+                            city = city,
+                            state = state,
+                            country = country,
+                            latitude = null,
+                            longitude = null,
+                            resolvedAtEpochMillis = now(),
+                        ),
+                    )
+                    PlaceGeocodeResult.RetryableMiss
+                }
+                PlaceGeocodeClassification.Resolved -> {
+                    val coordinates = outcome as? PlaceGeocodeLookupOutcome.Coordinates
+                    if (coordinates == null) {
+                        PlaceGeocodeResult.Unavailable
+                    } else {
+                        dao.upsert(
+                            PlaceGeocodeEntity(
+                                placeKey = placeKey,
+                                city = city,
+                                state = state,
+                                country = country,
+                                latitude = coordinates.latitude,
+                                longitude = coordinates.longitude,
+                                resolvedAtEpochMillis = now(),
+                            ),
+                        )
+                        PlaceGeocodeResult.Resolved(
+                            latitude = coordinates.latitude,
+                            longitude = coordinates.longitude,
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
-internal fun classifyGeocodeOutcome(
-    statusCode: Int,
-    body: GeocodeBodyParse,
-): PlaceGeocodeClassification =
-    when {
-        statusCode == HttpURLConnection.HTTP_OK && body == GeocodeBodyParse.Coordinates ->
-            PlaceGeocodeClassification.Resolved
-        statusCode == HttpURLConnection.HTTP_OK && body == GeocodeBodyParse.Empty ->
-            PlaceGeocodeClassification.RetryableMiss
-        statusCode == HttpURLConnection.HTTP_OK && body == GeocodeBodyParse.Malformed ->
-            PlaceGeocodeClassification.Unavailable
-        statusCode == HttpURLConnection.HTTP_NOT_FOUND || statusCode == HttpURLConnection.HTTP_NO_CONTENT ->
-            PlaceGeocodeClassification.RetryableMiss
-        else -> PlaceGeocodeClassification.Unavailable
+internal fun classifyGeocodeLookup(outcome: PlaceGeocodeLookupOutcome): PlaceGeocodeClassification =
+    when (outcome) {
+        is PlaceGeocodeLookupOutcome.Coordinates -> PlaceGeocodeClassification.Resolved
+        PlaceGeocodeLookupOutcome.NoMatch -> PlaceGeocodeClassification.RetryableMiss
+        PlaceGeocodeLookupOutcome.Unavailable -> PlaceGeocodeClassification.Unavailable
     }
 
-internal fun parseGeocodeBody(body: String): Pair<GeocodeBodyParse, Pair<Double, Double>?> {
-    val trimmed = body.trim()
-    if (trimmed.isEmpty() || trimmed == "[]") return GeocodeBodyParse.Empty to null
-    return try {
-        val array = JSONArray(trimmed)
-        if (array.length() == 0) return GeocodeBodyParse.Empty to null
-        val first = array.optJSONObject(0) ?: return GeocodeBodyParse.Malformed to null
-        val latitude = first.optString("lat").toDoubleOrNull()
-        val longitude = first.optString("lon").toDoubleOrNull()
-        if (latitude == null || longitude == null || !latitude.isFinite() || !longitude.isFinite()) {
-            GeocodeBodyParse.Malformed to null
+internal class AndroidGeocoderLookup(
+    private val context: Context,
+) : PlaceGeocodeLookup {
+    @Suppress("DEPRECATION")
+    override fun lookup(query: String): PlaceGeocodeLookupOutcome {
+        if (!Geocoder.isPresent()) return PlaceGeocodeLookupOutcome.Unavailable
+        val results =
+            try {
+                Geocoder(context, Locale.US).getFromLocationName(query, 1)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: IOException) {
+                return PlaceGeocodeLookupOutcome.Unavailable
+            }
+        val address = results?.firstOrNull() ?: return PlaceGeocodeLookupOutcome.NoMatch
+        val latitude = address.latitude
+        val longitude = address.longitude
+        return if (latitude.isFinite() && longitude.isFinite()) {
+            PlaceGeocodeLookupOutcome.Coordinates(latitude = latitude, longitude = longitude)
         } else {
-            GeocodeBodyParse.Coordinates to (latitude to longitude)
+            PlaceGeocodeLookupOutcome.Unavailable
         }
-    } catch (_: JSONException) {
-        GeocodeBodyParse.Malformed to null
     }
 }
 
-private data class FetchedGeocode(
-    val classification: PlaceGeocodeClassification,
-    val latitude: Double? = null,
-    val longitude: Double? = null,
-)
+internal fun locationQuery(
+    city: String,
+    state: String?,
+    country: String?,
+): String =
+    listOfNotNull(
+        city.trim().takeIf { it.isNotBlank() },
+        state?.trim()?.takeIf { it.isNotBlank() },
+        country?.trim()?.takeIf { it.isNotBlank() },
+    ).joinToString(", ")
 
 private fun PlaceGeocodeEntity.toResult(
     nowMillis: Long,
@@ -233,10 +220,5 @@ private fun PlaceGeocodeEntity.toResult(
     return null
 }
 
-private const val NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search"
-private const val USER_AGENT = "Penny/1.1.2 (com.dwk.flowmoney; personal finance map)"
-private const val CONNECT_TIMEOUT_MILLIS = 8_000
-private const val READ_TIMEOUT_MILLIS = 12_000
-private const val MAX_GEOCODE_BODY_BYTES = 64 * 1024
-private const val MAX_NETWORK_LOOKUPS_PER_SESSION = 20
+private const val MAX_LOOKUPS_PER_SESSION = 20
 private const val MISS_TTL_MILLIS = 7L * 24 * 60 * 60 * 1000
