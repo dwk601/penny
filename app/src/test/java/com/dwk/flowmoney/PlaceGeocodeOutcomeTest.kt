@@ -2,70 +2,59 @@ package com.dwk.flowmoney
 
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
-import java.net.HttpURLConnection
 
 /**
- * JVM-safe half of the geocoder. `classifyGeocodeOutcome` is the pure decision seam that decides
- * whether a Nominatim answer is cacheable, retryable, or must be discarded; nothing here touches
- * `org.json`, the network, or Android, so it stays a local unit test. Body parsing and caching are
- * covered instrumented in `PlaceGeocoderDataPathTest`.
+ * Pure seams around the injectable geocoder lookup. `classifyGeocodeLookup` decides what may be
+ * written to the cache, and `locationQuery` decides what the platform geocoder is asked for; both
+ * are plain JVM code with no Android or network dependency.
  */
 class PlaceGeocodeOutcomeTest {
     @Test
-    fun onlyOkWithCoordinatesResolves() {
-        assertThat(classifyGeocodeOutcome(HttpURLConnection.HTTP_OK, GeocodeBodyParse.Coordinates))
+    fun coordinatesResolveAndNoMatchIsARetryableMiss() {
+        assertThat(classifyGeocodeLookup(PlaceGeocodeLookupOutcome.Coordinates(45.5152, -122.6784)))
+            .isEqualTo(PlaceGeocodeClassification.Resolved)
+        assertThat(classifyGeocodeLookup(PlaceGeocodeLookupOutcome.NoMatch))
+            .isEqualTo(PlaceGeocodeClassification.RetryableMiss)
+    }
+
+    @Test
+    fun anUnavailableBackendIsNeverTreatedAsAnAnswer() {
+        assertThat(classifyGeocodeLookup(PlaceGeocodeLookupOutcome.Unavailable))
+            .isEqualTo(PlaceGeocodeClassification.Unavailable)
+    }
+
+    @Test
+    fun classificationIsTotalAndCoordinateValuesNeverChangeIt() {
+        val outcomes =
+            listOf(
+                PlaceGeocodeLookupOutcome.Coordinates(0.0, 0.0),
+                PlaceGeocodeLookupOutcome.Coordinates(-89.9, 179.9),
+                PlaceGeocodeLookupOutcome.Coordinates(Double.NaN, Double.NaN),
+                PlaceGeocodeLookupOutcome.NoMatch,
+                PlaceGeocodeLookupOutcome.Unavailable,
+            )
+
+        outcomes.forEach { outcome ->
+            assertThat(PlaceGeocodeClassification.entries).contains(classifyGeocodeLookup(outcome))
+        }
+        // A degenerate coordinate still classifies as Resolved; PlaceGeocoder is what rejects it.
+        assertThat(classifyGeocodeLookup(PlaceGeocodeLookupOutcome.Coordinates(Double.NaN, 1.0)))
             .isEqualTo(PlaceGeocodeClassification.Resolved)
     }
 
     @Test
-    fun emptyBodiesAndAbsentPlacesAreRetryableMisses() {
-        assertThat(classifyGeocodeOutcome(HttpURLConnection.HTTP_OK, GeocodeBodyParse.Empty))
-            .isEqualTo(PlaceGeocodeClassification.RetryableMiss)
-        listOf(HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_NO_CONTENT).forEach { status ->
-            GeocodeBodyParse.entries.forEach { body ->
-                assertThat(classifyGeocodeOutcome(status, body))
-                    .isEqualTo(PlaceGeocodeClassification.RetryableMiss)
-            }
-        }
+    fun theGeocoderQueryJoinsOnlyThePartsThatExist() {
+        assertThat(locationQuery("Portland", "OR", "US")).isEqualTo("Portland, OR, US")
+        assertThat(locationQuery("Portland", "OR", null)).isEqualTo("Portland, OR")
+        assertThat(locationQuery("Portland", null, "US")).isEqualTo("Portland, US")
+        assertThat(locationQuery("Portland", null, null)).isEqualTo("Portland")
     }
 
     @Test
-    fun malformedBodiesAndEveryOtherStatusAreUnavailableAndNeverRetriedAsMisses() {
-        assertThat(classifyGeocodeOutcome(HttpURLConnection.HTTP_OK, GeocodeBodyParse.Malformed))
-            .isEqualTo(PlaceGeocodeClassification.Unavailable)
-
-        val unavailableStatuses =
-            listOf(
-                HttpURLConnection.HTTP_MOVED_PERM,
-                HttpURLConnection.HTTP_MOVED_TEMP,
-                HttpURLConnection.HTTP_BAD_REQUEST,
-                HttpURLConnection.HTTP_UNAUTHORIZED,
-                HttpURLConnection.HTTP_FORBIDDEN,
-                429,
-                HttpURLConnection.HTTP_INTERNAL_ERROR,
-                HttpURLConnection.HTTP_UNAVAILABLE,
-                HttpURLConnection.HTTP_GATEWAY_TIMEOUT,
-                0,
-                -1,
-            )
-
-        unavailableStatuses.forEach { status ->
-            GeocodeBodyParse.entries.forEach { body ->
-                assertThat(classifyGeocodeOutcome(status, body))
-                    .isEqualTo(PlaceGeocodeClassification.Unavailable)
-            }
-        }
-    }
-
-    @Test
-    fun classificationIsTotalOverEveryStatusAndBodyCombination() {
-        val statuses = listOf(-1, 0, 200, 204, 301, 400, 404, 429, 500, 503, 599)
-
-        statuses.forEach { status ->
-            GeocodeBodyParse.entries.forEach { body ->
-                assertThat(PlaceGeocodeClassification.entries)
-                    .contains(classifyGeocodeOutcome(status, body))
-            }
-        }
+    fun theGeocoderQueryTrimsAndDropsBlankParts() {
+        assertThat(locationQuery("  SALT LAKE CITY  ", "  UT ", "   ")).isEqualTo("SALT LAKE CITY, UT")
+        assertThat(locationQuery("Portland", "", "")).isEqualTo("Portland")
+        assertThat(locationQuery("   ", "OR", "US")).isEqualTo("OR, US")
+        assertThat(locationQuery("Sa\u0303o Paulo", "SP", "BR")).isEqualTo("Sa\u0303o Paulo, SP, BR")
     }
 }
