@@ -86,6 +86,8 @@ private class SharedPreferencesGeminiRunStatusStore(
         prefs
             .edit()
             .putLong(KEY_LAST_RUN_AT, atEpochMillis)
+            .putInt(KEY_LAST_LABELED, 0)
+            .putBoolean(KEY_LAST_QUEUE_EMPTY, false)
             .putBoolean(KEY_LAST_FAILED, true)
             .apply()
     }
