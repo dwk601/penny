@@ -878,7 +878,8 @@ class SyncFoundationDataPathTest {
                 val rows = db.transactionDao().getAll().filter { it.id in seenByHook }
                 assertEquals(2, rows.size)
                 assertTrue(rows.all { it.category == "Groceries" })
-                assertTrue(rows.all { it.reviewedAtEpochMillis == null })
+                // Labelled rows are auto-confirmed by the same write.
+                assertTrue(rows.all { it.reviewedAtEpochMillis == AUTO_CATEGORIZE_AT })
             }
 
             withDatabase { db ->
@@ -894,7 +895,7 @@ class SyncFoundationDataPathTest {
                 val rows = db.transactionDao().getAll().filter { it.id in seenByHook }
                 assertEquals(2, rows.size)
                 assertTrue(rows.all { it.category == "Groceries" })
-                assertTrue(rows.all { it.reviewedAtEpochMillis == null })
+                assertTrue(rows.all { it.reviewedAtEpochMillis == AUTO_CATEGORIZE_AT })
                 // The auto-reviewed transfer never enters the categorization queue.
                 assertTrue(db.transactionDao().getAll().single { it.merchant == "Card payment" }.id !in seenByHook)
             }
@@ -907,7 +908,7 @@ class SyncFoundationDataPathTest {
         val dao = db.transactionDao()
         val queued = dao.uncategorizedSyncedTransactions(GEMINI_CATEGORIZE_CHUNK_SIZE)
         seenByHook += queued.map { it.id }
-        dao.applyAutoCategories(queued.associate { it.id to "Groceries" })
+        dao.applyAutoCategories(queued.associate { it.id to "Groceries" }, AUTO_CATEGORIZE_AT)
     }
 
     private suspend fun withDatabase(block: suspend (FlowMoneyDatabase) -> Unit) {
@@ -1136,5 +1137,6 @@ class SyncFoundationDataPathTest {
         const val SETUP_TOKEN = "setup-token-fixture"
         const val TRANSACTED_AT_BEFORE = 1_766_059_200_000L
         const val TRANSACTED_AT_AFTER = 1_766_145_600_000L
+        const val AUTO_CATEGORIZE_AT = 1_767_000_000_000L
     }
 }

@@ -81,7 +81,7 @@ class TransactionRepositoryTest {
             assertThat(row.reviewedAtEpochMillis).isEqualTo(4_242L)
         }
 
-    @Test fun autoCategoryWritesOnlyEligibleRowsAndLeavesReviewStateAlone() =
+    @Test fun autoCategoryWritesOnlyEligibleRowsAndConfirmsThemInTheSameWrite() =
         runTest {
             val dao = FakeTransactionDao()
             dao.upsertAll(
@@ -102,15 +102,20 @@ class TransactionRepositoryTest {
                         "local" to "Groceries",
                         "missing" to "Groceries",
                     ),
+                    7_000L,
                 )
 
             val rows = dao.getAll().associateBy { it.id }
             assertThat(changed).isEqualTo(1)
             assertThat(rows.getValue("eligible").category).isEqualTo("Groceries")
-            assertThat(rows.getValue("eligible").reviewedAtEpochMillis).isNull()
+            assertThat(rows.getValue("eligible").reviewedAtEpochMillis).isEqualTo(7_000L)
             assertThat(rows.getValue("reviewed").category).isEqualTo("Other")
+            assertThat(rows.getValue("reviewed").reviewedAtEpochMillis).isEqualTo(5L)
             assertThat(rows.getValue("categorized").category).isEqualTo("Food")
+            assertThat(rows.getValue("categorized").reviewedAtEpochMillis).isNull()
             assertThat(rows.getValue("local").category).isEqualTo("Other")
+            assertThat(rows.getValue("local").reviewedAtEpochMillis).isNull()
+            assertThat(rows.keys).doesNotContain("missing")
         }
 
     @Test fun autoCategoryRejectsOversizedChunksAndBlankCategories() =
@@ -122,13 +127,15 @@ class TransactionRepositoryTest {
                 runCatching {
                     dao.applyAutoCategories(
                         (0..GEMINI_CATEGORIZE_CHUNK_SIZE).associate { "id-$it" to "Food" },
+                        7_000L,
                     )
                 }.exceptionOrNull(),
             ).isInstanceOf(IllegalArgumentException::class.java)
             assertThat(
-                runCatching { dao.applyAutoCategories(mapOf("eligible" to " ")) }.exceptionOrNull(),
+                runCatching { dao.applyAutoCategories(mapOf("eligible" to " "), 7_000L) }.exceptionOrNull(),
             ).isInstanceOf(IllegalArgumentException::class.java)
             assertThat(dao.getAll().single().category).isEqualTo("Other")
+            assertThat(dao.getAll().single().reviewedAtEpochMillis).isNull()
         }
 
     @Test fun uncategorizedSyncedReadIsNewestFirstAndBounded() =
@@ -536,11 +543,29 @@ class TransactionRepositoryTest {
         override suspend fun applyAutoCategory(
             id: String,
             category: String,
+            reviewedAtEpochMillis: Long,
         ): Int {
             val current = entities[id]?.takeIf(::isAutoCategoryEligible) ?: return 0
-            entities[id] = current.copy(category = category)
+            entities[id] = current.copy(category = category, reviewedAtEpochMillis = reviewedAtEpochMillis)
             publish()
             return 1
+        }
+
+        override suspend fun reviewAutoCategorizedBacklog(
+            limit: Int,
+            reviewedAtEpochMillis: Long,
+        ): Int {
+            val drained =
+                entities.values
+                    .filter {
+                        it.source == "simplefin" && it.reviewedAtEpochMillis == null && it.category != "Other"
+                    }.sortedByDescending { it.occurredAtEpochMillis }
+                    .take(limit)
+            for (row in drained) {
+                entities[row.id] = row.copy(reviewedAtEpochMillis = reviewedAtEpochMillis)
+            }
+            if (drained.isNotEmpty()) publish()
+            return drained.size
         }
 
         private fun isAutoCategoryEligible(row: TransactionEntity) =

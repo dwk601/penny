@@ -255,7 +255,7 @@ class TransactionDaoDataPathTest {
             }
         }
 
-    @Test fun autoCategoryWritesOnlyCategoryAndSkipsRowsReviewedBetweenReadAndWrite() =
+    @Test fun autoCategoryConfirmsWrittenRowsAndSkipsRowsReviewedBetweenReadAndWrite() =
         runBlocking {
             val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
             try {
@@ -275,16 +275,69 @@ class TransactionDaoDataPathTest {
                 // The user reviews one of the rows while the classifier request is in flight.
                 dao.categorizeAndReview(listOf("raced"), "Travel", 500L)
 
-                assertEquals(0, dao.applyAutoCategory("raced", "Groceries"))
-                assertEquals(1, dao.applyAutoCategories(mapOf("stable" to "Groceries", "raced" to "Groceries")))
+                assertEquals(0, dao.applyAutoCategory("raced", "Groceries", 900L))
+                assertEquals(
+                    1,
+                    dao.applyAutoCategories(mapOf("stable" to "Groceries", "raced" to "Groceries"), 900L),
+                )
 
                 val rows = dao.getAll().associateBy { it.id }
-                assertEquals(stable.copy(category = "Groceries"), rows.getValue("stable"))
-                assertNull(rows.getValue("stable").reviewedAtEpochMillis)
+                assertEquals(
+                    stable.copy(category = "Groceries", reviewedAtEpochMillis = 900L),
+                    rows.getValue("stable"),
+                )
+                assertEquals(900L, rows.getValue("stable").reviewedAtEpochMillis)
                 assertEquals("Travel", rows.getValue("raced").category)
                 assertEquals(500L, rows.getValue("raced").reviewedAtEpochMillis)
                 // A row that is no longer eligible stays out of the queue on the next read.
                 assertEquals(emptyList<String>(), dao.uncategorizedSyncedTransactions(GEMINI_CATEGORIZE_CHUNK_SIZE).map { it.id })
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun backlogReviewSweepIsBoundedAndIdempotent() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val matching =
+                    (1..5).map { index ->
+                        syncedUncategorized("labelled-$index", index.toLong()).copy(category = "Groceries")
+                    }
+                val alreadyReviewed =
+                    syncedUncategorized("already-reviewed", 100).copy(
+                        category = "Coffee",
+                        reviewedAtEpochMillis = 500L,
+                    )
+                val stillOther = syncedUncategorized("still-other", 101)
+                val localLabelled =
+                    entity("local-labelled", 102, category = "Travel").copy(source = "local", accountKey = null)
+                dao.upsertAll(matching + listOf(alreadyReviewed, stillOther, localLabelled))
+
+                assertEquals(3, dao.reviewAutoCategorizedBacklog(limit = 3, reviewedAtEpochMillis = 900L))
+
+                val afterFirst = dao.getAll().associateBy { it.id }
+                // Newest-first: the three newest matching rows are drained.
+                assertEquals(900L, afterFirst.getValue("labelled-5").reviewedAtEpochMillis)
+                assertEquals(900L, afterFirst.getValue("labelled-4").reviewedAtEpochMillis)
+                assertEquals(900L, afterFirst.getValue("labelled-3").reviewedAtEpochMillis)
+                assertNull(afterFirst.getValue("labelled-2").reviewedAtEpochMillis)
+                assertNull(afterFirst.getValue("labelled-1").reviewedAtEpochMillis)
+
+                // Idempotent on the already-reviewed rows, and it keeps draining the rest.
+                assertEquals(2, dao.reviewAutoCategorizedBacklog(limit = 3, reviewedAtEpochMillis = 900L))
+                assertEquals(0, dao.reviewAutoCategorizedBacklog(limit = 3, reviewedAtEpochMillis = 901L))
+
+                val rows = dao.getAll().associateBy { it.id }
+                assertEquals(
+                    matching.map { it.copy(reviewedAtEpochMillis = 900L) }.associateBy { it.id },
+                    rows.filterKeys { it.startsWith("labelled-") },
+                )
+                // Never writes a category, and never touches the ineligible rows.
+                assertEquals(alreadyReviewed, rows.getValue("already-reviewed"))
+                assertEquals(stillOther, rows.getValue("still-other"))
+                assertEquals(localLabelled, rows.getValue("local-labelled"))
             } finally {
                 database.close()
             }
