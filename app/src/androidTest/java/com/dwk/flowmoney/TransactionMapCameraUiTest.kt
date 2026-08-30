@@ -100,15 +100,15 @@ class TransactionMapCameraUiTest {
 
         // With the sheet open, force a real marker rebind for the same place set. This is the
         // path that could reframe, so the assertion below is not vacuous.
-        val passesBeforeRebind = composeRule.runOnIdle { boundPlaces.size }
+        val placesBeforeRebind = composeRule.runOnIdle { boundPlaces.last() }
         composeRule.runOnIdle { transactions = listOf(portlandOr.copy(note = "edited"), unlocated.copy(note = "edited")) }
         composeRule.waitForIdle()
-        val passes = awaitBindPassAfter(passesBeforeRebind, expected = 1)
+        val placesAfterRebind = awaitRebindAwayFrom(placesBeforeRebind, expected = 1)
 
         assertNotSame(
             "the places were not rebound, so this test proves nothing",
-            passes[passes.lastIndex - 1],
-            passes.last(),
+            placesBeforeRebind,
+            placesAfterRebind,
         )
         composeRule.onNodeWithTag("transaction_unmappable_sheet").assertExists()
         assertCameraIsWhereTheUserLeftIt()
@@ -205,24 +205,31 @@ class TransactionMapCameraUiTest {
     }
 
     /**
-     * Waits for a bind pass beyond [afterPasses] that carries [expected] places and returns the
-     * snapshot of passes seen at that moment, so the caller can compare the last two list instances.
+     * Waits until the newest bind pass carries a list instance other than [before] holding
+     * [expected] places, and returns it.
+     *
+     * Identity against the captured pre-rebind instance is the only trustworthy signal that a
+     * rebind happened. `onPlacesBound` can fire extra passes carrying the *same* list instance, so
+     * comparing the last two passes by index can hand back two references to one list and fail a
+     * rebind that did occur — or pass one that did not.
      */
-    private fun awaitBindPassAfter(
-        afterPasses: Int,
+    private fun awaitRebindAwayFrom(
+        before: List<MappedTransactionPlace>,
         expected: Int,
-    ): List<List<MappedTransactionPlace>> {
+    ): List<MappedTransactionPlace> {
         val deadline = System.currentTimeMillis() + 10_000
-        var seen: List<List<MappedTransactionPlace>> = emptyList()
+        var newest: List<MappedTransactionPlace>? = null
         while (System.currentTimeMillis() < deadline) {
             composeRule.waitForIdle()
-            seen = composeRule.runOnIdle { boundPlaces.toList() }
-            if (seen.size > afterPasses && seen.last().size == expected) return seen
+            val latest = composeRule.runOnIdle { boundPlaces.last() }
+            newest = latest
+            if (latest !== before && latest.size == expected) return latest
             Thread.sleep(50)
         }
         fail(
-            "expected a bind pass after $afterPasses passes carrying $expected places " +
-                "but saw ${seen.size} passes, the last of ${seen.lastOrNull()?.size} places",
+            "expected a bind pass carrying a new list of $expected places, but the newest pass held " +
+                "${newest?.size} places and was " +
+                if (newest === before) "still the pre-rebind instance" else "a new instance",
         )
         error("unreachable")
     }
