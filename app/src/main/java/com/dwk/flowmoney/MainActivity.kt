@@ -5874,15 +5874,6 @@ internal fun TransactionEditor(
                 isExpense = draft.isExpense,
             )
         }
-    val amountSuggestions =
-        remember(suggestionHistory, draft.merchant, draft.category, draft.isExpense) {
-            TransactionSuggestions.amountSuggestions(
-                history = suggestionHistory,
-                merchant = draft.merchant,
-                category = draft.category,
-                isExpense = draft.isExpense,
-            )
-        }
     val rankedCategories =
         remember(suggestionHistory, draft.isExpense) {
             suggestionHistory.categories(draft.isExpense)
@@ -6193,34 +6184,7 @@ internal fun TransactionEditor(
                     }
                 } else {
                     item {
-                        AmountPad(
-                            amount = amountInput,
-                            isExpense = draft.isExpense,
-                            onKey = ::applyAmountKey,
-                        )
-                        if (amountSuggestions.isNotEmpty()) {
-                            Spacer(Modifier.height(10.dp))
-                            SectionLabel("Suggested amounts")
-                            Spacer(Modifier.height(8.dp))
-                            FlowRow(
-                                modifier = Modifier.selectableGroup(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                amountSuggestions.forEachIndexed { index, suggestion ->
-                                    SuggestionChip(
-                                        label = "${MoneyFormatter.formatUsd(suggestion.cents)} · ${suggestion.source.shortLabel()}",
-                                        selected = MoneyFormatter.parseAmountToCents(amountInput).absoluteValue == suggestion.cents,
-                                        testTag = "amount_suggestion_$index",
-                                        onClick = {
-                                            val suggestedAmount = MoneyFormatter.formatAmountText(suggestion.cents)
-                                            amountInput = suggestedAmount
-                                            onDraftChange(draft.copy(amount = suggestedAmount))
-                                        },
-                                    )
-                                }
-                            }
-                        }
+                        AmountPad(amount = amountInput, isExpense = draft.isExpense, onKey = ::applyAmountKey)
                     }
                     item {
                         TransferStatusToggle(
@@ -6878,14 +6842,6 @@ private fun flowTextFieldColors() =
         unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         cursorColor = MaterialTheme.colorScheme.primary,
     )
-
-private fun AmountSuggestionSource.shortLabel(): String =
-    when (this) {
-        AmountSuggestionSource.LastMatch -> "Last"
-        AmountSuggestionSource.FrequentMatch -> "Usual"
-        AmountSuggestionSource.Category -> "Category"
-        AmountSuggestionSource.Recent -> "Recent"
-    }
 
 private data class LocationSuggestion(
     val displayName: String,

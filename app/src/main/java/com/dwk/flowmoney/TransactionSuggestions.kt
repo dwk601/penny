@@ -3,18 +3,6 @@ package com.dwk.flowmoney
 import java.util.Locale
 import kotlin.math.absoluteValue
 
-data class AmountSuggestion(
-    val cents: Int,
-    val source: AmountSuggestionSource,
-)
-
-enum class AmountSuggestionSource {
-    LastMatch,
-    FrequentMatch,
-    Category,
-    Recent,
-}
-
 data class TransactionSuggestionHistory(
     val transactions: List<Transaction>,
     val expensesByRecency: List<Transaction>,
@@ -60,75 +48,6 @@ object TransactionSuggestions {
     fun signedCents(amountCents: Int, isExpense: Boolean): Int {
         val absolute = amountCents.absoluteValue
         return if (isExpense) -absolute else absolute
-    }
-
-    fun amountSuggestions(
-        transactions: List<Transaction>,
-        merchant: String,
-        category: String,
-        isExpense: Boolean,
-        limit: Int = 6,
-    ): List<AmountSuggestion> {
-        return amountSuggestions(
-            history = history(transactions),
-            merchant = merchant,
-            category = category,
-            isExpense = isExpense,
-            limit = limit,
-        )
-    }
-
-    fun amountSuggestions(
-        history: TransactionSuggestionHistory,
-        merchant: String,
-        category: String,
-        isExpense: Boolean,
-        limit: Int = 6,
-    ): List<AmountSuggestion> {
-        val normalizedMerchant = merchant.normalizedKey()
-        val normalizedCategory = category.normalizedKey()
-        val sorted = history.bySign(isExpense)
-
-        val suggestions = mutableListOf<AmountSuggestion>()
-        val seenAmounts = linkedSetOf<Int>()
-
-        fun add(cents: Int, source: AmountSuggestionSource) {
-            val amount = cents.absoluteValue
-            if (amount > 0 && seenAmounts.add(amount) && suggestions.size < limit) {
-                suggestions += AmountSuggestion(amount, source)
-            }
-        }
-
-        val exactMatches = if (normalizedMerchant.isNotBlank()) {
-            sorted.filter { transaction ->
-                transaction.merchant.normalizedKey() == normalizedMerchant &&
-                    transaction.category.normalizedKey() == normalizedCategory
-            }
-        } else {
-            emptyList()
-        }
-        exactMatches.firstOrNull()?.let { add(it.cents, AmountSuggestionSource.LastMatch) }
-
-        exactMatches
-            .groupBy { it.cents.absoluteValue }
-            .entries
-            .filter { it.value.size > 1 }
-            .sortedWith(
-                compareByDescending<Map.Entry<Int, List<Transaction>>> { it.value.size }
-                    .thenByDescending { entry -> entry.value.maxOf { it.occurredAtEpochMillis } },
-            )
-            .forEach { entry -> add(entry.key, AmountSuggestionSource.FrequentMatch) }
-
-        sorted
-            .filter { transaction ->
-                normalizedCategory.isNotBlank() &&
-                    transaction.category.normalizedKey() == normalizedCategory
-            }
-            .forEach { transaction -> add(transaction.cents, AmountSuggestionSource.Category) }
-
-        sorted.forEach { transaction -> add(transaction.cents, AmountSuggestionSource.Recent) }
-
-        return suggestions
     }
 
     fun merchantSuggestions(
