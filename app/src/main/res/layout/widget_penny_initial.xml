@@ -15,7 +15,7 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:autoSizeMaxTextSize="11sp"
+        android:autoSizeMaxTextSize="12sp"
         android:autoSizeMinTextSize="6sp"
         android:autoSizeStepGranularity="1sp"
         android:autoSizeTextType="uniform"
@@ -34,10 +34,10 @@
         android:autoSizeMinTextSize="6sp"
         android:autoSizeStepGranularity="1sp"
         android:autoSizeTextType="uniform"
+        android:fontFamily="@font/inter_semibold"
         android:gravity="center_vertical"
         android:includeFontPadding="false"
         android:maxLines="2"
         android:text="@string/widget_initial_guidance"
-        android:textColor="@color/widget_on_surface_inverse"
-        android:textStyle="bold" />
+        android:textColor="@color/widget_on_surface_inverse" />
 </LinearLayout>
