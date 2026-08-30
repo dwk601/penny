@@ -75,6 +75,28 @@ interface TransactionDao {
     )
     suspend fun getUnreviewedTransactions(): List<TransactionEntity>
 
+    @Query(
+        "SELECT * FROM transactions WHERE source = 'simplefin' " +
+            "AND reviewedAtEpochMillis IS NULL AND category = 'Other' " +
+            "ORDER BY occurredAtEpochMillis DESC LIMIT :limit",
+    )
+    suspend fun uncategorizedSyncedTransactions(limit: Int): List<TransactionEntity>
+
+    @Query(
+        "UPDATE transactions SET category = :category WHERE id = :id " +
+            "AND source = 'simplefin' AND reviewedAtEpochMillis IS NULL AND category = 'Other'",
+    )
+    suspend fun applyAutoCategory(id: String, category: String): Int
+
+    @Transaction
+    suspend fun applyAutoCategories(categoriesById: Map<String, String>): Int {
+        require(categoriesById.size <= GEMINI_CATEGORIZE_CHUNK_SIZE)
+        return categoriesById.entries.sumOf { (id, category) ->
+            require(category.isNotBlank())
+            applyAutoCategory(id, category)
+        }
+    }
+
     @Query("SELECT * FROM merchant_rules ORDER BY normalizedProviderMerchant")
     fun observeMerchantRules(): Flow<List<MerchantRuleEntity>>
 

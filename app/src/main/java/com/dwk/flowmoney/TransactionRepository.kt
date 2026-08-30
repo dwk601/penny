@@ -129,12 +129,12 @@ class TransactionRepository(
                     .copy(
                         source = "local",
                         accountKey = null,
-                        accountName = null,
+                        accountName = it.accountName,
                         reviewedAtEpochMillis = it.reviewedAtEpochMillis ?: now(),
-                        providerDescription = null,
+                        providerDescription = it.providerDescription,
                         merchantOverride = null,
                         providerMerchant = null,
-                        transactedAtEpochMillis = null,
+                        transactedAtEpochMillis = it.transactedAtEpochMillis,
                     ).toEntity()
             },
         )
