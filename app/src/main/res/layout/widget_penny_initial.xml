@@ -19,7 +19,7 @@
         android:autoSizeMinTextSize="6sp"
         android:autoSizeStepGranularity="1sp"
         android:autoSizeTextType="uniform"
-        android:fontFamily="@font/inter_semibold"
+        android:fontFamily="@font/inter_medium"
         android:gravity="center_vertical"
         android:includeFontPadding="false"
         android:maxLines="1"
