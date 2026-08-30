@@ -80,7 +80,8 @@ class TransactionLocationUiTest {
 
         composeRule.onNodeWithTag("transaction_view_map").assertIsSelected()
         composeRule.onNodeWithTag("transactions_map").assertExists()
-        composeRule.onNodeWithTag("transactions_list").assertDoesNotExist()
+        // One list hosts both modes, so map mode is proven by the rows being gone, not the list.
+        composeRule.onNodeWithTag("transaction_content_tx-nowhere").assertDoesNotExist()
         // One seeded transaction has no location at all, so the map has to surface it.
         composeRule.onNodeWithTag("transactions_unmappable").assertExists()
 
