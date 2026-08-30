@@ -1,9 +1,11 @@
 package com.dwk.flowmoney
 
 import android.view.ViewGroup
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -25,19 +27,41 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
-import org.osmdroid.util.BoundingBox
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
-import java.io.File
+import org.maplibre.android.MapLibre
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.geometry.LatLngBounds
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapLibreMapOptions
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
+import org.maplibre.android.style.expressions.Expression.get
+import org.maplibre.android.style.expressions.Expression.interpolate
+import org.maplibre.android.style.expressions.Expression.linear
+import org.maplibre.android.style.expressions.Expression.stop
+import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.PropertyFactory.circleColor
+import org.maplibre.android.style.layers.PropertyFactory.circleOpacity
+import org.maplibre.android.style.layers.PropertyFactory.circleRadius
+import org.maplibre.android.style.layers.PropertyFactory.circleStrokeColor
+import org.maplibre.android.style.layers.PropertyFactory.circleStrokeWidth
+import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.FeatureCollection
+import org.maplibre.geojson.Point
+
+private const val LIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/positron"
+private const val DARK_STYLE_URL = "https://tiles.versatiles.org/assets/styles/eclipse/style.json"
+private const val PLACE_SOURCE_ID = "penny-places"
+private const val PLACE_LAYER_ID = "penny-place-circles"
 
 data class MappedTransactionPlace(
     val placeKey: String,
@@ -62,6 +86,7 @@ fun TransactionMap(
     geocoder: PlaceGeocoder,
     onEdit: (Transaction) -> Unit,
     modifier: Modifier = Modifier,
+    onPlacesBound: (List<MappedTransactionPlace>) -> Unit = {},
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val mapViewRef = remember { arrayOfNulls<MapView>(1) }
@@ -70,7 +95,13 @@ fun TransactionMap(
     var unmappable by remember { mutableStateOf<List<Transaction>>(emptyList()) }
     var selectedPlace by remember { mutableStateOf<MappedTransactionPlace?>(null) }
     var showUnmappable by remember { mutableStateOf(false) }
+    var mapStyle by remember { mutableStateOf<Style?>(null) }
     val latestOnEdit by rememberUpdatedState(onEdit)
+    val latestPlaces by rememberUpdatedState(mappedPlaces)
+    val colorScheme = MaterialTheme.colorScheme
+    val styleUrl = if (isSystemInDarkTheme()) DARK_STYLE_URL else LIGHT_STYLE_URL
+    val circleFillColor = colorScheme.primary.toArgb()
+    val circleStrokeColorValue = colorScheme.surface.toArgb()
 
     LaunchedEffect(transactions, geocoder) {
         val grouped =
@@ -121,54 +152,109 @@ fun TransactionMap(
         unmappable = missing
     }
 
-    Box(modifier = modifier.fillMaxSize().testTag("transactions_map")) {
-        AndroidView(
-            factory = { viewContext ->
-                configureOsmdroid(viewContext)
-                MapView(viewContext).apply {
-                    layoutParams =
-                        ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                    setTileSource(TileSourceFactory.MAPNIK)
-                    setMultiTouchControls(true)
-                    controller.setZoom(3.0)
-                    controller.setCenter(GeoPoint(39.8283, -98.5795))
-                    mapViewRef[0] = this
-                    if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                        onResume()
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            shape = MaterialTheme.shapes.large,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clip(MaterialTheme.shapes.large)
+                    .testTag("transactions_map"),
+        ) {
+            AndroidView(
+                factory = { viewContext ->
+                    MapLibre.getInstance(viewContext)
+                    MapView(
+                        viewContext,
+                        MapLibreMapOptions.createFromAttributes(viewContext).textureMode(true),
+                    ).apply {
+                        layoutParams =
+                            ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                        onCreate(null)
+                        val currentState = lifecycleOwner.lifecycle.currentState
+                        if (currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                            onStart()
+                            onResume()
+                        } else if (currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                            onStart()
+                        }
+                        getMapAsync { map ->
+                            configureMapChrome(this, map)
+                            map.addOnMapClickListener { latLng ->
+                                val screen = map.projection.toScreenLocation(latLng)
+                                val hit = map.queryRenderedFeatures(screen, PLACE_LAYER_ID).firstOrNull()
+                                val key = hit?.getStringProperty("placeKey")
+                                val place = key?.let { k -> latestPlaces.firstOrNull { it.placeKey == k } }
+                                if (place != null) {
+                                    selectedPlace = place
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            map.setStyle(Style.Builder().fromUri(styleUrl)) { style ->
+                                mapStyle = style
+                            }
+                        }
+                        setOnTouchListener { v, _ ->
+                            v.parent.requestDisallowInterceptTouchEvent(true)
+                            false
+                        }
+                        mapViewRef[0] = this
                     }
+                },
+                update = { mapView ->
+                    val places = mappedPlaces
+                    onPlacesBound(places)
+                    fitCameraToPlaces(mapView, places, fittedCameraKey)
+                    val style = mapStyle
+                    if (style != null) {
+                        bindPlaceSource(
+                            style = style,
+                            places = places,
+                            fillColor = circleFillColor,
+                            strokeColor = circleStrokeColorValue,
+                        )
+                    }
+                },
+                onRelease = { mapView ->
+                    if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                        mapView.onPause()
+                    }
+                    mapView.onStop()
+                    mapView.onDestroy()
+                    if (mapViewRef[0] === mapView) {
+                        mapViewRef[0] = null
+                    }
+                    fittedCameraKey[0] = null
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Tap a place to see its transactions",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (unmappable.isNotEmpty()) {
+                TextButton(
+                    onClick = { showUnmappable = true },
+                    modifier = Modifier.testTag("transactions_unmappable"),
+                ) {
+                    Text("${unmappable.size} without map location")
                 }
-            },
-            update = { mapView ->
-                bindPlaceMarkers(
-                    mapView = mapView,
-                    places = mappedPlaces,
-                    fittedCameraKey = fittedCameraKey,
-                    onPlaceTap = { selectedPlace = it },
-                )
-            },
-            onRelease = { mapView ->
-                mapView.onPause()
-                mapView.onDetach()
-                if (mapViewRef[0] === mapView) {
-                    mapViewRef[0] = null
-                }
-                fittedCameraKey[0] = null
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
-        if (unmappable.isNotEmpty()) {
-            TextButton(
-                onClick = { showUnmappable = true },
-                modifier =
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(12.dp)
-                        .testTag("transactions_unmappable"),
-            ) {
-                Text("${unmappable.size} without map location")
             }
         }
     }
@@ -177,15 +263,16 @@ fun TransactionMap(
         val observer =
             LifecycleEventObserver { _, event ->
                 when (event) {
+                    Lifecycle.Event.ON_START -> mapViewRef[0]?.onStart()
                     Lifecycle.Event.ON_RESUME -> mapViewRef[0]?.onResume()
                     Lifecycle.Event.ON_PAUSE -> mapViewRef[0]?.onPause()
+                    Lifecycle.Event.ON_STOP -> mapViewRef[0]?.onStop()
                     else -> Unit
                 }
             }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            mapViewRef[0]?.onPause()
         }
     }
 
@@ -284,52 +371,86 @@ private fun TransactionMapRow(
     }
 }
 
-private fun configureOsmdroid(context: android.content.Context) {
-    val configuration = Configuration.getInstance()
-    val base = File(context.cacheDir, "osmdroid")
-    configuration.osmdroidBasePath = base
-    configuration.osmdroidTileCache = File(base, "tiles")
-    configuration.userAgentValue = "${context.packageName}/map"
+private fun configureMapChrome(mapView: MapView, map: MapLibreMap) {
+    val uiSettings = map.uiSettings
+    uiSettings.isCompassEnabled = false
+    uiSettings.isRotateGesturesEnabled = false
+    uiSettings.isAttributionEnabled = true
+    uiSettings.isLogoEnabled = true
+    val density = mapView.resources.displayMetrics.density
+    val inset = 4
+    uiSettings.setLogoMargins(inset, inset, inset, inset)
+    uiSettings.setAttributionMargins((92 * density).toInt(), inset, inset, inset)
 }
 
-private fun bindPlaceMarkers(
+private fun fitCameraToPlaces(
     mapView: MapView,
     places: List<MappedTransactionPlace>,
     fittedCameraKey: Array<Set<String>?>,
-    onPlaceTap: (MappedTransactionPlace) -> Unit,
 ) {
-    if (mapView.context == null) return
-    val existing = mapView.overlays.filterIsInstance<Marker>()
-    existing.forEach { mapView.overlays.remove(it) }
-    places.forEach { place ->
-        val marker =
-            Marker(mapView).apply {
-                position = GeoPoint(place.latitude, place.longitude)
-                title = placeLabel(place.city, place.state, place.country)
-                snippet = "${place.count} · ${MoneyFormatter.formatUsd(place.totalCents)}"
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                setOnMarkerClickListener { _, _ ->
-                    onPlaceTap(place)
-                    true
-                }
-            }
-        mapView.overlays.add(marker)
-    }
+    if (mapView.isDestroyed) return
     val cameraKey =
         places.map { place -> "${place.placeKey}|${place.latitude}|${place.longitude}" }.toSet()
-    if (places.isNotEmpty() && cameraKey != fittedCameraKey[0]) {
-        val points = places.map { GeoPoint(it.latitude, it.longitude) }
-        if (points.size == 1) {
-            mapView.controller.setZoom(10.0)
-            mapView.controller.setCenter(points.first())
-        } else {
-            mapView.zoomToBoundingBox(BoundingBox.fromGeoPoints(points), false, 80)
+    mapView.getMapAsync { map ->
+        if (mapView.isDestroyed) return@getMapAsync
+        if (places.isNotEmpty() && cameraKey != fittedCameraKey[0]) {
+            if (places.size == 1) {
+                val place = places.first()
+                map.moveCamera(
+                    CameraUpdateFactory.newLatLngZoom(LatLng(place.latitude, place.longitude), 10.0),
+                )
+                fittedCameraKey[0] = cameraKey
+            } else if (mapView.width > 0 && mapView.height > 0) {
+                val bounds =
+                    LatLngBounds.Builder().apply {
+                        places.forEach { include(LatLng(it.latitude, it.longitude)) }
+                    }.build()
+                map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 80))
+                fittedCameraKey[0] = cameraKey
+            }
+        } else if (places.isEmpty()) {
+            fittedCameraKey[0] = emptySet()
         }
-        fittedCameraKey[0] = cameraKey
-    } else if (places.isEmpty()) {
-        fittedCameraKey[0] = emptySet()
     }
-    mapView.invalidate()
+}
+
+private fun bindPlaceSource(
+    style: Style,
+    places: List<MappedTransactionPlace>,
+    fillColor: Int,
+    strokeColor: Int,
+) {
+    if (!style.isFullyLoaded) return
+    val features =
+        places.map { place ->
+            Feature.fromGeometry(Point.fromLngLat(place.longitude, place.latitude)).apply {
+                addStringProperty("placeKey", place.placeKey)
+                addNumberProperty("count", place.count)
+            }
+        }
+    val collection = FeatureCollection.fromFeatures(features)
+    val existing = style.getSourceAs<GeoJsonSource>(PLACE_SOURCE_ID)
+    if (existing != null) {
+        existing.setGeoJson(collection)
+    } else {
+        style.addSource(GeoJsonSource(PLACE_SOURCE_ID, collection))
+        style.addLayer(
+            CircleLayer(PLACE_LAYER_ID, PLACE_SOURCE_ID).withProperties(
+                circleRadius(
+                    interpolate(
+                        linear(),
+                        get("count"),
+                        stop(1, 7f),
+                        stop(25, 18f),
+                    ),
+                ),
+                circleColor(fillColor),
+                circleOpacity(0.85f),
+                circleStrokeWidth(2f),
+                circleStrokeColor(strokeColor),
+            ),
+        )
+    }
 }
 
 private fun placeLabel(
