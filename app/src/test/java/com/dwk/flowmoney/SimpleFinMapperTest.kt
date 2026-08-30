@@ -240,12 +240,58 @@ class SimpleFinMapperTest {
         assertThat(defaultOrigin.transactions.single().accountKey).isEqualTo(defaultOrigin.accounts.single().accountId)
     }
 
+    @Test
+    fun transactedAtBecomesMillisAndPostedStillOwnsOccurredAt() {
+        val result =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(
+                    account(
+                        id = "times",
+                        transactions =
+                            listOf(
+                                tx(id = "both", posted = 1_766_145_600L, transactedAt = 1_766_059_200L),
+                                tx(id = "posted-only", posted = 1_766_145_601L, transactedAt = null),
+                            ),
+                    ),
+                ),
+            )
+
+        val rows = result.transactions.associateBy { it.id.substringAfterLast(':') }
+        val both = rows.getValue("Ym90aA")
+        assertThat(both.transactedAtEpochMillis).isEqualTo(1_766_059_200_000L)
+        assertThat(both.occurredAtEpochMillis).isEqualTo(1_766_145_600_000L)
+        assertThat(both.transactedAtEpochMillis).isNotEqualTo(both.occurredAtEpochMillis)
+
+        val postedOnly = rows.getValue("cG9zdGVkLW9ubHk")
+        assertThat(postedOnly.transactedAtEpochMillis).isNull()
+        assertThat(postedOnly.occurredAtEpochMillis).isEqualTo(1_766_145_601_000L)
+    }
+
+    @Test
+    fun balanceDateReachesTheAccountRowInSecondsNotMillis() {
+        val balanceDateSeconds = 1_766_145_600L
+        val result =
+            SimpleFinMapper.map(
+                origin(),
+                listOf(
+                    account(id = "dated", balanceDate = balanceDateSeconds, transactions = listOf(tx())),
+                    account(id = "undated", balanceDate = null, transactions = listOf(tx(id = "other"))),
+                ),
+            )
+
+        val rows = result.accounts.associateBy { it.name }
+        assertThat(rows.getValue("dated").balanceDateEpochSeconds).isEqualTo(balanceDateSeconds)
+        assertThat(rows.getValue("undated").balanceDateEpochSeconds).isNull()
+    }
+
     private fun origin(url: String = ACCESS_URL) = SimpleFinServerOrigin.fromAccessUrl(url)
 
     private fun account(
         id: String,
         providerConnectionId: String = "provider-a",
         currency: String? = "USD",
+        balanceDate: Long? = null,
         transactions: List<SimpleFinTransaction>,
     ) = SimpleFinAccount(
         providerConnectionId = providerConnectionId,
@@ -256,6 +302,7 @@ class SimpleFinMapperTest {
         balance = null,
         availableBalance = null,
         transactions = transactions,
+        balanceDate = balanceDate,
     )
 
     private fun tx(
@@ -263,7 +310,8 @@ class SimpleFinMapperTest {
         posted: Long = 1,
         amount: String = "1.00",
         pending: Boolean = false,
-    ) = SimpleFinTransaction(id, posted, amount, "Merchant", pending)
+        transactedAt: Long? = null,
+    ) = SimpleFinTransaction(id, posted, amount, "Merchant", pending, transactedAt = transactedAt)
 
     private companion object {
         const val ACCESS_URL = "https://user:password@bridge.simplefin.org/simplefin"

@@ -13,6 +13,7 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -25,10 +26,12 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 class SyncFirstWorkflowUiTest {
     @get:Rule val composeRule = createComposeRule()
@@ -486,6 +489,111 @@ class SyncFirstWorkflowUiTest {
             assertEquals(FlowKind.TRANSFER, saved?.flowKindOverride)
         }
     }
+
+    @Test
+    fun connectedAccountsCardRendersBalanceAvailableBalanceAndAsOfTimestamp() {
+        val balanceDateSeconds = 1_766_145_600L
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                DataSheet(
+                    simpleFin =
+                        SimpleFinUiState(
+                            profile = SimpleFinProfileEntity(connectionId = "connected"),
+                            accounts =
+                                listOf(
+                                    account("account-a", "Checking", "Bank A").copy(
+                                        balanceAmount = "1234.56",
+                                        availableBalanceAmount = "1000.00",
+                                        balanceDateEpochSeconds = balanceDateSeconds,
+                                    ),
+                                ),
+                        ),
+                    operation = null,
+                    onOpenSetup = {},
+                    onConnect = {},
+                    onSync = {},
+                    onImport = {},
+                    onExport = {},
+                    onDisconnect = {},
+                    onClose = {},
+                    onRetryConnection = {},
+                    onCancelPendingConnection = {},
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("connected_accounts_card"))
+        composeRule.onNodeWithTag("connected_accounts_card").assertIsDisplayed()
+        composeRule.onNodeWithText("Checking").assertIsDisplayed()
+        composeRule.onNodeWithText("$1,234.56").assertIsDisplayed()
+        composeRule.onNodeWithText("Available $1,000.00").assertIsDisplayed()
+        composeRule.onNodeWithText("as of ${listDateText(balanceDateSeconds * 1000L)}").assertIsDisplayed()
+    }
+
+    @Test
+    fun syncedEditorShowsTransactedTimeOnlyWhenItDiffersFromThePostedTime() {
+        val transaction = syncedTransaction("transacted", LocalDate.of(2026, 7, 10))
+        val transactedAt = transaction.occurredAtEpochMillis - 86_400_000L
+        val sameDayDifferentTime = transaction.occurredAtEpochMillis - 3_600_000L
+        var draft by mutableStateOf(transaction.copy(transactedAtEpochMillis = transactedAt).toEditorDraft())
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                TransactionEditor(
+                    transaction = transaction,
+                    draft = draft,
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = { draft = it },
+                    onSave = {},
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
+            .performScrollToNode(hasTestTag("synced_provider_summary"))
+        composeRule.onNodeWithTag("synced_transacted_at").assertIsDisplayed()
+        assertTransactedAtShows(transactedAt)
+        composeRule.onNodeWithText("Posted").assertIsDisplayed()
+
+        // Same calendar day, different clock time still deserves the disambiguating line.
+        composeRule.runOnIdle { draft = draft.copy(transactedAtEpochMillis = sameDayDifferentTime) }
+        composeRule.onNodeWithTag("synced_transacted_at").assertIsDisplayed()
+        assertTransactedAtShows(sameDayDifferentTime)
+
+        // Exactly equal timestamps carry no information, so the line disappears entirely.
+        composeRule.runOnIdle {
+            draft = draft.copy(transactedAtEpochMillis = transaction.occurredAtEpochMillis)
+        }
+        composeRule.onNodeWithTag("synced_transacted_at").assertDoesNotExist()
+
+        composeRule.runOnIdle { draft = draft.copy(transactedAtEpochMillis = null) }
+        composeRule.onNodeWithTag("synced_transacted_at").assertDoesNotExist()
+    }
+
+    /** `StatusLine` does not merge its label and value, so match the tagged row's descendants. */
+    private fun assertTransactedAtShows(epochMillis: Long) {
+        composeRule
+            .onNode(
+                hasTestTag("synced_transacted_at") and
+                    hasAnyDescendant(hasText(listDateText(epochMillis))) and
+                    hasAnyDescendant(hasText("Transacted")),
+            ).assertIsDisplayed()
+    }
+
+    /** Mirrors MainActivity's private `ListDateFormatter` so the assertion reads the same text. */
+    private fun listDateText(epochMillis: Long): String =
+        Instant
+            .ofEpochMilli(epochMillis)
+            .atZone(ZoneId.systemDefault())
+            .toLocalDateTime()
+            .format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))
 
     private fun syncedTransaction(
         id: String,

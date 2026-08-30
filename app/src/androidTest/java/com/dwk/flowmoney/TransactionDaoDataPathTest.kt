@@ -185,6 +185,33 @@ class TransactionDaoDataPathTest {
             }
         }
 
+    @Test fun csvImportClearsProviderOwnedTransactedAt() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val repository = TransactionRepository(dao)
+                val csv =
+                    """
+                    id,occurredAtEpochMillis,merchant,category,note,cents
+                    csv-row,1766145600000,Coffee,Food,imported,-625
+                    """.trimIndent()
+                // A forged CSV row cannot smuggle a provider-owned timestamp into local data.
+                val forged =
+                    CsvCodec.decode(csv).map { it.copy(transactedAtEpochMillis = 1_766_059_200_000L) }
+
+                assertEquals(1, repository.importTransactions(forged))
+
+                val row = dao.getAll().single()
+                assertNull(row.transactedAtEpochMillis)
+                assertEquals("local", row.source)
+                assertNull(row.providerDescription)
+                assertNull(row.merchantOverride)
+            } finally {
+                database.close()
+            }
+        }
+
     @Test fun realRoomRangeResetIsDstSafeAndRestoresExactRowsAndTombstones() =
         runBlocking {
             val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
@@ -594,17 +621,32 @@ class TransactionDaoDataPathTest {
                 val dao = database.transactionDao()
                 dao.upsertAll(
                     listOf(
-                        entity("located", 1).copy(locationCity = "PORTLAND", locationState = "OR", locationCountry = "US"),
+                        entity("located", 1).copy(
+                            locationCity = "PORTLAND",
+                            locationState = "OR",
+                            locationCountry = "US",
+                            transactedAtEpochMillis = 1_766_059_200_000L,
+                        ),
                         entity("unlocated", 2),
                     ),
                 )
 
                 assertEquals(
-                    StoredProviderOwnedFields(locationCity = "PORTLAND", locationState = "OR", locationCountry = "US"),
+                    StoredProviderOwnedFields(
+                        locationCity = "PORTLAND",
+                        locationState = "OR",
+                        locationCountry = "US",
+                        transactedAtEpochMillis = 1_766_059_200_000L,
+                    ),
                     dao.providerOwnedForId("located"),
                 )
                 assertEquals(
-                    StoredProviderOwnedFields(locationCity = null, locationState = null, locationCountry = null),
+                    StoredProviderOwnedFields(
+                        locationCity = null,
+                        locationState = null,
+                        locationCountry = null,
+                        transactedAtEpochMillis = null,
+                    ),
                     dao.providerOwnedForId("unlocated"),
                 )
                 assertNull(dao.providerOwnedForId("missing"))

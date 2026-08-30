@@ -207,6 +207,80 @@ class SimpleFinPlatformTest {
         assertTrue(result.errors.joinToString().contains("con.auth"))
     }
 
+    /**
+     * Lives here rather than in the JVM `SimpleFinClientTest` because `org.json` is stubbed on the
+     * unit-test classpath; `parseAccounts` coverage has always been instrumented.
+     */
+    @Test
+    fun parsesTransactedAtAndBalanceDateAndTreatsAbsentZeroOrNegativeAsNull() {
+        val result =
+            SimpleFinClient().parseAccounts(
+                """
+                {
+                    "accounts":[
+                        {
+                            "conn_id":"connection","id":"acct-1","name":"Checking","currency":"USD",
+                            "balance":"12.34","available-balance":"10.00","balance-date":1766145600,
+                            "transactions":[
+                                {"id":"present","posted":1766145600,"amount":"-1.00",
+                                 "description":"Store","transacted_at":1766059200},
+                                {"id":"absent","posted":1766145601,"amount":"-2.00","description":"Store"},
+                                {"id":"zero","posted":1766145602,"amount":"-3.00",
+                                 "description":"Store","transacted_at":0},
+                                {"id":"negative","posted":1766145603,"amount":"-4.00",
+                                 "description":"Store","transacted_at":-5}
+                            ]
+                        },
+                        {"conn_id":"connection","id":"acct-absent","name":"Absent","transactions":[]},
+                        {"conn_id":"connection","id":"acct-zero","name":"Zero","balance-date":0,"transactions":[]},
+                        {"conn_id":"connection","id":"acct-negative","name":"Negative","balance-date":-1,
+                         "transactions":[]}
+                    ]
+                }
+                """.trimIndent(),
+            )
+
+        val accounts = result.accounts.associateBy { it.id }
+        assertEquals(1766145600L, accounts.getValue("acct-1").balanceDate)
+        assertNull(accounts.getValue("acct-absent").balanceDate)
+        assertNull(accounts.getValue("acct-zero").balanceDate)
+        assertNull(accounts.getValue("acct-negative").balanceDate)
+
+        val transactions = accounts.getValue("acct-1").transactions.associateBy { it.id }
+        assertEquals(1766059200L, transactions.getValue("present").transactedAt)
+        assertEquals(1766145600L, transactions.getValue("present").posted)
+        assertNull(transactions.getValue("absent").transactedAt)
+        assertNull(transactions.getValue("zero").transactedAt)
+        assertNull(transactions.getValue("negative").transactedAt)
+    }
+
+    @Test
+    fun accountsAndNewProviderFieldsStillParseAlongsideAPopulatedErrlist() {
+        val advisory =
+            "Requested date range exceeds recommended range of 45 days. In the future, this may be capped."
+        val result =
+            SimpleFinClient().parseAccounts(
+                """
+                {
+                    "errlist":["$advisory"],
+                    "accounts":[{
+                        "conn_id":"connection","id":"acct-1","name":"Checking","currency":"USD",
+                        "balance-date":1766145600,
+                        "transactions":[{"id":"kept","posted":1766145600,"amount":"-1.00",
+                                         "description":"Store","transacted_at":1766059200}]
+                    }]
+                }
+                """.trimIndent(),
+            )
+
+        assertEquals(listOf(advisory), result.errors)
+        val account = result.accounts.single()
+        assertEquals(1766145600L, account.balanceDate)
+        assertEquals(1766059200L, account.transactions.single().transactedAt)
+        assertTrue(partitionProviderErrors(result.errors).fatal.isEmpty())
+        assertEquals(listOf(advisory), partitionProviderErrors(result.errors).advisory)
+    }
+
     @Test
     fun parseAccountsEnforcesProviderAccountErrorAndStringLimits() {
         val client = SimpleFinClient()

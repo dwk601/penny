@@ -116,7 +116,133 @@ class SimpleFinLifecycleTest {
 
                 val (start, end) = checkNotNull(requestedWindow)
                 assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
-                assertEquals(TimeUnit.DAYS.toSeconds(45), end - start)
+                // Strictly inside the provider's recommended 45-day range so no advisory is earned.
+                assertEquals(SIMPLEFIN_REQUEST_WINDOW_SECONDS, end - start)
+                assertTrue("span=${end - start}", end - start < TimeUnit.DAYS.toSeconds(45))
+            }
+        }
+
+    @Test
+    fun connectRequestsAWindowStrictlyInsideTheRecommendedFortyFiveDays() =
+        runBlocking {
+            withRepository { _, fake, repository ->
+                fake.currentTime = 1_700_000_000_000L
+                var requestedWindow: Pair<Long, Long>? = null
+                fake.accounts = { _, start, end ->
+                    requestedWindow = start to end
+                    SimpleFinAccountsResult(emptyList())
+                }
+
+                assertTrue(repository.connect("window-token") is SimpleFinSyncResult.Success)
+
+                val (start, end) = checkNotNull(requestedWindow)
+                assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
+                assertEquals(SIMPLEFIN_REQUEST_WINDOW_SECONDS, end - start)
+                assertTrue("span=${end - start}", end - start < TimeUnit.DAYS.toSeconds(45))
+            }
+        }
+
+    @Test
+    fun advisoryOnlyErrorListSyncsSuccessfullyAndKeepsTheAdvisoryInLastError() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_000_000_000L
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "advisory"))
+                fake.credential = "advisory" to OLD_URL
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "advisory-row")),
+                        errors = listOf(RANGE_ADVISORY),
+                    )
+                }
+
+                val result = repository.syncNow()
+
+                assertTrue(result is SimpleFinSyncResult.Success)
+                assertEquals(1, db.transactionDao().getAll().size)
+                val profile = db.simpleFinDao().getProfile()!!
+                assertEquals(fake.currentTime, profile.lastSuccessfulSyncAtEpochMillis)
+                assertEquals(RANGE_ADVISORY, profile.lastError)
+            }
+        }
+
+    @Test
+    fun fatalErrorListStillFailsSyncAndWritesNoRows() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_100_000_000L
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "fatal"))
+                fake.credential = "fatal" to OLD_URL
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "must-not-write")),
+                        errors = listOf(RANGE_ADVISORY, "Connection to institution failed"),
+                    )
+                }
+
+                val result = repository.syncNow()
+
+                assertTrue(result is SimpleFinSyncResult.Failure)
+                assertTrue(db.transactionDao().getAll().isEmpty())
+                assertTrue(
+                    db
+                        .simpleFinDao()
+                        .observeAccounts()
+                        .firstValue()
+                        .isEmpty(),
+                )
+                val profile = db.simpleFinDao().getProfile()!!
+                assertNull(profile.lastSuccessfulSyncAtEpochMillis)
+                assertEquals("SimpleFIN returned an invalid sync response.", profile.lastError)
+            }
+        }
+
+    @Test
+    fun advisoryOnlyErrorListConnectsSuccessfullyAndKeepsTheAdvisoryInLastError() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_200_000_000L
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "connect-advisory-row")),
+                        errors = listOf(RANGE_ADVISORY),
+                    )
+                }
+
+                assertTrue(repository.connect("advisory-token") is SimpleFinSyncResult.Success)
+
+                assertEquals(1, db.transactionDao().getAll().size)
+                val profile = db.simpleFinDao().getProfile()!!
+                assertEquals(fake.currentTime, profile.lastSuccessfulSyncAtEpochMillis)
+                assertEquals(RANGE_ADVISORY, profile.lastError)
+            }
+        }
+
+    @Test
+    fun fatalErrorListStillFailsPendingConnectionAndWritesNoRows() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_300_000_000L
+                fake.pendingCredential = SimpleFinPendingCredential("pending-fatal", NEW_URL)
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "must-not-write")),
+                        errors = listOf(RANGE_ADVISORY, "auth failure"),
+                    )
+                }
+
+                val result = repository.retryPendingConnection()
+
+                assertTrue(result is SimpleFinSyncResult.Failure)
+                assertNull(db.simpleFinDao().getProfile())
+                assertTrue(db.transactionDao().getAll().isEmpty())
+                assertTrue(
+                    db
+                        .simpleFinDao()
+                        .observeAccounts()
+                        .firstValue()
+                        .isEmpty(),
+                )
             }
         }
 
@@ -413,7 +539,9 @@ class SimpleFinLifecycleTest {
 
                 val (start, end) = checkNotNull(requestedWindow)
                 assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
-                assertEquals(TimeUnit.DAYS.toSeconds(45), end - start)
+                // Strictly inside the provider's recommended 45-day range so no advisory is earned.
+                assertEquals(SIMPLEFIN_REQUEST_WINDOW_SECONDS, end - start)
+                assertTrue("span=${end - start}", end - start < TimeUnit.DAYS.toSeconds(45))
             }
         }
 
@@ -1484,5 +1612,10 @@ class SimpleFinLifecycleTest {
     private companion object {
         const val OLD_URL = "https://old-user:old-password@bridge.simplefin.org/simplefin"
         const val NEW_URL = "https://new-user:new-password@bridge.simplefin.org/simplefin"
+
+        /** Copied byte-for-byte from a real SimpleFIN response dump (error_code `gen.api`). */
+        const val RANGE_ADVISORY =
+            "Requested date range exceeds recommended range of 45 days. " +
+                "In the future, this may be capped."
     }
 }

@@ -436,6 +436,7 @@ class SyncFoundationDataPathTest {
                         providerDescription = "RAW OLD",
                         flowKind = FlowKind.TRANSFER,
                         flowKindOverride = FlowKind.NORMAL,
+                        transactedAtEpochMillis = TRANSACTED_AT_BEFORE,
                     )
                 val previousRule = MerchantRuleEntity("undo market", "Travel", "Old rule display")
                 dao.upsert(origin)
@@ -483,12 +484,113 @@ class SyncFoundationDataPathTest {
                         accountName = "New Checking",
                         providerDescription = "RAW REFRESHED",
                         flowKind = FlowKind.NORMAL,
+                        transactedAtEpochMillis = TRANSACTED_AT_AFTER,
                     )
                 dao.upsertSyncedTransactionsIgnoringTombstones(listOf(refreshed))
+                assertEquals(TRANSACTED_AT_AFTER, dao.getAll().single().transactedAtEpochMillis)
                 repository.undoMerchantRuleSave(secondSave.undoToken)
 
                 assertEquals(previousRule, dao.getMerchantRules().single())
                 assertEquals(refreshed, dao.getAll().single())
+                // The undo rolls back user-owned columns only; the later provider refresh survives.
+                val undone = dao.getAll().single()
+                assertEquals(TRANSACTED_AT_AFTER, undone.transactedAtEpochMillis)
+                assertEquals(origin.category, undone.category)
+                assertEquals(origin.note, undone.note)
+                assertEquals(origin.recurringInterval, undone.recurringInterval)
+                assertEquals(origin.merchantOverride, undone.merchantOverride)
+                assertEquals(origin.flowKindOverride, undone.flowKindOverride)
+                assertEquals(origin.reviewedAtEpochMillis, undone.reviewedAtEpochMillis)
+            }
+        }
+
+    @Test
+    fun resyncOverwritesProviderTransactedAtAndLeavesEveryUserOwnedColumnIntact() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val stored =
+                    syncedEntity("resync-transacted", 10).copy(
+                        category = "Food",
+                        note = "User note",
+                        merchantOverride = "User display",
+                        flowKindOverride = FlowKind.TRANSFER,
+                        reviewedAtEpochMillis = 4_444L,
+                        transactedAtEpochMillis = TRANSACTED_AT_BEFORE,
+                    )
+                dao.upsert(stored)
+
+                val incoming =
+                    stored.copy(
+                        category = "Other",
+                        note = "",
+                        merchantOverride = null,
+                        flowKindOverride = null,
+                        reviewedAtEpochMillis = null,
+                        transactedAtEpochMillis = TRANSACTED_AT_AFTER,
+                    )
+                dao.upsertSyncedTransactionsIgnoringTombstones(
+                    transactions = listOf(incoming),
+                    reviewedAtEpochMillis = 9_999L,
+                )
+
+                val refreshed = dao.getAll().single()
+                assertEquals(TRANSACTED_AT_AFTER, refreshed.transactedAtEpochMillis)
+                assertEquals("Food", refreshed.category)
+                assertEquals("User display", refreshed.merchantOverride)
+                assertEquals("User note", refreshed.note)
+                assertEquals(FlowKind.TRANSFER, refreshed.flowKindOverride)
+                assertEquals(4_444L, refreshed.reviewedAtEpochMillis)
+
+                // The column is provider-owned in both directions: a payload that drops it clears it.
+                dao.upsertSyncedTransactionsIgnoringTombstones(
+                    listOf(incoming.copy(transactedAtEpochMillis = null)),
+                )
+                val cleared = dao.getAll().single()
+                assertNull(cleared.transactedAtEpochMillis)
+                assertEquals("Food", cleared.category)
+                assertEquals("User note", cleared.note)
+                assertEquals(4_444L, cleared.reviewedAtEpochMillis)
+            }
+        }
+
+    @Test
+    fun syncDuringAnOpenEditorKeepsTheRefreshedTransactedAtAndTheUserEdits() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val repository = TransactionRepository(dao) { 8_000L }
+                val seeded =
+                    syncedEntity("editor-race", 10).copy(
+                        reviewedAtEpochMillis = 1_000L,
+                        transactedAtEpochMillis = TRANSACTED_AT_BEFORE,
+                    )
+                dao.upsert(seeded)
+
+                // The editor opens and captures a draft while the stored value is still T1.
+                val staleDraft = dao.getAll().single().toTransaction()
+                assertEquals(TRANSACTED_AT_BEFORE, staleDraft.transactedAtEpochMillis)
+
+                // A sync lands underneath the open editor and refreshes the provider column to T2.
+                dao.upsertSyncedTransactionsIgnoringTombstones(
+                    listOf(
+                        seeded.copy(
+                            transactedAtEpochMillis = TRANSACTED_AT_AFTER,
+                            providerDescription = "RAW REFRESHED",
+                        ),
+                    ),
+                )
+
+                // Saving the now-stale draft must not resurrect T1.
+                repository.upsert(
+                    staleDraft.copy(category = "Food", note = "Edited while syncing"),
+                )
+
+                val row = dao.getAll().single()
+                assertEquals(TRANSACTED_AT_AFTER, row.transactedAtEpochMillis)
+                assertEquals("Food", row.category)
+                assertEquals("Edited while syncing", row.note)
+                assertEquals(1_000L, row.reviewedAtEpochMillis)
             }
         }
 
@@ -904,5 +1006,7 @@ class SyncFoundationDataPathTest {
 
     private companion object {
         const val ACCESS_URL = "https://user:password@bridge.simplefin.org/simplefin"
+        const val TRANSACTED_AT_BEFORE = 1_766_059_200_000L
+        const val TRANSACTED_AT_AFTER = 1_766_145_600_000L
     }
 }
