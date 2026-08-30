@@ -3,12 +3,10 @@ package com.dwk.flowmoney
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -95,11 +93,11 @@ class InsightsUiTest {
                 "Spending timeline for July 2026. Total \$12.50. Peak \$12.50.",
             ).assertIsDisplayed()
         composeRule
-            .onNodeWithTag("insight_day_2026-07-10")
+            .onNodeWithTag(SELECTED_BUCKET)
             .performClick()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
         composeRule
-            .onNodeWithTag("insight_day_2026-07-11")
+            .onNodeWithTag(OTHER_BUCKET)
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Not selected"))
         composeRule
             .onNodeWithTag("insight_category_food")
@@ -109,24 +107,23 @@ class InsightsUiTest {
     }
 
     @Test
-    fun canvasTapSelectsTheDayAtItsTapCoordinate() {
+    fun tappingABarSelectsThatBucket() {
         setScreen(uiState = populatedState())
 
-        composeRule.onNodeWithTag("spending_timeline_chart").performTouchInput {
-            click(Offset(right - 1f, center.y))
-        }
+        composeRule.onNodeWithTag(OTHER_BUCKET).performClick()
 
         composeRule
-            .onNodeWithTag("insight_day_2026-07-11")
+            .onNodeWithTag(OTHER_BUCKET)
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
+        composeRule
+            .onNodeWithTag(SELECTED_BUCKET)
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Not selected"))
     }
 
     @Test
     fun verticalSwipeOverTimelineScrollsInsightsWithoutScrubbingSelection() {
         setScreen(uiState = scrollingState())
-        composeRule.onNodeWithTag("spending_timeline_chart").performTouchInput {
-            click(Offset(1f, center.y))
-        }
+        composeRule.onNodeWithTag(SELECTED_BUCKET).performClick()
         val categoryTopBeforeSwipe =
             composeRule
                 .onNodeWithTag("category_breakdown_chart")
@@ -142,10 +139,10 @@ class InsightsUiTest {
                 .boundsInRoot.top
         assertTrue("Insights list should scroll from a swipe over the chart", categoryTopAfterSwipe < categoryTopBeforeSwipe)
         composeRule
-            .onNodeWithTag("insight_day_2026-07-10")
+            .onNodeWithTag(SELECTED_BUCKET)
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
         composeRule
-            .onNodeWithTag("insight_day_2026-07-11")
+            .onNodeWithTag(OTHER_BUCKET)
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Not selected"))
     }
 
@@ -170,7 +167,7 @@ class InsightsUiTest {
     fun drillDownExcludesSameDayTransfersAndGroupsUnreviewedNormalSpendingUnderOther() {
         setScreen(uiState = reportingState())
 
-        composeRule.onNodeWithTag("insight_day_2026-07-10").performClick()
+        composeRule.onNodeWithTag(SELECTED_BUCKET).performClick()
         composeRule
             .onNodeWithTag("insights_list")
             .performScrollToNode(hasTestTag("insight_transaction_tx-food"))
@@ -250,7 +247,7 @@ class InsightsUiTest {
             chartRangeMode = ChartRangeMode.Month,
             selectedMonth = YearMonth.of(2026, 7),
             availableMonths = listOf(YearMonth.of(2026, 7)),
-            dailySpending = listOf(DailySpend(DAY, 1_250), DailySpend(ZERO_DAY, 0)),
+            dailySpending = monthDailySpending(DAY to 1_250L),
             categoryTotals = listOf(CategoryTotal("Food", 1_250)),
         )
     }
@@ -299,7 +296,7 @@ class InsightsUiTest {
             chartRangeMode = ChartRangeMode.Month,
             selectedMonth = YearMonth.of(2026, 7),
             availableMonths = listOf(YearMonth.of(2026, 7)),
-            dailySpending = listOf(DailySpend(DAY, 1_750)),
+            dailySpending = monthDailySpending(DAY to 1_750L),
             categoryTotals = DashboardAnalytics.categoryTotals(transactions),
             pendingReviewSummary = DashboardAnalytics.unreviewedSpendingSummary(transactions),
         )
@@ -327,19 +324,34 @@ class InsightsUiTest {
             chartRangeMode = ChartRangeMode.Month,
             selectedMonth = YearMonth.of(2026, 7),
             availableMonths = listOf(YearMonth.of(2026, 7)),
-            dailySpending = listOf(DailySpend(DAY, 3_000), DailySpend(ZERO_DAY, 0)),
+            dailySpending = monthDailySpending(DAY to 3_000L),
             categoryTotals = listOf(CategoryTotal("Food", 3_000)),
         )
     }
 
+    /**
+     * Month mode charts a full day-per-day list for the range, exactly like
+     * [DashboardAnalytics.dailySpending] builds it, so [DashboardAnalytics.spendBuckets] chunks it
+     * into the same weeks production shows.
+     */
+    private fun monthDailySpending(vararg spend: Pair<LocalDate, Long>): List<DailySpend> {
+        val byDate = spend.toMap()
+        return generateSequence(RANGE.startInclusive) { date ->
+            date.plusDays(1).takeIf { it.isBefore(RANGE.endExclusive) }
+        }.map { date -> DailySpend(date, byDate[date] ?: 0L) }.toList()
+    }
+
     private companion object {
         val DAY: LocalDate = LocalDate.of(2026, 7, 10)
-        val ZERO_DAY: LocalDate = LocalDate.of(2026, 7, 11)
         val RANGE =
             DashboardDateRange(
                 startInclusive = LocalDate.of(2026, 7, 1),
                 endExclusive = LocalDate.of(2026, 8, 1),
                 label = "July 2026",
             )
+
+        /** July 10 falls in the Jul 8-14 chunk of a month-mode timeline. */
+        const val SELECTED_BUCKET = "insight_bucket_2026-07-08"
+        const val OTHER_BUCKET = "insight_bucket_2026-07-15"
     }
 }

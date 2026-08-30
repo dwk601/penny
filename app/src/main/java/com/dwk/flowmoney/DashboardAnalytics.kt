@@ -4,6 +4,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 enum class ChartRangeMode(
     val label: String,
@@ -37,6 +39,14 @@ data class DashboardMetrics(
 
 data class DailySpend(
     val date: LocalDate,
+    val cents: Long,
+)
+
+data class SpendBucket(
+    val key: String,
+    val label: String,
+    val startInclusive: LocalDate,
+    val endExclusive: LocalDate,
     val cents: Long,
 )
 
@@ -117,6 +127,43 @@ object DashboardAnalytics {
         )
     }
 
+    fun spendBuckets(
+        dailySpending: List<DailySpend>,
+        mode: ChartRangeMode,
+        range: DashboardDateRange,
+    ): List<SpendBucket> =
+        when (mode) {
+            ChartRangeMode.Week ->
+                dailySpending.map { day ->
+                    SpendBucket(
+                        key = day.date.toString(),
+                        label = day.date.format(WeekBucketLabelFormatter),
+                        startInclusive = day.date,
+                        endExclusive = minOf(day.date.plusDays(1), range.endExclusive),
+                        cents = day.cents,
+                    )
+                }
+
+            ChartRangeMode.Month ->
+                dailySpending.chunked(7).map { chunk ->
+                    val start = chunk.first().date
+                    val endInclusive = chunk.last().date
+                    val label =
+                        if (chunk.size == 1) {
+                            start.format(MonthDayLabelFormatter)
+                        } else {
+                            "${start.format(MonthDayLabelFormatter)}–${endInclusive.dayOfMonth}"
+                        }
+                    SpendBucket(
+                        key = start.toString(),
+                        label = label,
+                        startInclusive = start,
+                        endExclusive = minOf(endInclusive.plusDays(1), range.endExclusive),
+                        cents = chunk.sumOf { it.cents },
+                    )
+                }
+        }
+
     fun dailySpending(
         transactions: List<Transaction>,
         range: DashboardDateRange,
@@ -193,5 +240,8 @@ internal fun Transaction.localDate(zoneId: ZoneId = ZoneId.systemDefault()): Loc
         .ofEpochMilli(occurredAtEpochMillis)
         .atZone(zoneId)
         .toLocalDate()
+
+private val WeekBucketLabelFormatter = DateTimeFormatter.ofPattern("EEE d", Locale.US)
+private val MonthDayLabelFormatter = DateTimeFormatter.ofPattern("MMM d", Locale.US)
 
 private fun java.time.Month.displayName(): String = getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.US)

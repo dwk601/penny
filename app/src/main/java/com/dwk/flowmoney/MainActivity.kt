@@ -28,13 +28,11 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -66,7 +64,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -111,6 +108,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -122,21 +120,14 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathMeasure
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -1936,6 +1927,10 @@ internal fun AdaptiveFlowMoneyShell(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+internal val LocalTopAppBarScrollBehavior =
+    staticCompositionLocalOf<TopAppBarScrollBehavior?> { null }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FlowMoneyScaffold(
     selectedTab: DashboardTab,
@@ -1952,6 +1947,7 @@ private fun FlowMoneyScaffold(
     content: @Composable (PaddingValues) -> Unit,
 ) {
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    CompositionLocalProvider(LocalTopAppBarScrollBehavior provides scrollBehavior) {
     Scaffold(
         modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
@@ -2012,6 +2008,7 @@ private fun FlowMoneyScaffold(
             },
         content = content,
     )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -3001,43 +2998,30 @@ private fun TransactionsPage(
         )
     }
 
-    Box(modifier = modifier) {
+    val topBar = LocalTopAppBarScrollBehavior.current
+    LaunchedEffect(viewMode) {
         if (viewMode == TransactionViewMode.Map) {
-            Column(
-                modifier =
-                    Modifier
-                        .widthIn(max = 720.dp)
-                        .fillMaxSize()
-                        .align(Alignment.TopCenter),
-            ) {
-                Column(
-                    modifier = Modifier.padding(PagePadding),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    RecentTransactionsHeader(
-                        title = "Transactions",
-                        count = filteredTransactions.size,
-                        detail = headerDetail,
-                    )
-                    filterBar()
-                }
-                TransactionMap(
-                    transactions = filteredTransactions,
-                    geocoder = geocoder,
-                    onEdit = onEdit,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                )
-            }
-        } else {
+            topBar?.state?.heightOffset = 0f
+            topBar?.state?.contentOffset = 0f
+        }
+    }
+
+    Box(modifier = modifier) {
         LazyColumn(
             modifier =
                 Modifier
                     .widthIn(max = 720.dp)
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .align(Alignment.TopCenter)
                     .testTag("transactions_list"),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PagePadding,
+            contentPadding =
+                PaddingValues(
+                    start = 20.dp,
+                    top = 16.dp,
+                    end = 20.dp,
+                    bottom = 16.dp + 88.dp,
+                ),
         ) {
             item {
                 RecentTransactionsHeader(
@@ -3049,6 +3033,20 @@ private fun TransactionsPage(
             item {
                 filterBar()
             }
+            if (viewMode == TransactionViewMode.Map) {
+                item {
+                    TransactionMap(
+                        transactions = filteredTransactions,
+                        geocoder = geocoder,
+                        onEdit = onEdit,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .fillParentMaxHeight(0.72f)
+                                .heightIn(min = 320.dp),
+                    )
+                }
+            } else {
             if (sortedTransactions.isEmpty()) {
                 item {
                     EmptyState(
@@ -3108,7 +3106,7 @@ private fun TransactionsPage(
                     }
                 }
             }
-        }
+            }
         }
     }
 }
@@ -3550,28 +3548,35 @@ private fun InsightsPage(
     onReview: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var selectedDay by remember { mutableStateOf<LocalDate?>(null) }
+    var selectedBucketKey by remember { mutableStateOf<String?>(null) }
     var selectedCategory by remember { mutableStateOf<String?>(null) }
+    val buckets =
+        remember(dailySpending, chartRangeMode, dateRange) {
+            DashboardAnalytics.spendBuckets(dailySpending, chartRangeMode, dateRange)
+        }
+    val totalSpentCents = remember(dailySpending) { dailySpending.sumOf { it.cents } }
 
-    LaunchedEffect(dailySpending, categoryTotals) {
-        if (selectedDay != null && dailySpending.none { it.date == selectedDay }) selectedDay = null
+    LaunchedEffect(buckets, categoryTotals) {
+        if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
         if (selectedCategory != null && categoryTotals.none { it.category == selectedCategory }) selectedCategory = null
     }
 
-    val selectedDailySpend =
-        remember(dailySpending, selectedDay) {
-            selectedDay?.let { day -> dailySpending.firstOrNull { it.date == day } }
+    val selectedBucket =
+        remember(buckets, selectedBucketKey) {
+            selectedBucketKey?.let { key -> buckets.firstOrNull { it.key == key } }
         }
     val selectedCategoryTotal =
         remember(categoryTotals, selectedCategory) {
             selectedCategory?.let { category -> categoryTotals.firstOrNull { it.category == category } }
         }
     val selectedTransactions =
-        remember(rangeTransactions, selectedDailySpend, selectedCategoryTotal) {
+        remember(rangeTransactions, selectedBucket, selectedCategoryTotal) {
             when {
-                selectedDailySpend != null -> {
+                selectedBucket != null -> {
                     rangeTransactions.filter {
-                        it.reportingSpendingCategory() != null && it.localDate() == selectedDailySpend.date
+                        it.reportingSpendingCategory() != null &&
+                            !it.localDate().isBefore(selectedBucket.startInclusive) &&
+                            it.localDate().isBefore(selectedBucket.endExclusive)
                     }
                 }
 
@@ -3587,10 +3592,10 @@ private fun InsightsPage(
             }
         }
     val insightTitle =
-        selectedDailySpend?.let { it.date.format(ShortDateFormatter) }
+        selectedBucket?.label
             ?: selectedCategoryTotal?.let { "${it.category} spending" }
     val insightAmount =
-        selectedDailySpend?.let { MoneyFormatter.formatUsd(it.cents) }
+        selectedBucket?.let { MoneyFormatter.formatUsd(it.cents) }
             ?: selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
 
     Box(modifier = modifier) {
@@ -3604,6 +3609,13 @@ private fun InsightsPage(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PagePadding,
         ) {
+            item {
+                InsightsHeroSummary(
+                    totalCents = totalSpentCents,
+                    range = dateRange,
+                    dayCount = dailySpending.size,
+                )
+            }
             item {
                 DateRangeControls(
                     mode = chartRangeMode,
@@ -3626,29 +3638,30 @@ private fun InsightsPage(
                 item { InsightsEmptyState(onAddTransaction = onAddTransaction) }
             } else {
                 item {
-                    SpendingTimelineCard(
-                        dailySpending = dailySpending,
-                        range = dateRange,
-                        selectedDay = selectedDay,
-                        onDaySelected = { day ->
-                            selectedDay = day
+                    SpendingBucketsChart(
+                        buckets = buckets,
+                        selectedKey = selectedBucketKey,
+                        onSelect = { bucket ->
+                            selectedBucketKey = bucket.key
                             selectedCategory = null
                         },
+                        range = dateRange,
                     )
                 }
                 item {
-                    CategoryBreakdownCard(
+                    CategoryRankList(
                         totals = categoryTotals,
+                        totalSpentCents = totalSpentCents,
                         selectedCategory = selectedCategory,
-                        onCategorySelected = { category ->
+                        onSelect = { category ->
                             selectedCategory = category
-                            selectedDay = null
+                            selectedBucketKey = null
                         },
                     )
                 }
                 if (insightTitle != null && insightAmount != null) {
                     item {
-                        InsightSelectionHeader(
+                        InsightsSelectionHeader(
                             title = insightTitle,
                             amount = insightAmount,
                             isEmpty = selectedTransactions.isEmpty(),
@@ -5044,228 +5057,185 @@ private fun SummaryPill(
 }
 
 @Composable
-private fun SpendingTimelineCard(
-    dailySpending: List<DailySpend>,
+private fun InsightsHeroSummary(
+    totalCents: Long,
     range: DashboardDateRange,
-    selectedDay: LocalDate?,
-    onDaySelected: (LocalDate) -> Unit,
+    dayCount: Int,
 ) {
-    val values = remember(dailySpending) { dailySpending.map { it.cents } }
-    val total = remember(values) { values.sum() }
-    val peak = remember(values) { values.maxOrNull() ?: 0L }
-    val scalePeak = peak.coerceAtLeast(1L)
-    val selectedIndex = dailySpending.indexOfFirst { it.date == selectedDay }
-    val lineColor = MaterialTheme.colorScheme.primary
+    val averageCents = if (dayCount <= 0) 0L else totalCents / dayCount
+    val heading =
+        if (!range.startInclusive.plusDays(7).isBefore(range.endExclusive)) {
+            "Spent this week"
+        } else {
+            "Spent this month"
+        }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(text = heading, style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = MoneyFormatter.formatUsd(totalCents),
+            style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
+            modifier = Modifier.testTag("insights_total_amount"),
+        )
+        Text(
+            text = "${range.label} · avg ${MoneyFormatter.formatUsd(averageCents)}/day",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag("insights_total_caption"),
+        )
+    }
+}
+
+/**
+ * Hit targets, stated honestly: at the 360 dp reference width, [PagePadding]
+ * (`horizontal = 20.dp`) leaves 320 dp, so a 7-bucket week row gives cells of
+ * ≈44 × 140 dp — 4 dp under the 48 dp width guidance. This is a deliberate
+ * deviation: the cell is full chart height, the whole cell (not just the drawn
+ * bar) is the target, [Arrangement.spacedBy] is kept at 2.dp to maximise it,
+ * and every cell carries `selectable` semantics so TalkBack and keyboard focus
+ * reach it independently of width. Month buckets (4–5 cells, ≈62 dp) clear 48 dp.
+ */
+@Composable
+private fun SpendingBucketsChart(
+    buckets: List<SpendBucket>,
+    selectedKey: String?,
+    onSelect: (SpendBucket) -> Unit,
+    range: DashboardDateRange,
+) {
+    val total = remember(buckets) { buckets.sumOf { it.cents } }
+    val peak = remember(buckets) { buckets.maxOfOrNull { it.cents } ?: 0L }
+    val average = remember(buckets, total) { if (buckets.isEmpty()) 0L else total / buckets.size }
     val selectionColor = LocalFinanceColors.current.expense
-    val chartSurface = MaterialTheme.colorScheme.surfaceContainerLow
-    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val unselectedColor = MaterialTheme.colorScheme.surfaceContainerHigh
     val chartSummary =
         buildString {
             append("Spending timeline for ${range.label}. Total ${MoneyFormatter.formatUsd(total)}. ")
             append("Peak ${MoneyFormatter.formatUsd(peak)}.")
-            selectedDay?.let { day ->
-                val amount = dailySpending.firstOrNull { it.date == day }?.cents ?: 0
-                append(" Selected ${day.format(ShortDateFormatter)}, ${MoneyFormatter.formatUsd(amount)}.")
-            }
         }
+    val firstIndex = 0
+    val lastIndex = buckets.lastIndex
+    val middleIndex = if (buckets.isEmpty()) 0 else buckets.size / 2
 
-    fun selectAtX(
-        x: Float,
-        width: Float,
-    ) {
-        if (dailySpending.isEmpty() || width <= 0f) return
-        val index =
-            if (dailySpending.lastIndex == 0) {
-                0
-            } else {
-                ((x.coerceIn(0f, width) / width) * dailySpending.lastIndex).roundToInt()
-            }
-        onDaySelected(dailySpending[index.coerceIn(0, dailySpending.lastIndex)].date)
-    }
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        shape = MaterialTheme.shapes.medium,
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    Column(
         modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Spending timeline", fontWeight = FontWeight.SemiBold)
-                    Text(range.label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                }
-                Text(
-                    text = MoneyFormatter.formatUsd(total),
-                    color = selectionColor,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            key(dailySpending) {
-                var startChartAnimation by remember { mutableStateOf(false) }
-                val drawProgress by animateFloatAsState(
-                    targetValue = if (startChartAnimation) 1f else 0f,
-                    animationSpec =
-                        tween(
-                            durationMillis = PennyMotion.DurationLong,
-                            easing = PennyMotion.StandardEasing,
-                        ),
-                    label = "Spending timeline draw progress",
-                )
-                LaunchedEffect(Unit) { startChartAnimation = true }
-
-                Canvas(
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .height(84.dp)
-                            .semantics { contentDescription = chartSummary }
-                            .testTag("spending_timeline_chart")
-                            .pointerInput(dailySpending, onDaySelected) {
-                                detectTapGestures { offset -> selectAtX(offset.x, size.width.toFloat()) }
-                            },
-                ) {
-                    val topPadding = 8.dp.toPx()
-                    val bottomPadding = 12.dp.toPx()
-                    val chartHeight = (size.height - topPadding - bottomPadding).coerceAtLeast(0f)
-                    val step = if (values.size > 1) size.width / (values.size - 1) else 0f
-                    repeat(3) { index ->
-                        val y = topPadding + chartHeight * (index / 2f)
-                        drawLine(
-                            color = gridColor,
-                            start = Offset(0f, y),
-                            end = Offset(size.width, y),
-                            strokeWidth = 1.dp.toPx(),
-                        )
-                    }
-
-                    val points =
-                        values.mapIndexed { index, cents ->
-                            val x = if (values.size == 1) size.width / 2f else step * index
-                            val scaledValue = (cents.toFloat() / scalePeak.toFloat()).coerceIn(0f, 1f)
-                            val y = topPadding + (1f - scaledValue) * chartHeight
-                            Offset(x, y)
-                        }
-                    if (points.size > 1 && drawProgress > 0f) {
-                        val fullPath =
-                            Path().apply {
-                                moveTo(points.first().x, points.first().y)
-                                points.drop(1).forEach { point -> lineTo(point.x, point.y) }
-                            }
-                        val pathMeasure = PathMeasure().apply { setPath(fullPath, false) }
-                        val trimmedPath = Path()
-                        pathMeasure.getSegment(
-                            startDistance = 0f,
-                            stopDistance = pathMeasure.length * drawProgress.coerceIn(0f, 1f),
-                            destination = trimmedPath,
-                            startWithMoveTo = true,
-                        )
-                        drawPath(
-                            path = trimmedPath,
-                            color = lineColor,
-                            style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round),
-                        )
-                    }
-                    val pointScale = drawProgress.coerceIn(0f, 1f)
-                    points.forEachIndexed { index, point ->
-                        val selected = index == selectedIndex
-                        drawCircle(
-                            color = chartSurface,
-                            radius = (if (selected) 7.dp.toPx() else 4.dp.toPx()) * pointScale,
-                            center = point,
-                        )
-                        drawCircle(
-                            color = if (selected) selectionColor else lineColor,
-                            radius = (if (selected) 4.dp.toPx() else 2.5.dp.toPx()) * pointScale,
-                            center = point,
-                        )
-                    }
-                }
-            }
-            val firstDate = dailySpending.firstOrNull()?.date ?: range.startInclusive
-            val lastDate = dailySpending.lastOrNull()?.date ?: range.endExclusive.minusDays(1)
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(firstDate.format(ShortDateFormatter), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                Text("Peak ${MoneyFormatter.formatUsd(peak)}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                Text(lastDate.format(ShortDateFormatter), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-            }
-            Text("Select a day", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelLarge)
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.selectableGroup(),
-            ) {
-                items(dailySpending, key = { it.date }) { day ->
-                    InsightDayOption(
-                        day = day,
-                        selected = selectedDay == day.date,
-                        onClick = { onDaySelected(day.date) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun InsightDayOption(
-    day: DailySpend,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    val amount = MoneyFormatter.formatUsd(day.cents)
-    Box(
-        modifier =
-            Modifier
-                .testTag("insight_day_${day.date}")
-                .heightIn(min = 48.dp)
-                .selectable(
-                    selected = selected,
-                    role = Role.RadioButton,
-                    onClick = onClick,
-                ).semantics(mergeDescendants = true) {
-                    contentDescription = "${day.date.format(ShortDateFormatter)}, $amount"
-                    stateDescription = if (selected) "Selected" else "Not selected"
-                }.padding(horizontal = 2.dp, vertical = 4.dp),
-        contentAlignment = Alignment.Center,
-    ) {
+        Text("When you spent", fontWeight = FontWeight.SemiBold)
         Box(
             modifier =
                 Modifier
-                    .clip(MaterialTheme.shapes.small)
-                    .background(
-                        if (selected) {
-                            MaterialTheme.colorScheme.secondaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.surfaceContainerHigh
-                        },
-                    ).padding(horizontal = 10.dp, vertical = 5.dp),
+                    .fillMaxWidth()
+                    .height(140.dp)
+                    .semantics { contentDescription = chartSummary }
+                    .testTag("spending_timeline_chart"),
         ) {
-            Text(
-                text = "${day.date.format(ShortDateFormatter)} $amount",
-                color =
-                    if (selected) {
-                        MaterialTheme.colorScheme.onSecondaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-            )
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .selectableGroup(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                buckets.forEach { bucket ->
+                    val selected = selectedKey == bucket.key
+                    val amount = MoneyFormatter.formatUsd(bucket.cents)
+                    val fraction =
+                        when {
+                            bucket.cents <= 0L || peak <= 0L -> 0f
+                            else -> (bucket.cents.toFloat() / peak.toFloat()).coerceIn(0f, 1f)
+                        }
+                    Box(
+                        modifier =
+                            Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .testTag("insight_bucket_${bucket.key}")
+                                .selectable(
+                                    selected = selected,
+                                    role = Role.RadioButton,
+                                    onClick = { onSelect(bucket) },
+                                ).semantics(mergeDescendants = true) {
+                                    contentDescription = "${bucket.label}, $amount"
+                                    stateDescription = if (selected) "Selected" else "Not selected"
+                                },
+                    ) {
+                        Box(
+                            modifier =
+                                Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(horizontal = 2.dp)
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (bucket.cents <= 0L) {
+                                            Modifier.height(2.dp)
+                                        } else {
+                                            Modifier.fillMaxHeight(fraction)
+                                        },
+                                    ).clip(MaterialTheme.shapes.extraSmall)
+                                    .background(if (selected) selectionColor else unselectedColor),
+                        )
+                    }
+                }
+            }
+            if (peak > 0L && buckets.isNotEmpty()) {
+                val averageFraction = (average.toFloat() / peak.toFloat()).coerceIn(0f, 1f)
+                if (averageFraction > 0f) {
+                    Box(
+                        modifier =
+                            Modifier
+                                .align(Alignment.BottomStart)
+                                .fillMaxWidth()
+                                .fillMaxHeight(averageFraction),
+                    ) {
+                        Box(
+                            modifier =
+                                Modifier
+                                    .align(Alignment.TopCenter)
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(MaterialTheme.colorScheme.outlineVariant),
+                        )
+                    }
+                }
+            }
+        }
+        if (buckets.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                buckets.forEachIndexed { index, bucket ->
+                    val showLabel =
+                        index == firstIndex ||
+                            index == lastIndex ||
+                            (index == middleIndex && middleIndex != firstIndex && middleIndex != lastIndex)
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.TopCenter) {
+                        if (showLabel) {
+                            Text(
+                                text = bucket.label,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CategoryBreakdownCard(
+private fun CategoryRankList(
     totals: List<CategoryTotal>,
+    totalSpentCents: Long,
     selectedCategory: String?,
-    onCategorySelected: (String) -> Unit,
+    onSelect: (String) -> Unit,
 ) {
-    val peak = totals.maxOfOrNull { it.cents }?.coerceAtLeast(1L) ?: 1L
     val chartColors =
         listOf(
             MaterialTheme.colorScheme.primary,
@@ -5273,160 +5243,94 @@ private fun CategoryBreakdownCard(
             MaterialTheme.colorScheme.secondary,
             LocalFinanceColors.current.expense,
         )
-    val chartSelectionOutline = MaterialTheme.colorScheme.onSurface
     val chartSummary =
         totals.joinToString(
             prefix = "Top categories. ",
             separator = ". ",
         ) { "${it.category} ${MoneyFormatter.formatUsd(it.cents)}" }
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        shape = MaterialTheme.shapes.medium,
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier.fillMaxWidth(),
+    Column(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .semantics { contentDescription = chartSummary }
+                .testTag("category_breakdown_chart"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        Text("Where it went", fontWeight = FontWeight.SemiBold)
         Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth().selectableGroup(),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("Top categories", fontWeight = FontWeight.SemiBold)
-            if (totals.isEmpty()) {
-                Text(
-                    text = "Add your first transaction to start tracking where money goes.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            } else {
-                key(totals) {
-                    var startChartAnimation by remember { mutableStateOf(false) }
-                    val growProgress by animateFloatAsState(
-                        targetValue = if (startChartAnimation) 1f else 0f,
-                        animationSpec =
-                            tween(
-                                durationMillis = PennyMotion.DurationLong,
-                                easing = PennyMotion.StandardEasing,
-                            ),
-                        label = "Category bars grow progress",
-                    )
-                    LaunchedEffect(Unit) { startChartAnimation = true }
-
-                    Canvas(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .height(56.dp)
-                                .semantics { contentDescription = chartSummary }
-                                .testTag("category_breakdown_chart"),
-                    ) {
-                        val requestedGap = 10.dp.toPx()
-                        val gap =
-                            if (totals.size > 1) {
-                                requestedGap.coerceAtMost(size.width / (totals.size - 1))
-                            } else {
-                                0f
-                            }
-                        val barWidth = ((size.width - gap * (totals.size - 1)) / totals.size).coerceAtLeast(0f)
-                        totals.forEachIndexed { index, entry ->
-                            val fullHeight =
-                                (entry.cents.toFloat() / peak.toFloat())
-                                    .coerceIn(0f, 1f) * size.height
-                            val barHeight = fullHeight * growProgress.coerceIn(0f, 1f)
-                            if (barWidth <= 0f || barHeight <= 0f) return@forEachIndexed
-                            val left = index * (barWidth + gap)
-                            val topLeft = Offset(left, size.height - barHeight)
-                            val barSize = Size(barWidth, barHeight)
-                            drawRoundRect(
-                                color = chartColors[index % chartColors.size],
-                                topLeft = topLeft,
-                                size = barSize,
-                                cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
-                            )
-                            if (selectedCategory == entry.category) {
-                                drawRoundRect(
-                                    color = chartSelectionOutline,
-                                    topLeft = topLeft,
-                                    size = barSize,
-                                    cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx()),
-                                    style = Stroke(width = 2.dp.toPx()),
-                                )
-                            }
-                        }
+            totals.forEachIndexed { index, entry ->
+                val selected = selectedCategory == entry.category
+                val amount = MoneyFormatter.formatUsd(entry.cents)
+                val fraction =
+                    if (totalSpentCents <= 0L) {
+                        0f
+                    } else {
+                        (entry.cents.toFloat() / totalSpentCents.toFloat()).coerceIn(0f, 1f)
                     }
-                }
-                // ponytail: legend tap target is enough; custom bar hit-testing can wait.
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                val sharePercent =
+                    if (totalSpentCents <= 0L) {
+                        0
+                    } else {
+                        ((entry.cents * 100.0) / totalSpentCents).roundToInt()
+                    }
+                Column(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .background(
+                                if (selected) {
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                                } else {
+                                    Color.Transparent
+                                },
+                            ).testTag("insight_category_${entry.category.toCategoryChipTagSuffix()}")
+                            .selectable(
+                                selected = selected,
+                                role = Role.RadioButton,
+                                onClick = { onSelect(entry.category) },
+                            ).semantics(mergeDescendants = true) {
+                                contentDescription = "${entry.category}, $amount"
+                                stateDescription = if (selected) "Selected" else "Not selected"
+                            }.padding(horizontal = 8.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
-                    maxItemsInEachRow = 2,
-                    modifier = Modifier.fillMaxWidth().selectableGroup(),
                 ) {
-                    totals.forEachIndexed { index, entry ->
-                        val selected = selectedCategory == entry.category
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = entry.category,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = amount,
+                            style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "$sharePercent%",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                    Box(modifier = Modifier.fillMaxWidth().height(4.dp)) {
                         Box(
                             modifier =
                                 Modifier
-                                    .testTag("insight_category_${entry.category.toCategoryChipTagSuffix()}")
-                                    .weight(1f)
-                                    .heightIn(min = 48.dp)
-                                    .selectable(
-                                        selected = selected,
-                                        role = Role.RadioButton,
-                                        onClick = { onCategorySelected(entry.category) },
-                                    ).semantics(mergeDescendants = true) {
-                                        contentDescription = "${entry.category}, ${MoneyFormatter.formatUsd(entry.cents)}"
-                                        stateDescription = if (selected) "Selected" else "Not selected"
-                                    }.padding(vertical = 3.dp),
-                            contentAlignment = Alignment.CenterStart,
-                        ) {
-                            Column(
-                                modifier =
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clip(MaterialTheme.shapes.small)
-                                        .background(
-                                            if (selected) {
-                                                MaterialTheme.colorScheme.secondaryContainer
-                                            } else {
-                                                Color.Transparent
-                                            },
-                                        ).padding(horizontal = 6.dp, vertical = 4.dp),
-                            ) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Box(
-                                        modifier =
-                                            Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
-                                                .background(chartColors[index % chartColors.size]),
-                                    )
-                                    Text(
-                                        text = entry.category,
-                                        color =
-                                            if (selected) {
-                                                MaterialTheme.colorScheme.onSecondaryContainer
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                Text(
-                                    text = MoneyFormatter.formatUsd(entry.cents),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    textAlign = TextAlign.End,
-                                    maxLines = 1,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
+                                    .fillMaxWidth(fraction)
+                                    .height(4.dp)
+                                    .clip(CircleShape)
+                                    .background(chartColors[index % chartColors.size]),
+                        )
                     }
                 }
             }
@@ -5435,37 +5339,29 @@ private fun CategoryBreakdownCard(
 }
 
 @Composable
-private fun InsightSelectionHeader(
+private fun InsightsSelectionHeader(
     title: String,
     amount: String,
     isEmpty: Boolean,
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        shape = MaterialTheme.shapes.medium,
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    Column(
         modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text("Selected insight", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelLarge)
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                Text(
-                    amount,
-                    color = LocalFinanceColors.current.expense,
-                    style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
-                )
-            }
-            if (isEmpty) {
-                Text(
-                    "No matching expense transactions.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text(
+                amount,
+                color = LocalFinanceColors.current.expense,
+                style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+            )
+        }
+        if (isEmpty) {
+            Text(
+                "No matching expense transactions.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }
@@ -5874,15 +5770,6 @@ internal fun TransactionEditor(
                 isExpense = draft.isExpense,
             )
         }
-    val amountSuggestions =
-        remember(suggestionHistory, draft.merchant, draft.category, draft.isExpense) {
-            TransactionSuggestions.amountSuggestions(
-                history = suggestionHistory,
-                merchant = draft.merchant,
-                category = draft.category,
-                isExpense = draft.isExpense,
-            )
-        }
     val rankedCategories =
         remember(suggestionHistory, draft.isExpense) {
             suggestionHistory.categories(draft.isExpense)
@@ -6193,34 +6080,7 @@ internal fun TransactionEditor(
                     }
                 } else {
                     item {
-                        AmountPad(
-                            amount = amountInput,
-                            isExpense = draft.isExpense,
-                            onKey = ::applyAmountKey,
-                        )
-                        if (amountSuggestions.isNotEmpty()) {
-                            Spacer(Modifier.height(10.dp))
-                            SectionLabel("Suggested amounts")
-                            Spacer(Modifier.height(8.dp))
-                            FlowRow(
-                                modifier = Modifier.selectableGroup(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                amountSuggestions.forEachIndexed { index, suggestion ->
-                                    SuggestionChip(
-                                        label = "${MoneyFormatter.formatUsd(suggestion.cents)} · ${suggestion.source.shortLabel()}",
-                                        selected = MoneyFormatter.parseAmountToCents(amountInput).absoluteValue == suggestion.cents,
-                                        testTag = "amount_suggestion_$index",
-                                        onClick = {
-                                            val suggestedAmount = MoneyFormatter.formatAmountText(suggestion.cents)
-                                            amountInput = suggestedAmount
-                                            onDraftChange(draft.copy(amount = suggestedAmount))
-                                        },
-                                    )
-                                }
-                            }
-                        }
+                        AmountPad(amount = amountInput, isExpense = draft.isExpense, onKey = ::applyAmountKey)
                     }
                     item {
                         TransferStatusToggle(
@@ -6878,14 +6738,6 @@ private fun flowTextFieldColors() =
         unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         cursorColor = MaterialTheme.colorScheme.primary,
     )
-
-private fun AmountSuggestionSource.shortLabel(): String =
-    when (this) {
-        AmountSuggestionSource.LastMatch -> "Last"
-        AmountSuggestionSource.FrequentMatch -> "Usual"
-        AmountSuggestionSource.Category -> "Category"
-        AmountSuggestionSource.Recent -> "Recent"
-    }
 
 private data class LocationSuggestion(
     val displayName: String,

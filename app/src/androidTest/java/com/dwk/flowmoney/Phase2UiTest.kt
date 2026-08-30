@@ -83,7 +83,8 @@ class Phase2UiTest {
     @Test
     fun insightSelectorsExpose48dpSelectableTargets() {
         setScreen(DashboardTab.Insights)
-        listOf("insight_day_2026-07-10", "insight_category_food").forEach { tag ->
+        // Week mode buckets one day per cell, so the bucket key is the day itself.
+        listOf("insight_bucket_2026-07-10", "insight_category_food").forEach { tag ->
             composeRule.onNodeWithTag("insights_list").performScrollToNode(hasTestTag(tag))
             val selector = composeRule.onNodeWithTag(tag).assert(
                 SemanticsMatcher.expectValue(SemanticsProperties.Selected, false),
