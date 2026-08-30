@@ -30,18 +30,23 @@ import kotlin.math.abs
 @RunWith(AndroidJUnit4::class)
 class PennyWidgetTypeResourceTest {
     private val semibold = R.font.inter_semibold
+    private val medium = R.font.inter_medium
     private val regular = R.font.inter_regular
 
     @Test
     fun fontFingerprintDistinguishesTheInterFaces() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val semiboldPrint = fontFingerprint(ResourcesCompat.getFont(context, semibold))
+        val mediumPrint = fontFingerprint(ResourcesCompat.getFont(context, medium))
         val regularPrint = fontFingerprint(ResourcesCompat.getFont(context, regular))
         val defaultPrint = fontFingerprint(Typeface.DEFAULT)
 
         // Guards the typeface assertions below from silently passing on identical metrics.
         assertTrue("inter_semibold and inter_regular must differ", semiboldPrint != regularPrint)
+        assertTrue("inter_semibold and inter_medium must differ", semiboldPrint != mediumPrint)
+        assertTrue("inter_medium and inter_regular must differ", mediumPrint != regularPrint)
         assertTrue("inter_semibold must differ from the platform default", semiboldPrint != defaultPrint)
+        assertTrue("inter_medium must differ from the platform default", mediumPrint != defaultPrint)
         assertTrue("inter_regular must differ from the platform default", regularPrint != defaultPrint)
     }
 
@@ -49,11 +54,21 @@ class PennyWidgetTypeResourceTest {
     fun labelsUseInterSemibold() {
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        assertTypeface(context, R.layout.widget_penny_summary, R.id.widget_spent_label, semibold)
         assertTypeface(context, R.layout.widget_penny_compact, R.id.widget_spent_label, semibold)
         assertTypeface(context, R.layout.widget_penny_wide, R.id.widget_spent_label, semibold)
         assertTypeface(context, R.layout.widget_penny_preview, R.id.widget_preview_label, semibold)
-        assertTypeface(context, R.layout.widget_penny_initial, R.id.widget_initial_label, semibold)
+    }
+
+    /**
+     * The two labels with the tightest boxes at font scale 2.0 -- the 110x48dp initial frame and the
+     * 110x110dp summary label sharing a row with the 48dp add button -- step down to Medium.
+     */
+    @Test
+    fun tightestLabelsStepDownToInterMedium() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        assertTypeface(context, R.layout.widget_penny_summary, R.id.widget_spent_label, medium)
+        assertTypeface(context, R.layout.widget_penny_initial, R.id.widget_initial_label, medium)
     }
 
     @Test
