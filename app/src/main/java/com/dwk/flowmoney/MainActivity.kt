@@ -3556,29 +3556,50 @@ private fun InsightsPage(
         }
     val totalSpentCents = remember(dailySpending) { dailySpending.sumOf { it.cents } }
 
-    LaunchedEffect(buckets, categoryTotals) {
-        if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
-        if (selectedCategory != null && categoryTotals.none { it.category == selectedCategory }) selectedCategory = null
-    }
-
     val selectedBucket =
         remember(buckets, selectedBucketKey) {
             selectedBucketKey?.let { key -> buckets.firstOrNull { it.key == key } }
         }
+    val bucketTransactions =
+        remember(rangeTransactions, selectedBucket) {
+            val bucket = selectedBucket ?: return@remember emptyList()
+            rangeTransactions.filter {
+                it.reportingSpendingCategory() != null &&
+                    !it.localDate().isBefore(bucket.startInclusive) &&
+                    it.localDate().isBefore(bucket.endExclusive)
+            }
+        }
+    val visibleCategoryTotals =
+        remember(selectedBucket, bucketTransactions, categoryTotals) {
+            if (selectedBucket == null) {
+                categoryTotals
+            } else {
+                DashboardAnalytics.categoryTotals(bucketTransactions)
+            }
+        }
+    val visibleTotalSpentCents = selectedBucket?.cents ?: totalSpentCents
+
+    LaunchedEffect(buckets, visibleCategoryTotals) {
+        if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
+        if (selectedCategory != null && visibleCategoryTotals.none { it.category == selectedCategory }) {
+            selectedCategory = null
+        }
+    }
+
     val selectedCategoryTotal =
-        remember(categoryTotals, selectedCategory) {
-            selectedCategory?.let { category -> categoryTotals.firstOrNull { it.category == category } }
+        remember(visibleCategoryTotals, selectedCategory) {
+            selectedCategory?.let { category -> visibleCategoryTotals.firstOrNull { it.category == category } }
         }
     val selectedTransactions =
-        remember(rangeTransactions, selectedBucket, selectedCategoryTotal) {
+        remember(rangeTransactions, selectedBucket, selectedCategoryTotal, bucketTransactions) {
             when {
-                selectedBucket != null -> {
-                    rangeTransactions.filter {
-                        it.reportingSpendingCategory() != null &&
-                            !it.localDate().isBefore(selectedBucket.startInclusive) &&
-                            it.localDate().isBefore(selectedBucket.endExclusive)
+                selectedBucket != null && selectedCategoryTotal != null -> {
+                    bucketTransactions.filter {
+                        it.reportingSpendingCategory() == selectedCategoryTotal.category
                     }
                 }
+
+                selectedBucket != null -> bucketTransactions
 
                 selectedCategoryTotal != null -> {
                     rangeTransactions.filter {
@@ -3592,11 +3613,11 @@ private fun InsightsPage(
             }
         }
     val insightTitle =
-        selectedBucket?.label
-            ?: selectedCategoryTotal?.let { "${it.category} spending" }
+        selectedCategoryTotal?.let { "${it.category} spending" }
+            ?: selectedBucket?.label
     val insightAmount =
-        selectedBucket?.let { MoneyFormatter.formatUsd(it.cents) }
-            ?: selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
+        selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
+            ?: selectedBucket?.let { MoneyFormatter.formatUsd(it.cents) }
 
     Box(modifier = modifier) {
         LazyColumn(
@@ -3642,20 +3663,18 @@ private fun InsightsPage(
                         buckets = buckets,
                         selectedKey = selectedBucketKey,
                         onSelect = { bucket ->
-                            selectedBucketKey = bucket.key
-                            selectedCategory = null
+                            selectedBucketKey = if (selectedBucketKey == bucket.key) null else bucket.key
                         },
                         range = dateRange,
                     )
                 }
                 item {
                     CategoryRankList(
-                        totals = categoryTotals,
-                        totalSpentCents = totalSpentCents,
+                        totals = visibleCategoryTotals,
+                        totalSpentCents = visibleTotalSpentCents,
                         selectedCategory = selectedCategory,
                         onSelect = { category ->
-                            selectedCategory = category
-                            selectedBucketKey = null
+                            selectedCategory = if (selectedCategory == category) null else category
                         },
                     )
                 }
@@ -5106,7 +5125,6 @@ private fun SpendingBucketsChart(
 ) {
     val total = remember(buckets) { buckets.sumOf { it.cents } }
     val peak = remember(buckets) { buckets.maxOfOrNull { it.cents } ?: 0L }
-    val average = remember(buckets, total) { if (buckets.isEmpty()) 0L else total / buckets.size }
     val selectionColor = LocalFinanceColors.current.expense
     val unselectedColor = MaterialTheme.colorScheme.surfaceContainerHigh
     val chartSummary =
@@ -5175,27 +5193,6 @@ private fun SpendingBucketsChart(
                                         },
                                     ).clip(MaterialTheme.shapes.extraSmall)
                                     .background(if (selected) selectionColor else unselectedColor),
-                        )
-                    }
-                }
-            }
-            if (peak > 0L && buckets.isNotEmpty()) {
-                val averageFraction = (average.toFloat() / peak.toFloat()).coerceIn(0f, 1f)
-                if (averageFraction > 0f) {
-                    Box(
-                        modifier =
-                            Modifier
-                                .align(Alignment.BottomStart)
-                                .fillMaxWidth()
-                                .fillMaxHeight(averageFraction),
-                    ) {
-                        Box(
-                            modifier =
-                                Modifier
-                                    .align(Alignment.TopCenter)
-                                    .fillMaxWidth()
-                                    .height(1.dp)
-                                    .background(MaterialTheme.colorScheme.outlineVariant),
                         )
                     }
                 }
