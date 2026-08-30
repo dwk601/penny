@@ -14,6 +14,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.time.LocalTime
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
@@ -60,7 +61,7 @@ internal fun isSimpleFinSyncEligible(
 internal class SimpleFinAutomaticSchedulingException(
     cause: Throwable,
 ) : Exception(
-        "Automatic sync frequency was saved, but scheduling could not be updated",
+        "Automatic sync schedule was saved, but scheduling could not be updated",
         cause,
     )
 
@@ -77,9 +78,12 @@ internal class SimpleFinSyncFunctions(
     val deletePendingCredential: suspend () -> Unit,
     val deleteRollbackCredential: suspend () -> Unit,
     val scheduleWork: suspend (Int) -> Unit,
+    val reanchorWork: suspend (Int) -> Unit = scheduleWork,
     val cancelWork: suspend () -> Unit,
     val now: () -> Long,
     val autoCategorize: suspend () -> Unit = {},
+    val readPreferredSyncTime: suspend () -> LocalTime? = { null },
+    val savePreferredSyncTime: suspend (LocalTime?) -> Unit = {},
 )
 
 class SimpleFinSyncRepository internal constructor(
@@ -89,12 +93,21 @@ class SimpleFinSyncRepository internal constructor(
     constructor(context: Context) : this(FlowMoneyDatabase.get(context), productionFunctions(context))
 
     private val mutablePendingConnectionState = MutableStateFlow(SimpleFinPendingConnectionState.UNKNOWN)
+    private val mutablePreferredSyncTime = MutableStateFlow<LocalTime?>(null)
 
     val profile = db.simpleFinDao().observeProfile()
     val pendingConnectionState: StateFlow<SimpleFinPendingConnectionState> = mutablePendingConnectionState.asStateFlow()
+    val preferredSyncTime: StateFlow<LocalTime?> = mutablePreferredSyncTime.asStateFlow()
 
     suspend fun recoverPendingConnection(): SimpleFinPendingConnectionState =
         lifecycleMutex.withLock {
+            try {
+                mutablePreferredSyncTime.value = functions.readPreferredSyncTime()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                mutablePreferredSyncTime.value = null
+            }
             try {
                 val pending = functions.readPendingCredential()
                 val publishedProfile = db.simpleFinDao().getProfile()
@@ -302,7 +315,22 @@ class SimpleFinSyncRepository internal constructor(
                 "SimpleFIN connection changed while updating automatic syncs"
             }
             try {
-                functions.scheduleWork(count)
+                functions.reanchorWork(count)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Throwable) {
+                throw SimpleFinAutomaticSchedulingException(failure)
+            }
+        }
+    }
+
+    suspend fun updateAutomaticSyncTime(time: LocalTime?) {
+        lifecycleMutex.withLock {
+            val profile = db.simpleFinDao().getProfile() ?: error("SimpleFIN is not connected")
+            functions.savePreferredSyncTime(time)
+            mutablePreferredSyncTime.value = time
+            try {
+                functions.reanchorWork(profile.automaticSyncsPerDay)
             } catch (failure: CancellationException) {
                 throw failure
             } catch (failure: Throwable) {
@@ -736,9 +764,16 @@ class SimpleFinSyncRepository internal constructor(
                     withContext(Dispatchers.IO) { credentialStore.deleteRollback() }
                 },
                 scheduleWork = { SimpleFinSyncWorker.schedule(appContext, it) },
+                reanchorWork = { SimpleFinSyncWorker.schedule(appContext, it, reanchor = true) },
                 cancelWork = { SimpleFinSyncWorker.cancel(appContext) },
                 now = System::currentTimeMillis,
                 autoCategorize = { GeminiAutoCategorizer(appContext).categorizeOneChunk() },
+                readPreferredSyncTime = {
+                    withContext(Dispatchers.IO) { readPreferredSyncTime(appContext) }
+                },
+                savePreferredSyncTime = { time ->
+                    withContext(Dispatchers.IO) { writePreferredSyncTime(appContext, time) }
+                },
             )
         }
     }

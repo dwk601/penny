@@ -343,7 +343,7 @@ internal enum class DataOperation(
     Connect("Connecting bank"),
     StartOver("Starting over"),
     Sync("Syncing bank"),
-    UpdateAutomaticSyncs("Saving sync frequency"),
+    UpdateAutomaticSyncs("Saving sync schedule"),
     DeleteMerchantRule("Deleting merchant rule"),
     Disconnect("Disconnecting bank"),
     ResetDays("Resetting days"),
@@ -1514,14 +1514,37 @@ fun FlowMoneyApp(
                     if (dataOperation != null) return@DataSheet
                     dataOperation = DataOperation.UpdateAutomaticSyncs
                     scope.launch {
-                        var message = "Could not update automatic sync frequency"
+                        var message = "Could not update automatic sync schedule"
                         try {
                             viewModel.updateAutomaticSyncsPerDay(count)
                             message = "Automatic syncs set to $count per day"
                         } catch (failure: CancellationException) {
                             throw failure
                         } catch (failure: Throwable) {
-                            message = automaticSyncFrequencyUpdateFailureMessage(failure)
+                            message = automaticSyncScheduleUpdateFailureMessage(failure)
+                        } finally {
+                            dataOperation = null
+                        }
+                        dataSnackbarHostState.showSnackbar(message)
+                    }
+                },
+                onAutomaticSyncTimeChange = { time ->
+                    if (dataOperation != null) return@DataSheet
+                    dataOperation = DataOperation.UpdateAutomaticSyncs
+                    scope.launch {
+                        var message = "Could not update automatic sync schedule"
+                        try {
+                            viewModel.updateAutomaticSyncTime(time)
+                            message =
+                                if (time == null) {
+                                    "Automatic sync time cleared"
+                                } else {
+                                    "Automatic sync time set to ${time.format(TimeFormatter)}"
+                                }
+                        } catch (failure: CancellationException) {
+                            throw failure
+                        } catch (failure: Throwable) {
+                            message = automaticSyncScheduleUpdateFailureMessage(failure)
                         } finally {
                             dataOperation = null
                         }
@@ -2471,8 +2494,7 @@ private fun OverviewSyncReviewBanner(
             simpleFin.isConnectionPending -> "Connection pending"
             profile == null -> "Bank not connected"
             profile.isPaused -> "Reconnect required"
-            profile.lastSuccessfulSyncAtEpochMillis == null -> "No successful sync yet"
-            else -> "Last successful sync ${profile.lastSuccessfulSyncAtEpochMillis.toSyncTime()}"
+            else -> null
         }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -2486,7 +2508,9 @@ private fun OverviewSyncReviewBanner(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(syncText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            syncText?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            }
             Text(
                 if (pendingReviewCount == 0) {
                     "No synced transactions to check"
@@ -3837,6 +3861,7 @@ internal fun DataSheet(
     onConnect: (String) -> Unit,
     onSync: () -> Unit,
     onAutomaticSyncsPerDayChange: (Int) -> Unit = {},
+    onAutomaticSyncTimeChange: (LocalTime?) -> Unit = {},
     onCountResetDays: suspend (PennyLocalDateRange, ZoneId) -> TransactionRangeCount = { _, _ ->
         TransactionRangeCount(transactionCount = 0, tombstoneCount = 0)
     },
@@ -3859,8 +3884,10 @@ internal fun DataSheet(
     modifier: Modifier = Modifier,
 ) {
     val profile = simpleFin.profile
+    val preferredSyncTime = simpleFin.preferredSyncTime
     var setupToken by remember { mutableStateOf("") }
     var automaticSyncsExpanded by rememberSaveable(profile?.connectionId, profile?.isPaused) { mutableStateOf(false) }
+    var showSyncTimePicker by rememberSaveable(profile?.connectionId, profile?.isPaused) { mutableStateOf(false) }
     var ruleToDelete by remember { mutableStateOf<MerchantRuleEntity?>(null) }
     val isBusy = operation != null
 
@@ -3923,16 +3950,19 @@ internal fun DataSheet(
         }
     }
     val resetDaysCard: @Composable () -> Unit = {
-        SimpleFinResetDaysCard(
-            operation = operation,
-            onCountResetDays = onCountResetDays,
-            onResetDays = onResetDays,
-            clock = resetDaysClock,
-            zoneId = resetDaysZoneId,
-            rangeResetPending = rangeResetPending,
-            externalRecountRequest = resetDaysRecountRequest,
-            selectionGeneration = resetDaysReselectRequest,
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            DataSheetSectionHeader("Cleanup")
+            SimpleFinResetDaysCard(
+                operation = operation,
+                onCountResetDays = onCountResetDays,
+                onResetDays = onResetDays,
+                clock = resetDaysClock,
+                zoneId = resetDaysZoneId,
+                rangeResetPending = rangeResetPending,
+                externalRecountRequest = resetDaysRecountRequest,
+                selectionGeneration = resetDaysReselectRequest,
+            )
+        }
     }
 
     Box(
@@ -4079,6 +4109,8 @@ internal fun DataSheet(
                                     modifier = Modifier.testTag("simplefin_reconnect_message"),
                                 )
                                 Spacer(Modifier.height(10.dp))
+                                StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
+                                Spacer(Modifier.height(10.dp))
                                 Text(
                                     "Open SimpleFIN and copy a new setup token.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -4126,11 +4158,15 @@ internal fun DataSheet(
                         item { bankSyncSectionHeader() }
                         item {
                             DataCard(modifier = Modifier.testTag("bank_sync_card")) {
+                                Text("Status", fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
                                 StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
                                 StatusLine("Last error", if (profile.lastError.isNullOrBlank()) "None" else "Sync needs attention")
                                 Spacer(Modifier.height(10.dp))
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                                 Spacer(Modifier.height(10.dp))
+                                Text("Schedule", fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
                                 Row(
                                     modifier =
                                         Modifier
@@ -4188,13 +4224,57 @@ internal fun DataSheet(
                                         }
                                     }
                                 }
+                                Row(
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .semantics {
+                                                contentDescription = "Automatic sync time"
+                                                stateDescription = preferredSyncTime?.format(TimeFormatter) ?: "Any time"
+                                            }.testTag("simplefin_sync_time_control"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Sync time", fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            preferredSyncTime?.format(TimeFormatter) ?: "Any time",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            modifier = Modifier.testTag("simplefin_sync_time_value"),
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (preferredSyncTime != null) {
+                                            TextButton(
+                                                onClick = { onAutomaticSyncTimeChange(null) },
+                                                enabled = !isBusy,
+                                                modifier =
+                                                    Modifier
+                                                        .heightIn(min = 48.dp)
+                                                        .testTag("simplefin_sync_time_clear"),
+                                            ) { Text("Clear") }
+                                        }
+                                        TextButton(
+                                            onClick = { showSyncTimePicker = true },
+                                            enabled = !isBusy,
+                                            modifier =
+                                                Modifier
+                                                    .heightIn(min = 48.dp)
+                                                    .testTag("simplefin_sync_time_action"),
+                                        ) { Text("Change") }
+                                    }
+                                }
                                 Text(
-                                    "Choose 1–12 syncs a day. Timing is approximate; redirects, retries, and setup can use extra requests, so this cadence cannot guarantee SimpleFIN's 24-request daily limit.",
+                                    "The first daily sync is scheduled at this time; later runs follow the interval. Timing is approximate and cannot guarantee SimpleFIN's 24-request daily limit.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.padding(top = 4.dp),
                                 )
                                 Spacer(Modifier.height(10.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                Spacer(Modifier.height(10.dp))
+                                Text("Actions", fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
                                 Button(
                                     onClick = onSync,
                                     enabled = !isBusy,
@@ -4315,6 +4395,19 @@ internal fun DataSheet(
             },
             dismissButton = {
                 TextButton(onClick = { ruleToDelete = null }, enabled = !isBusy) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showSyncTimePicker) {
+        PennyRichTimePickerDialog(
+            initialHour = preferredSyncTime?.hour ?: LocalTime.now().hour,
+            initialMinute = preferredSyncTime?.minute ?: LocalTime.now().minute,
+            is24Hour = true,
+            onDismiss = { showSyncTimePicker = false },
+            onConfirm = { hour, minute ->
+                showSyncTimePicker = false
+                onAutomaticSyncTimeChange(LocalTime.of(hour, minute))
             },
         )
     }
@@ -7062,11 +7155,11 @@ private fun Long?.toSyncTime(): String =
 
 private fun automaticSyncFrequencyLabel(count: Int): String = "$count ${if (count == 1) "sync" else "syncs"} per day"
 
-internal fun automaticSyncFrequencyUpdateFailureMessage(failure: Throwable): String =
+internal fun automaticSyncScheduleUpdateFailureMessage(failure: Throwable): String =
     if (failure is SimpleFinAutomaticSchedulingException) {
-        "Frequency saved, but automatic scheduling could not be updated. Try again."
+        "Schedule saved, but automatic scheduling could not be updated. Try again."
     } else {
-        "Could not update automatic sync frequency"
+        "Could not update automatic sync schedule"
     }
 
 internal fun SimpleFinSyncResult.connectionSnackbarMessage(): String =
