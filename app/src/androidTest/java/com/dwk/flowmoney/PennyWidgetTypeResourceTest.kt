@@ -60,15 +60,24 @@ class PennyWidgetTypeResourceTest {
     }
 
     /**
-     * The two labels with the tightest boxes at font scale 2.0 -- the 110x48dp initial frame and the
-     * 110x110dp summary label sharing a row with the 48dp add button -- step down to Medium.
+     * Two labels are deliberately left on the platform face: the 110x48dp initial frame label and the
+     * summary spent label, which shares a 110dp row with the 48dp add button.
+     *
+     * Inter is both taller and wider than the platform face, and at font scale 2.0 both boxes are
+     * already pinned at their `autoSizeMinTextSize` floor -- the initial label overflows its 38px box
+     * by 1px, and the summary label ellipsizes 3 characters. No Inter weight fixes either (Medium and
+     * Regular were both measured and produce byte-identical results), and the summary label cannot
+     * drop below its 8sp legibility floor in PennyWidgetIntentTest. So these two stay on the platform
+     * face until the layouts give them more room.
+     *
+     * Asserted rather than skipped so the exception cannot silently spread to the other labels.
      */
     @Test
-    fun tightestLabelsStepDownToInterMedium() {
+    fun tightestLabelsStayOnThePlatformFace() {
         val context = ApplicationProvider.getApplicationContext<Context>()
 
-        assertTypeface(context, R.layout.widget_penny_summary, R.id.widget_spent_label, medium)
-        assertTypeface(context, R.layout.widget_penny_initial, R.id.widget_initial_label, medium)
+        assertPlatformDefaultTypeface(context, R.layout.widget_penny_summary, R.id.widget_spent_label)
+        assertPlatformDefaultTypeface(context, R.layout.widget_penny_initial, R.id.widget_initial_label)
     }
 
     @Test
@@ -225,6 +234,29 @@ class PennyWidgetTypeResourceTest {
             "${context.resources.getResourceEntryName(layoutId)}." +
                 context.resources.getResourceEntryName(viewId)
         assertTypefaceMatches(name, context, findTextView(context, layoutId, viewId), fontId)
+    }
+
+    private fun assertPlatformDefaultTypeface(
+        context: Context,
+        layoutId: Int,
+        viewId: Int,
+    ) {
+        val name =
+            "${context.resources.getResourceEntryName(layoutId)}." +
+                context.resources.getResourceEntryName(viewId)
+        val actual = fontFingerprint(findTextView(context, layoutId, viewId).typeface)
+
+        assertEquals(
+            "$name must stay on the platform face",
+            fontFingerprint(Typeface.DEFAULT),
+            actual,
+        )
+        listOf(semibold, medium, regular).forEach { fontId ->
+            assertTrue(
+                "$name must not be ${context.resources.getResourceEntryName(fontId)}",
+                actual != fontFingerprint(ResourcesCompat.getFont(context, fontId)),
+            )
+        }
     }
 
     private fun assertTypefaceMatches(
