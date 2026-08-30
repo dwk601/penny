@@ -144,6 +144,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -645,6 +646,7 @@ fun FlowMoneyApp(
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var editorSessionId by rememberSaveable { mutableStateOf(0) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
+    var geminiKeySaved by remember { mutableStateOf(false) }
     var navigationState by rememberSaveable(stateSaver = DashboardNavigationStateSaver) {
         mutableStateOf(DashboardNavigationState())
     }
@@ -1394,6 +1396,12 @@ fun FlowMoneyApp(
         )
     }
 
+    LaunchedEffect(showDataSheet) {
+        if (showDataSheet) {
+            geminiKeySaved = withContext(Dispatchers.IO) { GeminiApiKeyStore(context).hasKey() }
+        }
+    }
+
     if (showDataSheet) {
         DataSheetModal(
             operation = dataOperation,
@@ -1550,6 +1558,29 @@ fun FlowMoneyApp(
                 },
                 onClose = {
                     if (dataOperation == null) showDataSheet = false
+                },
+                geminiKeySaved = geminiKeySaved,
+                onSaveGeminiKey = { key ->
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) { GeminiApiKeyStore(context).save(key.trim()) }
+                            geminiKeySaved = true
+                        }.onFailure { failure ->
+                            if (failure is CancellationException) throw failure
+                            dataSnackbarHostState.showSnackbar("Could not save Gemini key")
+                        }
+                    }
+                },
+                onClearGeminiKey = {
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) { GeminiApiKeyStore(context).delete() }
+                            geminiKeySaved = false
+                        }.onFailure { failure ->
+                            if (failure is CancellationException) throw failure
+                            dataSnackbarHostState.showSnackbar("Could not remove Gemini key")
+                        }
+                    }
                 },
                 modifier = Modifier.imePadding(),
             )
@@ -3799,6 +3830,9 @@ internal fun DataSheet(
     onClose: () -> Unit,
     onRetryConnection: () -> Unit,
     onCancelPendingConnection: () -> Unit,
+    geminiKeySaved: Boolean = false,
+    onSaveGeminiKey: (String) -> Unit = {},
+    onClearGeminiKey: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val profile = simpleFin.profile
@@ -4216,6 +4250,14 @@ internal fun DataSheet(
                     }
                 }
                 item {
+                    GeminiCategorizeCard(
+                        keySaved = geminiKeySaved,
+                        enabled = !isBusy,
+                        onSaveKey = onSaveGeminiKey,
+                        onClearKey = onClearGeminiKey,
+                    )
+                }
+                item {
                     MerchantRulesCard(
                         rules = merchantRules,
                         loading = merchantRulesLoading,
@@ -4251,6 +4293,67 @@ internal fun DataSheet(
                 TextButton(onClick = { ruleToDelete = null }, enabled = !isBusy) { Text("Cancel") }
             },
         )
+    }
+}
+
+@Composable
+private fun GeminiCategorizeCard(
+    keySaved: Boolean,
+    enabled: Boolean,
+    onSaveKey: (String) -> Unit,
+    onClearKey: () -> Unit,
+) {
+    var apiKey by remember { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        DataSheetSectionHeader("Auto-categorize")
+        DataCard(modifier = Modifier.testTag("gemini_key_card")) {
+            Text(
+                "Paste a Google AI Studio key. After each sync, up to $GEMINI_CATEGORIZE_CHUNK_SIZE uncategorized transactions are labelled. Reviewed transactions and merchant rules are never changed.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                if (keySaved) "Key saved" else "No key saved",
+                modifier = Modifier.testTag("gemini_key_status"),
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                enabled = enabled,
+                colors = flowTextFieldColors(),
+                shape = MaterialTheme.shapes.medium,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag("gemini_key_field"),
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = {
+                    val key = apiKey
+                    apiKey = ""
+                    onSaveKey(key)
+                },
+                enabled = enabled && apiKey.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(),
+                shape = MaterialTheme.shapes.large,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag("gemini_key_save_button"),
+            ) { Text("Save") }
+            if (keySaved) {
+                TextButton(
+                    onClick = onClearKey,
+                    enabled = enabled,
+                    modifier = Modifier.testTag("gemini_key_clear_button"),
+                ) { Text("Remove") }
+            }
+        }
     }
 }
 

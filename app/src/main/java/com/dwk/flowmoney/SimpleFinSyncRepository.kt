@@ -79,6 +79,7 @@ internal class SimpleFinSyncFunctions(
     val scheduleWork: suspend (Int) -> Unit,
     val cancelWork: suspend () -> Unit,
     val now: () -> Long,
+    val autoCategorize: suspend () -> Unit = {},
 )
 
 class SimpleFinSyncRepository internal constructor(
@@ -145,7 +146,7 @@ class SimpleFinSyncRepository internal constructor(
                 } catch (failure: Throwable) {
                     return failure.toConnectFailure()
                 }
-            finishPendingConnection(connectionId, accessUrl, previous)
+            finishPendingConnection(connectionId, accessUrl, previous).alsoAutoCategorize()
         } finally {
             clearActiveConnection(connectionId)
         }
@@ -188,7 +189,7 @@ class SimpleFinSyncRepository internal constructor(
                 deleteRejectedPendingConnection(staged.connectionId)
                 return failure.toConnectFailure()
             }
-            finishPendingConnection(staged.connectionId, staged.accessUrl, checkNotNull(previous))
+            finishPendingConnection(staged.connectionId, staged.accessUrl, checkNotNull(previous)).alsoAutoCategorize()
         } finally {
             clearActiveConnection(staged.connectionId)
         }
@@ -275,6 +276,7 @@ class SimpleFinSyncRepository internal constructor(
                     identityDao.upsertState(SimpleFinIdentityStateEntity(reconciliationComplete = true))
                 }
             }
+            autoCategorizeAfterCommit()
             SimpleFinSyncResult.Success(writeResult.inserted, writeResult.updated, writeResult.skipped)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -671,6 +673,19 @@ class SimpleFinSyncRepository internal constructor(
             kind = SimpleFinFailureKind.PROTOCOL,
         )
 
+    private suspend fun autoCategorizeAfterCommit() {
+        try {
+            functions.autoCategorize()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // The sync is already committed; categorization retries on the next sync.
+        }
+    }
+
+    private suspend fun SimpleFinSyncResult.alsoAutoCategorize(): SimpleFinSyncResult =
+        also { if (it is SimpleFinSyncResult.Success) autoCategorizeAfterCommit() }
+
     private fun now() = functions.now()
 
     private fun SimpleFinMappingResult.payloadOccurrences(): List<SimpleFinPayloadOccurrence> =
@@ -723,6 +738,7 @@ class SimpleFinSyncRepository internal constructor(
                 scheduleWork = { SimpleFinSyncWorker.schedule(appContext, it) },
                 cancelWork = { SimpleFinSyncWorker.cancel(appContext) },
                 now = System::currentTimeMillis,
+                autoCategorize = { GeminiAutoCategorizer(appContext).categorizeOneChunk() },
             )
         }
     }

@@ -185,7 +185,7 @@ class TransactionDaoDataPathTest {
             }
         }
 
-    @Test fun csvImportClearsProviderOwnedTransactedAt() =
+    @Test fun csvImportLandsAsLocalAndCarriesNoProviderOwnershipOfItsOwn() =
         runBlocking {
             val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
             try {
@@ -196,17 +196,95 @@ class TransactionDaoDataPathTest {
                     id,occurredAtEpochMillis,merchant,category,note,cents
                     csv-row,1766145600000,Coffee,Food,imported,-625
                     """.trimIndent()
-                // A forged CSV row cannot smuggle a provider-owned timestamp into local data.
+                val decoded = CsvCodec.decode(csv)
+                // The CSV format itself carries no provider-owned columns.
+                assertNull(decoded.single().transactedAtEpochMillis)
+                assertNull(decoded.single().providerDescription)
                 val forged =
-                    CsvCodec.decode(csv).map { it.copy(transactedAtEpochMillis = 1_766_059_200_000L) }
+                    decoded.map {
+                        it.copy(
+                            source = "simplefin",
+                            accountKey = "forged-account",
+                            merchantOverride = "Forged display",
+                            providerMerchant = "FORGED RAW MERCHANT",
+                        )
+                    }
 
                 assertEquals(1, repository.importTransactions(forged))
 
                 val row = dao.getAll().single()
-                assertNull(row.transactedAtEpochMillis)
+                // A forged CSV row cannot claim provider ownership of local data.
                 assertEquals("local", row.source)
-                assertNull(row.providerDescription)
+                assertNull(row.accountKey)
                 assertNull(row.merchantOverride)
+                assertEquals("Coffee", row.merchant)
+                assertNull(row.transactedAtEpochMillis)
+                assertNull(row.providerDescription)
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun uncategorizedSyncedReadIsLimitedToUnreviewedUncategorizedSimpleFinRows() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                dao.upsertAll(
+                    listOf(
+                        syncedUncategorized("eligible-oldest", 1),
+                        syncedUncategorized("eligible-middle", 2),
+                        syncedUncategorized("eligible-newest", 3),
+                        syncedUncategorized("reviewed", 4).copy(reviewedAtEpochMillis = 99L),
+                        syncedUncategorized("categorized", 5).copy(category = "Food"),
+                        syncedUncategorized("local", 6).copy(source = "local", accountKey = null),
+                    ),
+                )
+
+                assertEquals(
+                    listOf("eligible-newest", "eligible-middle"),
+                    dao.uncategorizedSyncedTransactions(2).map { it.id },
+                )
+                assertEquals(
+                    listOf("eligible-newest", "eligible-middle", "eligible-oldest"),
+                    dao.uncategorizedSyncedTransactions(GEMINI_CATEGORIZE_CHUNK_SIZE).map { it.id },
+                )
+                assertEquals(emptyList<TransactionEntity>(), dao.uncategorizedSyncedTransactions(0))
+            } finally {
+                database.close()
+            }
+        }
+
+    @Test fun autoCategoryWritesOnlyCategoryAndSkipsRowsReviewedBetweenReadAndWrite() =
+        runBlocking {
+            val database = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
+            try {
+                val dao = database.transactionDao()
+                val stable =
+                    syncedUncategorized("stable", 1).copy(
+                        note = "user note",
+                        merchantOverride = "User display",
+                        providerDescription = "TRADER JOES #123, PORTLAND OR",
+                    )
+                val raced = syncedUncategorized("raced", 2)
+                dao.upsertAll(listOf(stable, raced))
+
+                val read = dao.uncategorizedSyncedTransactions(GEMINI_CATEGORIZE_CHUNK_SIZE)
+                assertEquals(setOf("stable", "raced"), read.mapTo(mutableSetOf()) { it.id })
+
+                // The user reviews one of the rows while the classifier request is in flight.
+                dao.categorizeAndReview(listOf("raced"), "Travel", 500L)
+
+                assertEquals(0, dao.applyAutoCategory("raced", "Groceries"))
+                assertEquals(1, dao.applyAutoCategories(mapOf("stable" to "Groceries", "raced" to "Groceries")))
+
+                val rows = dao.getAll().associateBy { it.id }
+                assertEquals(stable.copy(category = "Groceries"), rows.getValue("stable"))
+                assertNull(rows.getValue("stable").reviewedAtEpochMillis)
+                assertEquals("Travel", rows.getValue("raced").category)
+                assertEquals(500L, rows.getValue("raced").reviewedAtEpochMillis)
+                // A row that is no longer eligible stays out of the queue on the next read.
+                assertEquals(emptyList<String>(), dao.uncategorizedSyncedTransactions(GEMINI_CATEGORIZE_CHUNK_SIZE).map { it.id })
             } finally {
                 database.close()
             }
@@ -654,6 +732,15 @@ class TransactionDaoDataPathTest {
                 database.close()
             }
         }
+
+    private fun syncedUncategorized(
+        id: String,
+        occurredAtEpochMillis: Long,
+    ) = entity(id, occurredAtEpochMillis).copy(
+        source = "simplefin",
+        accountKey = "account",
+        accountName = "Checking",
+    )
 
     private fun entity(
         id: String,
