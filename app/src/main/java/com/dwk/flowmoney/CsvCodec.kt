@@ -260,7 +260,6 @@ object CsvCodec {
             digest.updateField(identity.providerDescription)
             digest.updateField(identity.accountName)
             digest.updateField(identity.transactedAtEpochMillis?.toString())
-            digest.updateField(identity.reviewedAtEpochMillis?.toString())
         }
         digest.updateField(occurrenceOrdinal.toString())
         return CSV_ID_PREFIX + digest.digest().toLowerHex()
@@ -417,7 +416,6 @@ object CsvCodec {
                 providerDescription = transaction.providerDescription,
                 accountName = transaction.accountName,
                 transactedAtEpochMillis = transaction.transactedAtEpochMillis,
-                reviewedAtEpochMillis = transaction.reviewedAtEpochMillis,
             )
     }
 
@@ -438,7 +436,6 @@ object CsvCodec {
         val providerDescription: String? = null,
         val accountName: String? = null,
         val transactedAtEpochMillis: Long? = null,
-        val reviewedAtEpochMillis: Long? = null,
     )
 
     private enum class FieldState { Unquoted, Quoted, AfterQuote }
