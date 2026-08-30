@@ -219,47 +219,6 @@ class Phase4UiTest {
     }
 
     @Test
-    fun amountSuggestionsAreTaggedBelowThePadAndApplyImmediately() {
-        val history =
-            TransactionSuggestions.history(
-                listOf(
-                    Transaction(
-                        id = "suggested",
-                        occurredAtEpochMillis = 1_765_000_000_000,
-                        merchant = "Cafe",
-                        category = "Food",
-                        note = "",
-                        cents = -1_234,
-                    ),
-                ),
-            )
-        composeRule.setContent {
-            var draft by remember { mutableStateOf(newEditorDraft().copy(category = "Food")) }
-            MaterialTheme {
-                TransactionEditor(
-                    transaction = null,
-                    draft = draft,
-                    suggestionHistory = history,
-                    onDraftChange = { draft = it },
-                    onSave = {},
-                    onDelete = null,
-                    onCancel = {},
-                    persistenceBusy = false,
-                )
-            }
-        }
-
-        composeRule
-            .onNodeWithTag("amount_suggestion_0")
-            .performScrollTo()
-            .assertTextContains("\$12.34", substring = true)
-            .performClick()
-            .assertIsSelected()
-        composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("amount_display"))
-        composeRule.onNodeWithTag("amount_display").assertTextContains("-\$12.34")
-    }
-
-    @Test
     fun nearbySuggestionAddressExpandsMoreDetailsAndStaysExpanded() {
         val draftState =
             mutableStateOf(

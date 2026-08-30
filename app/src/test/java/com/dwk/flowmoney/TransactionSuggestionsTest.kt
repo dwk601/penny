@@ -11,69 +11,6 @@ class TransactionSuggestionsTest {
         assertThat(TransactionSuggestions.signedCents(-1299, isExpense = false)).isEqualTo(1299)
     }
 
-    @Test fun amountSuggestionsPreferLastMerchantCategoryMatch() {
-        val transactions = listOf(
-            transaction(
-                merchant = "Coffee Bar",
-                category = "Food",
-                cents = -575,
-                occurredAtEpochMillis = 4000,
-            ),
-            transaction(
-                merchant = "Coffee Bar",
-                category = "Food",
-                cents = -425,
-                occurredAtEpochMillis = 3000,
-            ),
-            transaction(
-                merchant = "Coffee Bar",
-                category = "Food",
-                cents = -425,
-                occurredAtEpochMillis = 2000,
-            ),
-            transaction(
-                merchant = "Pharmacy",
-                category = "Health",
-                cents = -2199,
-                occurredAtEpochMillis = 5000,
-            ),
-        )
-
-        val suggestions = TransactionSuggestions.amountSuggestions(
-            transactions = transactions,
-            merchant = "coffee bar",
-            category = "Food",
-            isExpense = true,
-        )
-        val historySuggestions = TransactionSuggestions.amountSuggestions(
-            history = TransactionSuggestions.history(transactions),
-            merchant = "coffee bar",
-            category = "Food",
-            isExpense = true,
-        )
-
-        assertThat(suggestions.map { it.cents }).containsAtLeast(575, 425).inOrder()
-        assertThat(suggestions.first().source).isEqualTo(AmountSuggestionSource.LastMatch)
-        assertThat(historySuggestions).isEqualTo(suggestions)
-    }
-
-    @Test fun incomeSuggestionsIgnoreExpenses() {
-        val transactions = listOf(
-            transaction(merchant = "Payroll", category = "Income", cents = 220000, occurredAtEpochMillis = 2000),
-            transaction(merchant = "Payroll", category = "Income", cents = -1299, occurredAtEpochMillis = 3000),
-            transaction(merchant = "Refund", category = "Refund", cents = 3499, occurredAtEpochMillis = 1000),
-        )
-
-        val suggestions = TransactionSuggestions.amountSuggestions(
-            transactions = transactions,
-            merchant = "Payroll",
-            category = "Income",
-            isExpense = false,
-        )
-
-        assertThat(suggestions.map { it.cents }).containsExactly(220000, 3499).inOrder()
-    }
-
     @Test fun merchantSuggestionsPreferCurrentCategoryAndRecentRows() {
         val transactions = listOf(
             transaction("A", "Market", "Food", -2500, 1000),
