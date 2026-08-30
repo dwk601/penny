@@ -108,6 +108,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -119,6 +120,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -1925,6 +1927,10 @@ internal fun AdaptiveFlowMoneyShell(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+internal val LocalTopAppBarScrollBehavior =
+    staticCompositionLocalOf<TopAppBarScrollBehavior?> { null }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FlowMoneyScaffold(
     selectedTab: DashboardTab,
@@ -1941,6 +1947,7 @@ private fun FlowMoneyScaffold(
     content: @Composable (PaddingValues) -> Unit,
 ) {
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    CompositionLocalProvider(LocalTopAppBarScrollBehavior provides scrollBehavior) {
     Scaffold(
         modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
@@ -2001,6 +2008,7 @@ private fun FlowMoneyScaffold(
             },
         content = content,
     )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2990,43 +2998,30 @@ private fun TransactionsPage(
         )
     }
 
-    Box(modifier = modifier) {
+    val topBar = LocalTopAppBarScrollBehavior.current
+    LaunchedEffect(viewMode) {
         if (viewMode == TransactionViewMode.Map) {
-            Column(
-                modifier =
-                    Modifier
-                        .widthIn(max = 720.dp)
-                        .fillMaxSize()
-                        .align(Alignment.TopCenter),
-            ) {
-                Column(
-                    modifier = Modifier.padding(PagePadding),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    RecentTransactionsHeader(
-                        title = "Transactions",
-                        count = filteredTransactions.size,
-                        detail = headerDetail,
-                    )
-                    filterBar()
-                }
-                TransactionMap(
-                    transactions = filteredTransactions,
-                    geocoder = geocoder,
-                    onEdit = onEdit,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                )
-            }
-        } else {
+            topBar?.state?.heightOffset = 0f
+            topBar?.state?.contentOffset = 0f
+        }
+    }
+
+    Box(modifier = modifier) {
         LazyColumn(
             modifier =
                 Modifier
                     .widthIn(max = 720.dp)
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .align(Alignment.TopCenter)
                     .testTag("transactions_list"),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PagePadding,
+            contentPadding =
+                PaddingValues(
+                    start = 20.dp,
+                    top = 16.dp,
+                    end = 20.dp,
+                    bottom = 16.dp + 88.dp,
+                ),
         ) {
             item {
                 RecentTransactionsHeader(
@@ -3038,6 +3033,20 @@ private fun TransactionsPage(
             item {
                 filterBar()
             }
+            if (viewMode == TransactionViewMode.Map) {
+                item {
+                    TransactionMap(
+                        transactions = filteredTransactions,
+                        geocoder = geocoder,
+                        onEdit = onEdit,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .fillParentMaxHeight(0.72f)
+                                .heightIn(min = 320.dp),
+                    )
+                }
+            } else {
             if (sortedTransactions.isEmpty()) {
                 item {
                     EmptyState(
@@ -3097,7 +3106,7 @@ private fun TransactionsPage(
                     }
                 }
             }
-        }
+            }
         }
     }
 }
