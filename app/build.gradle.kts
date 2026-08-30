@@ -13,8 +13,8 @@ android {
         applicationId = "com.dwk.flowmoney"
         minSdk = 26
         targetSdk = 36
-        versionCode = 120
-        versionName = "1.1.4"
+        versionCode = 123
+        versionName = "1.1.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resourceConfigurations += listOf("en")
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }

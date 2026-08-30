@@ -161,7 +161,7 @@ internal class GeminiClient(
 
     private companion object {
         const val ENDPOINT =
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
         const val RESPONSE_BODY_LIMIT = 256 * 1024
     }
 }

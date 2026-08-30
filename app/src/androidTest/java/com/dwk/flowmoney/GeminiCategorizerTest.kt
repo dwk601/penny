@@ -178,7 +178,7 @@ class GeminiCategorizerTest {
         assertEquals(mapOf(1 to "Groceries"), result)
         assertEquals("POST", captured.requestMethod)
         assertEquals(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
             captured.url.toString(),
         )
         assertNull(captured.url.query)
