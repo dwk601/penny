@@ -70,7 +70,7 @@
                 android:autoSizeStepGranularity="1sp"
                 android:autoSizeTextType="uniform"
                 android:ellipsize="end"
-                android:fontFamily="serif"
+                android:fontFamily="@font/inter_semibold"
                 android:gravity="center_vertical"
                 android:includeFontPadding="false"
                 android:maxLines="1"

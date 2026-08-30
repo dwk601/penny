@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -283,69 +284,88 @@ private val FlowMoneyDarkColorScheme =
 internal fun flowMoneyStaticColorScheme(darkTheme: Boolean): ColorScheme =
     if (darkTheme) FlowMoneyDarkColorScheme else FlowMoneyLightColorScheme
 
+private val PennyFontFamily =
+    FontFamily(
+        Font(R.font.inter_regular, FontWeight.Normal),
+        Font(R.font.inter_medium, FontWeight.Medium),
+        Font(R.font.inter_semibold, FontWeight.SemiBold),
+    )
+
 private val FlowMoneyTypography =
     Typography(
         headlineLarge =
             TextStyle(
-                fontFamily = FontFamily.Serif,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 32.sp,
                 lineHeight = 40.sp,
             ),
         titleLarge =
             TextStyle(
-                fontFamily = FontFamily.Serif,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 22.sp,
                 lineHeight = 28.sp,
             ),
         titleMedium =
             TextStyle(
-                fontFamily = FontFamily.SansSerif,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
                 lineHeight = 24.sp,
             ),
         bodyLarge =
             TextStyle(
-                fontFamily = FontFamily.SansSerif,
                 fontSize = 16.sp,
                 lineHeight = 24.sp,
             ),
         bodyMedium =
             TextStyle(
-                fontFamily = FontFamily.SansSerif,
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
             ),
         bodySmall =
             TextStyle(
-                fontFamily = FontFamily.SansSerif,
                 fontSize = 12.sp,
                 lineHeight = 16.sp,
             ),
         labelLarge =
             TextStyle(
-                fontFamily = FontFamily.SansSerif,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
             ),
         labelMedium =
             TextStyle(
-                fontFamily = FontFamily.SansSerif,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 12.sp,
                 lineHeight = 16.sp,
             ),
         labelSmall =
             TextStyle(
-                fontFamily = FontFamily.SansSerif,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 11.sp,
                 lineHeight = 16.sp,
             ),
     )
+
+private fun Typography.withPennyFont(): Typography =
+    copy(
+        displayLarge = displayLarge.copy(fontFamily = PennyFontFamily),
+        displayMedium = displayMedium.copy(fontFamily = PennyFontFamily),
+        displaySmall = displaySmall.copy(fontFamily = PennyFontFamily),
+        headlineLarge = headlineLarge.copy(fontFamily = PennyFontFamily),
+        headlineMedium = headlineMedium.copy(fontFamily = PennyFontFamily),
+        headlineSmall = headlineSmall.copy(fontFamily = PennyFontFamily),
+        titleLarge = titleLarge.copy(fontFamily = PennyFontFamily),
+        titleMedium = titleMedium.copy(fontFamily = PennyFontFamily),
+        titleSmall = titleSmall.copy(fontFamily = PennyFontFamily),
+        bodyLarge = bodyLarge.copy(fontFamily = PennyFontFamily),
+        bodyMedium = bodyMedium.copy(fontFamily = PennyFontFamily),
+        bodySmall = bodySmall.copy(fontFamily = PennyFontFamily),
+        labelLarge = labelLarge.copy(fontFamily = PennyFontFamily),
+        labelMedium = labelMedium.copy(fontFamily = PennyFontFamily),
+        labelSmall = labelSmall.copy(fontFamily = PennyFontFamily),
+    )
+
+private val PennyTypography = FlowMoneyTypography.withPennyFont()
 
 private val FlowMoneyShapes =
     Shapes(
@@ -374,7 +394,7 @@ internal fun FlowMoneyTheme(
     CompositionLocalProvider(LocalFinanceColors provides financeColors) {
         MaterialTheme(
             colorScheme = colors,
-            typography = FlowMoneyTypography,
+            typography = PennyTypography,
             shapes = FlowMoneyShapes,
             content = content,
         )
