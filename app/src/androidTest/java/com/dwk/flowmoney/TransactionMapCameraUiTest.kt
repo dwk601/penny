@@ -22,18 +22,22 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapView
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * The map camera is user state. Once a place is framed, a recomposition that does not change the
  * resolved places — opening a marker sheet, opening the unmappable sheet, dismissing either — must
- * leave the camera exactly where the user left it. The osmdroid `MapView` in the view hierarchy is
- * the seam used to observe it; no tile or geocoder network is required because the geocode cache is
- * seeded up front.
+ * leave the camera exactly where the user left it. The MapLibre `MapView` in the view hierarchy is
+ * the seam used to observe it, and `onPlacesBound` is the seam used to observe bind passes; no tile
+ * or geocoder network is required because the geocode cache is seeded up front and camera fitting
+ * is style-independent.
  */
 class TransactionMapCameraUiTest {
     @get:Rule val composeRule = createAndroidComposeRule<ComponentActivity>()
@@ -41,10 +45,19 @@ class TransactionMapCameraUiTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
     private var transactions by mutableStateOf(emptyList<Transaction>())
 
+    /** Every bind pass, in order. Written on the main thread, read through `runOnIdle`. */
+    private val boundPlaces = mutableListOf<List<MappedTransactionPlace>>()
+    private var mapReady = CountDownLatch(1)
+
+    @Volatile private var mapLibreMap: MapLibreMap? = null
+
     @Before fun seedGeocodeCache() {
         FlowMoneyDatabase.resetForTest()
         context.deleteDatabase("flow_money.db")
         transactions = emptyList()
+        boundPlaces.clear()
+        mapLibreMap = null
+        mapReady = CountDownLatch(1)
         runBlocking {
             val dao = FlowMoneyDatabase.get(context).placeGeocodeDao()
             listOf(
@@ -69,6 +82,7 @@ class TransactionMapCameraUiTest {
     @After fun clearDatabase() {
         FlowMoneyDatabase.resetForTest()
         context.deleteDatabase("flow_money.db")
+        mapLibreMap = null
     }
 
     @Test fun openingASheetLeavesTheCameraAloneEvenWhenMarkersAreReboundUnderIt() {
@@ -86,13 +100,16 @@ class TransactionMapCameraUiTest {
 
         // With the sheet open, force a real marker rebind for the same place set. This is the
         // path that could reframe, so the assertion below is not vacuous.
-        val beforeRebind = composeRule.runOnIdle { markers().single() }
+        val passesBeforeRebind = composeRule.runOnIdle { boundPlaces.size }
         composeRule.runOnIdle { transactions = listOf(portlandOr.copy(note = "edited"), unlocated.copy(note = "edited")) }
         composeRule.waitForIdle()
-        awaitMarkers(1)
+        val passes = awaitBindPassAfter(passesBeforeRebind, expected = 1)
 
-        val afterRebind = composeRule.runOnIdle { markers().single() }
-        assertNotSame("the marker overlay was not rebound, so this test proves nothing", beforeRebind, afterRebind)
+        assertNotSame(
+            "the places were not rebound, so this test proves nothing",
+            passes[passes.lastIndex - 1],
+            passes.last(),
+        )
         composeRule.onNodeWithTag("transaction_unmappable_sheet").assertExists()
         assertCameraIsWhereTheUserLeftIt()
     }
@@ -125,16 +142,18 @@ class TransactionMapCameraUiTest {
         awaitMarkers(1)
 
         composeRule.runOnIdle {
-            assertEquals(10.0, mapView().zoomLevelDouble, 0.001)
-            assertEquals(45.5152, mapView().mapCenter.latitude, 0.01)
-            assertEquals(-122.6784, mapView().mapCenter.longitude, 0.01)
+            val camera = map().cameraPosition
+            assertEquals(10.0, camera.zoom, 0.001)
+            assertEquals(45.5152, camera.target!!.latitude, 0.01)
+            assertEquals(-122.6784, camera.target!!.longitude, 0.01)
         }
     }
 
     private fun moveCameraLikeAUser() {
         composeRule.runOnIdle {
-            mapView().controller.setZoom(USER_ZOOM)
-            mapView().controller.setCenter(GeoPoint(USER_LATITUDE, USER_LONGITUDE))
+            map().moveCamera(
+                CameraUpdateFactory.newLatLngZoom(LatLng(USER_LATITUDE, USER_LONGITUDE), USER_ZOOM),
+            )
         }
         composeRule.waitForIdle()
     }
@@ -142,9 +161,10 @@ class TransactionMapCameraUiTest {
     /** Tolerances are well under a degree but comfortably above pixel quantization at zoom 4. */
     private fun assertCameraIsWhereTheUserLeftIt() {
         composeRule.runOnIdle {
-            assertEquals("zoom was reframed", USER_ZOOM, mapView().zoomLevelDouble, 0.001)
-            assertEquals("latitude was reframed", USER_LATITUDE, mapView().mapCenter.latitude, 0.5)
-            assertEquals("longitude was reframed", USER_LONGITUDE, mapView().mapCenter.longitude, 0.5)
+            val camera = map().cameraPosition
+            assertEquals("zoom was reframed", USER_ZOOM, camera.zoom, 0.001)
+            assertEquals("latitude was reframed", USER_LATITUDE, camera.target!!.latitude, 0.5)
+            assertEquals("longitude was reframed", USER_LONGITUDE, camera.target!!.longitude, 0.5)
         }
     }
 
@@ -157,28 +177,60 @@ class TransactionMapCameraUiTest {
                     geocoder = geocoder,
                     onEdit = {},
                     modifier = Modifier.fillMaxSize(),
+                    onPlacesBound = { boundPlaces.add(it) },
                 )
             }
         }
         composeRule.waitForIdle()
+        composeRule.runOnUiThread {
+            mapView().getMapAsync { ready ->
+                mapLibreMap = ready
+                mapReady.countDown()
+            }
+        }
+        if (!mapReady.await(20, TimeUnit.SECONDS)) fail("the MapLibre map never became ready")
     }
 
+    /** Waits until the most recent bind pass carries [expected] places. */
     private fun awaitMarkers(expected: Int) {
         val deadline = System.currentTimeMillis() + 10_000
         var seen = -1
         while (System.currentTimeMillis() < deadline) {
             composeRule.waitForIdle()
-            seen = composeRule.runOnIdle { markers().size }
+            seen = composeRule.runOnIdle { boundPlaces.lastOrNull()?.size ?: -1 }
             if (seen == expected) return
             Thread.sleep(50)
         }
-        fail("expected $expected markers but saw $seen")
+        fail("expected $expected bound places but saw $seen")
     }
 
-    private fun markers(): List<Marker> = mapView().overlays.filterIsInstance<Marker>()
+    /**
+     * Waits for a bind pass beyond [afterPasses] that carries [expected] places and returns the
+     * snapshot of passes seen at that moment, so the caller can compare the last two list instances.
+     */
+    private fun awaitBindPassAfter(
+        afterPasses: Int,
+        expected: Int,
+    ): List<List<MappedTransactionPlace>> {
+        val deadline = System.currentTimeMillis() + 10_000
+        var seen: List<List<MappedTransactionPlace>> = emptyList()
+        while (System.currentTimeMillis() < deadline) {
+            composeRule.waitForIdle()
+            seen = composeRule.runOnIdle { boundPlaces.toList() }
+            if (seen.size > afterPasses && seen.last().size == expected) return seen
+            Thread.sleep(50)
+        }
+        fail(
+            "expected a bind pass after $afterPasses passes carrying $expected places " +
+                "but saw ${seen.size} passes, the last of ${seen.lastOrNull()?.size} places",
+        )
+        error("unreachable")
+    }
+
+    private fun map(): MapLibreMap = requireNotNull(mapLibreMap) { "the MapLibre map was never bound" }
 
     private fun mapView(): MapView =
-        requireNotNull(findMapView(composeRule.activity.window.decorView)) { "no osmdroid MapView in the hierarchy" }
+        requireNotNull(findMapView(composeRule.activity.window.decorView)) { "no MapLibre MapView in the hierarchy" }
 
     private fun findMapView(view: View): MapView? =
         when {
