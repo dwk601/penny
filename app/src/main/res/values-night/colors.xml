@@ -2,6 +2,6 @@
     <color name="widget_surface_inverse">#E0E5DE</color>
     <color name="widget_on_surface_inverse">#2C332E</color>
     <color name="widget_on_surface_inverse_muted">#414942</color>
-    <color name="widget_quick_add">#C8F2E3</color>
-    <color name="widget_on_quick_add">#00382A</color>
+    <color name="widget_quick_add">#101613</color>
+    <color name="widget_on_quick_add">#FFFFFF</color>
 </resources>
