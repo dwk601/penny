@@ -590,6 +590,28 @@ class CsvCodecTest {
         firstDecode.forEach { assertCsvId(it.id) }
     }
 
+    @Test
+    fun v4StableIdsIgnoreTheReviewTimestampSoAFilledExportKeepsItsIdentity() {
+        val unreviewed = sample.copy(id = "tx-unreviewed", providerDescription = "SQ *COFFEE", reviewedAtEpochMillis = null)
+        val reviewed = unreviewed.copy(id = "tx-reviewed", reviewedAtEpochMillis = 1766149200000)
+
+        val unreviewedDecoded = CsvCodec.decode(CsvCodec.encode(listOf(unreviewed))).single()
+        val reviewedDecoded = CsvCodec.decode(CsvCodec.encode(listOf(reviewed))).single()
+
+        // Review state is user-owned bookkeeping, not row identity: filling it must not forge a new row.
+        assertThat(reviewedDecoded.id).isEqualTo(unreviewedDecoded.id)
+        assertThat(unreviewedDecoded.reviewedAtEpochMillis).isNull()
+        assertThat(reviewedDecoded.reviewedAtEpochMillis).isEqualTo(1766149200000)
+        assertCsvId(unreviewedDecoded.id)
+        // Every other detail column still participates in identity.
+        assertThat(CsvCodec.decode(CsvCodec.encode(listOf(reviewed.copy(providerDescription = "SQ *TEA")))).single().id)
+            .isNotEqualTo(unreviewedDecoded.id)
+        assertThat(CsvCodec.decode(CsvCodec.encode(listOf(reviewed.copy(accountName = "Savings")))).single().id)
+            .isNotEqualTo(unreviewedDecoded.id)
+        assertThat(CsvCodec.decode(CsvCodec.encode(listOf(reviewed.copy(transactedAtEpochMillis = 1766142000000)))).single().id)
+            .isNotEqualTo(unreviewedDecoded.id)
+    }
+
     /** Drops the leading id cell; every fixture id in this file is comma-free. */
     private fun String.withoutIdColumn(): String = lineSequence().joinToString("\n") { it.substringAfter(',') }
 

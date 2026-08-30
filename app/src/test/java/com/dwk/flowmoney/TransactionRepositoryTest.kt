@@ -153,6 +153,42 @@ class TransactionRepositoryTest {
                 .inOrder()
         }
 
+    @Test fun csvV4ExportImportExportImportDoesNotDuplicateWhenReviewTimestampIsFilled() =
+        runTest {
+            val now = 5_000L
+            val dao = FakeTransactionDao()
+            val repository = TransactionRepository(dao, now = { now })
+            val original =
+                transaction(id = "ignored", merchant = "Coffee").copy(
+                    providerDescription = "SQ *COFFEE",
+                    accountName = "Checking",
+                    transactedAtEpochMillis = 1_000L,
+                    reviewedAtEpochMillis = null,
+                )
+            val firstImport = CsvCodec.decode(CsvCodec.encode(listOf(original)))
+            assertThat(firstImport.single().reviewedAtEpochMillis).isNull()
+            assertThat(repository.importTransactions(firstImport)).isEqualTo(1)
+
+            // Import filled the blank review timestamp, so the next export is no longer byte-identical.
+            val secondCsv = CsvCodec.encode(repository.load())
+            val secondImport = CsvCodec.decode(secondCsv)
+            assertThat(secondImport.single().reviewedAtEpochMillis).isEqualTo(now)
+            assertThat(secondImport.single().id).isEqualTo(firstImport.single().id)
+            assertThat(repository.importTransactions(secondImport)).isEqualTo(0)
+            assertThat(repository.load()).hasSize(1)
+
+            // A third cycle is a fixed point too: the export is now stable and still re-imports as a no-op.
+            val thirdImport = CsvCodec.decode(CsvCodec.encode(repository.load()))
+            assertThat(thirdImport.single().id).isEqualTo(firstImport.single().id)
+            assertThat(repository.importTransactions(thirdImport)).isEqualTo(0)
+            assertThat(repository.load()).hasSize(1)
+            val stored = repository.load().single()
+            assertThat(stored.reviewedAtEpochMillis).isEqualTo(now)
+            assertThat(stored.providerDescription).isEqualTo("SQ *COFFEE")
+            assertThat(stored.accountName).isEqualTo("Checking")
+            assertThat(stored.transactedAtEpochMillis).isEqualTo(1_000L)
+        }
+
     @Test fun deleteRemovesOnlyRequestedTransaction() =
         runTest {
             val dao = FakeTransactionDao()
