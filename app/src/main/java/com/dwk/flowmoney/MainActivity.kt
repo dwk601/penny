@@ -5878,24 +5878,6 @@ internal fun TransactionEditor(
                 }
             }
 
-            if (!isSynced) {
-                TransactionTypeToggle(
-                    isExpense = draft.isExpense,
-                    onExpenseChange = {
-                        val updatedCategories = CategoryCatalog.categoriesFor(it)
-                        showAllCategories = false
-                        onDraftChange(
-                            draft.copy(
-                                isExpense = it,
-                                category =
-                                    draft.category.takeIf { category -> category in updatedCategories }
-                                        ?: updatedCategories.first(),
-                            ),
-                        )
-                    },
-                )
-            }
-
             LazyColumn(
                 modifier =
                     Modifier
@@ -6083,6 +6065,23 @@ internal fun TransactionEditor(
                         AmountPad(amount = amountInput, isExpense = draft.isExpense, onKey = ::applyAmountKey)
                     }
                     item {
+                        TransactionTypeToggle(
+                            isExpense = draft.isExpense,
+                            onExpenseChange = {
+                                val updatedCategories = CategoryCatalog.categoriesFor(it)
+                                showAllCategories = false
+                                onDraftChange(
+                                    draft.copy(
+                                        isExpense = it,
+                                        category =
+                                            draft.category.takeIf { category -> category in updatedCategories }
+                                                ?: updatedCategories.first(),
+                                    ),
+                                )
+                            },
+                        )
+                    }
+                    item {
                         TransferStatusToggle(
                             isTransfer = draft.effectiveFlowKind == FlowKind.TRANSFER,
                             onTransferChange = ::updateTransferStatus,
@@ -6149,9 +6148,7 @@ internal fun TransactionEditor(
                             Spacer(Modifier.height(6.dp))
                             Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                         }
-                    }
-
-                    item {
+                        Spacer(Modifier.height(14.dp))
                         Column(
                             modifier =
                                 Modifier.animateContentSize(
