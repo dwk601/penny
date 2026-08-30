@@ -13,6 +13,7 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -21,6 +22,11 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -35,6 +41,14 @@ import java.time.format.DateTimeFormatter
 
 class SyncFirstWorkflowUiTest {
     @get:Rule val composeRule = createComposeRule()
+
+    private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+
+    @After
+    fun resetDatabase() {
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+    }
 
     @Test
     fun reviewQueueGroupsNewestFirstAndCategoryTargetsAreBoundedAccessible() {
@@ -531,6 +545,124 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithText("$1,234.56").assertIsDisplayed()
         composeRule.onNodeWithText("Available $1,000.00").assertIsDisplayed()
         composeRule.onNodeWithText("as of ${listDateText(balanceDateSeconds * 1000L)}").assertIsDisplayed()
+    }
+
+    /**
+     * The Overview banner is a review prompt, not a sync log: a healthy connection must say nothing
+     * about its last successful sync. Only the states the user has to act on keep a status line, and
+     * the pending-review count stays regardless.
+     */
+    @Test
+    fun overviewBannerDropsHealthySyncTimestampsButKeepsReviewAndActionableStates() {
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+        val dao = FlowMoneyDatabase.get(context).simpleFinDao()
+        val healthy =
+            SimpleFinProfileEntity(
+                connectionId = "healthy",
+                connectedAtEpochMillis = 1_800_000_000_000L,
+                lastSyncAttemptAtEpochMillis = 1_800_000_000_000L,
+                lastSuccessfulSyncAtEpochMillis = 1_800_000_000_000L,
+                automaticSyncsPerDay = 4,
+            )
+        runBlocking { dao.upsertProfile(healthy) }
+        val pending =
+            listOf(
+                syncedTransaction("pending-a", LocalDate.of(2026, 7, 10), merchant = "Pending Cafe"),
+                syncedTransaction("pending-b", LocalDate.of(2026, 7, 9), merchant = "Pending Diner"),
+            )
+        val gateway = BannerGateway(pending)
+        val viewModel =
+            MainViewModel(
+                repository = gateway,
+                simpleFinRepository = SimpleFinSyncRepository(context),
+                simpleFinAccounts = MutableStateFlow(emptyList()),
+            )
+        viewModel.reportInitializationComplete()
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                FlowMoneyApp(
+                    viewModel = viewModel,
+                    coldStartSimpleFinSync = { null },
+                    transactionWidgetRefresh = {},
+                )
+            }
+        }
+
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("overview_sync_review_banner").assertExists() }.isSuccess
+        }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("overview_pending_review_count")
+                    .assertTextEquals("2 synced transactions available for optional corrections")
+            }.isSuccess
+        }
+        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
+        composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed()
+        composeRule.onNodeWithTag("overview_sync_data_action").assertDoesNotExist()
+
+        // A never-synced but healthy connection is still silent about sync history.
+        runBlocking { dao.upsertProfile(healthy.copy(lastSuccessfulSyncAtEpochMillis = null)) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
+        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
+        composeRule
+            .onNodeWithTag("overview_pending_review_count")
+            .assertTextEquals("2 synced transactions available for optional corrections")
+
+        // States the user must act on keep their status line.
+        runBlocking { dao.upsertProfile(healthy.copy(isPaused = true, lastError = "SimpleFIN reconnect required")) }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithText("Reconnect required").assertIsDisplayed() }.isSuccess
+        }
+        composeRule.onNodeWithTag("overview_sync_data_action").assertIsDisplayed()
+
+        runBlocking { dao.clearProfile() }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithText("Bank not connected").assertIsDisplayed() }.isSuccess
+        }
+        composeRule.onNodeWithText("Connect bank").assertIsDisplayed()
+        composeRule
+            .onNodeWithTag("overview_pending_review_count")
+            .assertTextEquals("2 synced transactions available for optional corrections")
+
+        // With nothing to review the banner falls back to its empty line, still without sync history.
+        composeRule.runOnIdle {
+            gateway.rows.value = gateway.rows.value.map { it.copy(reviewedAtEpochMillis = 1L) }
+            gateway.pending.value = emptyList()
+        }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("overview_pending_review_count")
+                    .assertTextEquals("No synced transactions to check")
+            }.isSuccess
+        }
+        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
+    }
+
+    private class BannerGateway(
+        initial: List<Transaction>,
+    ) : TransactionGateway {
+        val rows = MutableStateFlow(initial)
+        val pending = MutableStateFlow(initial)
+        override val transactions: Flow<List<Transaction>> = rows
+        override val unreviewedTransactions: Flow<List<Transaction>> = pending
+
+        override suspend fun load(): List<Transaction> = rows.value
+
+        override suspend fun getUnreviewedTransactions(): List<Transaction> = pending.value
+
+        override suspend fun upsert(transaction: Transaction) = Unit
+
+        override suspend fun importTransactions(transactions: List<Transaction>): Int = transactions.size
+
+        override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>): Int = transactions.size
+
+        override suspend fun delete(id: String) = Unit
     }
 
     @Test

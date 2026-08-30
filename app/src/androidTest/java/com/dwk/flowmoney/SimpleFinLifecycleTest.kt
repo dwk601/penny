@@ -33,6 +33,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.time.LocalTime
+import java.time.ZonedDateTime
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -467,6 +469,94 @@ class SimpleFinLifecycleTest {
             }
         }
 
+    /**
+     * The preferred time lives outside the profile row, so it has to be durable before the worker is
+     * re-anchored: a crash between the two must leave the saved time, never a schedule pointing at a
+     * time the app has forgotten.
+     */
+    @Test
+    fun preferredSyncTimeIsSavedBeforeReanchoringAtTheProfileCadence() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                val original = SimpleFinProfileEntity(connectionId = "current", automaticSyncsPerDay = 5)
+                db.simpleFinDao().upsertProfile(original)
+                val timesVisibleToScheduling = mutableListOf<LocalTime?>()
+                fake.schedule = { count ->
+                    timesVisibleToScheduling += fake.preferredSyncTime
+                    fake.scheduledCounts += count
+                }
+
+                repository.updateAutomaticSyncTime(LocalTime.of(6, 45))
+
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45)), fake.savedSyncTimes)
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45)), timesVisibleToScheduling)
+                assertEquals(listOf(5), fake.scheduledCounts)
+                assertEquals(LocalTime.of(6, 45), repository.preferredSyncTime.value)
+                assertEquals(original, db.simpleFinDao().getProfile())
+
+                // Clearing is the same path and must publish the unset state, not keep the old time.
+                repository.updateAutomaticSyncTime(null)
+
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45), null), fake.savedSyncTimes)
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45), null), timesVisibleToScheduling)
+                assertEquals(listOf(5, 5), fake.scheduledCounts)
+                assertNull(repository.preferredSyncTime.value)
+                assertNull(fake.preferredSyncTime)
+            }
+        }
+
+    @Test
+    fun preferredSyncTimeSurvivesReanchorFailureAndStillSurfacesTheSchedulingException() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
+                fake.schedule = { throw IllegalStateException("reanchor failed") }
+
+                val failure = runCatching { repository.updateAutomaticSyncTime(LocalTime.of(23, 15)) }.exceptionOrNull()
+
+                assertTrue(failure is SimpleFinAutomaticSchedulingException)
+                assertEquals(
+                    "Automatic sync schedule was saved, but scheduling could not be updated",
+                    failure?.message,
+                )
+                assertEquals("reanchor failed", failure?.cause?.message)
+                assertEquals(LocalTime.of(23, 15), fake.preferredSyncTime)
+                assertEquals(LocalTime.of(23, 15), repository.preferredSyncTime.value)
+            }
+        }
+
+    @Test
+    fun disconnectedPreferredSyncTimeUpdateSavesNothingAndSchedulesNothing() =
+        runBlocking {
+            withRepository { _, fake, repository ->
+                val failure = runCatching { repository.updateAutomaticSyncTime(LocalTime.of(9, 0)) }.exceptionOrNull()
+
+                assertTrue(failure is IllegalStateException)
+                assertFalse(failure is SimpleFinAutomaticSchedulingException)
+                assertTrue(fake.savedSyncTimes.isEmpty())
+                assertTrue(fake.scheduledCounts.isEmpty())
+                assertNull(repository.preferredSyncTime.value)
+            }
+        }
+
+    @Test
+    fun recoveryPublishesTheStoredPreferredSyncTimeAndTreatsAReadFailureAsUnset() =
+        runBlocking {
+            withRepository { _, fake, repository ->
+                fake.preferredSyncTime = LocalTime.of(7, 30)
+
+                repository.recoverPendingConnection()
+
+                assertEquals(LocalTime.of(7, 30), repository.preferredSyncTime.value)
+
+                fake.readPreferredTime = { throw IOException("preferences unreadable") }
+
+                repository.recoverPendingConnection()
+
+                assertNull(repository.preferredSyncTime.value)
+            }
+        }
+
     @Test
     fun disconnectedQueuedPreferenceUpdateDoesNotSchedule() =
         runBlocking {
@@ -783,21 +873,49 @@ class SimpleFinLifecycleTest {
     fun periodicSchedulingUpdatesSingleUniqueWork() =
         runBlocking {
             SimpleFinSyncWorker.cancel(context)
+            writePreferredSyncTime(context, null)
             try {
                 SimpleFinSyncWorker.schedule(context, 1)
                 SimpleFinSyncWorker.schedule(context, 12)
 
-                val active =
-                    WorkManager
-                        .getInstance(context)
-                        .getWorkInfosForUniqueWork(SimpleFinSyncWorker.PERIODIC_WORK_NAME)
-                        .get()
-                        .filter { !it.state.isFinished }
+                val active = activePeriodicWork()
                 assertEquals(1, active.size)
+                assertEquals(0L, active.single().initialDelayMillis)
+                val updatedId = active.single().id
+
+                // Re-anchoring must move the first run to the chosen time, which WorkManager can only
+                // do by replacing the request rather than updating it in place.
+                val preferred = LocalTime.now().plusHours(3).withSecond(0).withNano(0)
+                writePreferredSyncTime(context, preferred)
+                SimpleFinSyncWorker.schedule(context, 12, reanchor = true)
+                val enqueuedAt = System.currentTimeMillis()
+                val expectedDelay = initialSyncDelayMillis(preferred, ZonedDateTime.now())
+
+                val reanchored = activePeriodicWork()
+                assertEquals(1, reanchored.size)
+                assertFalse(updatedId == reanchored.single().id)
+                assertTrue(
+                    "initial delay ${reanchored.single().initialDelayMillis} should be about $expectedDelay",
+                    Math.abs(reanchored.single().initialDelayMillis - expectedDelay) <= SCHEDULE_TOLERANCE_MILLIS,
+                )
+                assertTrue(
+                    "next run ${reanchored.single().nextScheduleTimeMillis} should be about " +
+                        "${enqueuedAt + expectedDelay}",
+                    Math.abs(reanchored.single().nextScheduleTimeMillis - (enqueuedAt + expectedDelay)) <=
+                        SCHEDULE_TOLERANCE_MILLIS,
+                )
             } finally {
                 SimpleFinSyncWorker.cancel(context)
+                writePreferredSyncTime(context, null)
             }
         }
+
+    private fun activePeriodicWork(): List<WorkInfo> =
+        WorkManager
+            .getInstance(context)
+            .getWorkInfosForUniqueWork(SimpleFinSyncWorker.PERIODIC_WORK_NAME)
+            .get()
+            .filter { !it.state.isFinished }
 
     @Test
     fun partialErrorsRecordGuardedFailureWithoutWritingDataOrAdvancingSuccess() =
@@ -1524,6 +1642,13 @@ class SimpleFinLifecycleTest {
             credential = connectionId to accessUrl
         }
         var schedule: suspend (Int) -> Unit = { scheduledCounts += it }
+        var preferredSyncTime: LocalTime? = null
+        val savedSyncTimes = mutableListOf<LocalTime?>()
+        var readPreferredTime: suspend () -> LocalTime? = { preferredSyncTime }
+        var savePreferredTime: suspend (LocalTime?) -> Unit = { time ->
+            savedSyncTimes += time
+            preferredSyncTime = time
+        }
 
         val scheduleCount get() = scheduledCounts.size
 
@@ -1573,6 +1698,8 @@ class SimpleFinLifecycleTest {
                 scheduleWork = { schedule(it) },
                 cancelWork = { cancelCount++ },
                 now = { currentTime },
+                readPreferredSyncTime = { readPreferredTime() },
+                savePreferredSyncTime = { savePreferredTime(it) },
             )
     }
 
@@ -1610,6 +1737,8 @@ class SimpleFinLifecycleTest {
     private suspend fun <T> kotlinx.coroutines.flow.Flow<T>.firstValue(): T = first()
 
     private companion object {
+        /** WorkManager stores wall-clock schedule times, so allow for the enqueue round trip. */
+        const val SCHEDULE_TOLERANCE_MILLIS = 60_000L
         const val OLD_URL = "https://old-user:old-password@bridge.simplefin.org/simplefin"
         const val NEW_URL = "https://new-user:new-password@bridge.simplefin.org/simplefin"
 

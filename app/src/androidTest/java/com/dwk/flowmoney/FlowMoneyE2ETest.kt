@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
@@ -13,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -28,6 +30,8 @@ import org.junit.runner.Description
 import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
 import java.io.File
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 
 @RunWith(AndroidJUnit4::class)
 class FlowMoneyE2ETest {
@@ -45,6 +49,8 @@ class FlowMoneyE2ETest {
                     File(context.noBackupFilesDir, SimpleFinCredentialStore.ROLLBACK_FILE_NAME).deleteRecursively()
                     clearPreferences(context, "flow_money")
                     clearPreferences(context, SimpleFinMigrationCleanup.PREFERENCES)
+                    clearPreferences(context, SIMPLEFIN_SCHEDULE_PREFERENCES)
+                    check(readPreferredSyncTime(context) == null) { "A stale preferred sync time leaked into the test" }
                     check(!context.getDatabasePath("flow_money.db").exists())
                     check(!File(context.noBackupFilesDir, SimpleFinCredentialStore.CREDENTIAL_FILE_NAME).exists())
                     check(!File(context.noBackupFilesDir, SimpleFinCredentialStore.PENDING_FILE_NAME).exists())
@@ -60,14 +66,14 @@ class FlowMoneyE2ETest {
     @Test
     fun automaticSyncFailureMessagesDistinguishPersistedSchedulingFailure() {
         assertEquals(
-            "Frequency saved, but automatic scheduling could not be updated. Try again.",
-            automaticSyncFrequencyUpdateFailureMessage(
+            "Schedule saved, but automatic scheduling could not be updated. Try again.",
+            automaticSyncScheduleUpdateFailureMessage(
                 SimpleFinAutomaticSchedulingException(IllegalStateException("schedule failed")),
             ),
         )
         assertEquals(
-            "Could not update automatic sync frequency",
-            automaticSyncFrequencyUpdateFailureMessage(IllegalStateException("not persisted")),
+            "Could not update automatic sync schedule",
+            automaticSyncScheduleUpdateFailureMessage(IllegalStateException("not persisted")),
         )
     }
 
@@ -121,9 +127,13 @@ class FlowMoneyE2ETest {
         composeRule.onNodeWithText("Data").performClick()
         composeRule.onNodeWithTag("bank_sync_card").assertIsDisplayed()
         composeRule.onNodeWithTag("simplefin_sync_button").assertIsDisplayed()
-        composeRule.onNodeWithTag("connected_accounts_card").performScrollTo().assertIsDisplayed()
+        // The connected card is tall enough that the cards below it are not composed yet, so walk
+        // the lazy list rather than scrolling within an already-composed subtree.
+        composeRule.onNodeWithTag("data_sheet_list").performScrollToNode(hasTestTag("connected_accounts_card"))
+        composeRule.onNodeWithTag("connected_accounts_card").assertIsDisplayed()
         composeRule.onNodeWithText(accountName).assertIsDisplayed()
-        composeRule.onNodeWithTag("local_data_card").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("data_sheet_list").performScrollToNode(hasTestTag("local_data_card"))
+        composeRule.onNodeWithTag("local_data_card").assertIsDisplayed()
         composeRule.onNodeWithTag("csv_import_button").assertIsDisplayed()
         composeRule.onNodeWithTag("csv_export_button").assertIsDisplayed()
         composeRule.onNodeWithTag("simplefin_setup_card").assertDoesNotExist()
@@ -156,6 +166,65 @@ class FlowMoneyE2ETest {
         composeRule
             .onNodeWithTag("simplefin_auto_sync_frequency_value")
             .assertTextEquals("7 syncs per day")
+    }
+
+    /**
+     * The preferred sync time is the only schedule input that lives outside the profile row, so the
+     * picker, the visible value, and the SharedPreferences record all have to agree — including
+     * after the user clears it back to "any time".
+     */
+    @Test
+    fun activeSimpleFinProfileShowsAndPersistsPreferredSyncTime() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        seedSimpleFinProfile(isPaused = false, automaticSyncsPerDay = 4)
+        composeRule.activityRule.scenario.recreate()
+
+        composeRule.onNodeWithText("Data").performClick()
+        composeRule
+            .onNodeWithTag("simplefin_sync_time_value")
+            .performScrollTo()
+            .assertTextEquals("Any time")
+        composeRule.onNodeWithTag("simplefin_sync_time_clear").assertDoesNotExist()
+
+        // The picker opens on the current clock time, so the accepted value must land inside the
+        // window the dialog was on screen.
+        val beforePicker = LocalTime.now().withSecond(0).withNano(0)
+        composeRule.onNodeWithTag("simplefin_sync_time_action").performClick()
+        composeRule.onNodeWithText("Select time").assertIsDisplayed()
+        composeRule.onNodeWithText("OK").performClick()
+        val afterPicker = LocalTime.now().withSecond(0).withNano(0)
+
+        composeRule.waitUntil(5_000) { readPreferredSyncTime(context) != null }
+        val persisted = readPreferredSyncTime(context)!!
+        assertTrue(
+            "Preferred sync time $persisted should be the time the picker opened on ($beforePicker..$afterPicker)",
+            persisted == beforePicker || persisted == afterPicker,
+        )
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("simplefin_sync_time_value")
+                    .assertTextEquals(persisted.format(SyncTimeFormatter))
+            }.isSuccess
+        }
+        composeRule
+            .onNodeWithTag("simplefin_sync_time_value")
+            .performScrollTo()
+            .assertTextEquals(persisted.format(SyncTimeFormatter))
+
+        composeRule.onNodeWithTag("simplefin_sync_time_clear").performScrollTo().performClick()
+        composeRule.waitUntil(5_000) { readPreferredSyncTime(context) == null }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule.onNodeWithTag("simplefin_sync_time_value").assertTextEquals("Any time")
+            }.isSuccess
+        }
+        composeRule.onNodeWithTag("simplefin_sync_time_clear").assertDoesNotExist()
+        // Clearing the time must not disturb the cadence stored on the profile.
+        assertEquals(
+            4,
+            runBlocking { FlowMoneyDatabase.get(context).simpleFinDao().getProfile()?.automaticSyncsPerDay },
+        )
     }
 
     @Test
@@ -244,6 +313,7 @@ class FlowMoneyE2ETest {
 
     private companion object {
         const val PackageName = "com.dwk.flowmoney"
+        val SyncTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
         fun clearPreferences(
             context: Context,
