@@ -180,8 +180,10 @@ class SimpleFinClient(
                                     description = tx.optString("description", ""),
                                     pending = tx.optBoolean("pending", false),
                                     payee = validateProviderPayee(tx.optNullableString("payee")),
+                                    transactedAt = tx.optLong("transacted_at", 0L).takeIf { it > 0 },
                                 )
                             },
+                        balanceDate = account.optLong("balance-date", 0L).takeIf { it > 0 },
                     )
                 }
             SimpleFinAccountsResult(accounts, errors)

@@ -1,0 +1,429 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 12,
+    "identityHash": "35b24fdebd9dc684d1c9418e2c1822cc",
+    "entities": [
+      {
+        "tableName": "transactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `occurredAtEpochMillis` INTEGER NOT NULL, `merchant` TEXT NOT NULL, `category` TEXT NOT NULL, `note` TEXT NOT NULL, `cents` INTEGER NOT NULL, `recurringInterval` TEXT, `source` TEXT NOT NULL DEFAULT 'local', `accountKey` TEXT, `accountName` TEXT, `reviewedAtEpochMillis` INTEGER, `providerDescription` TEXT, `merchantOverride` TEXT, `flowKind` TEXT NOT NULL DEFAULT 'NORMAL', `flowKindOverride` TEXT, `locationCity` TEXT, `locationState` TEXT, `locationCountry` TEXT, `transactedAtEpochMillis` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurredAtEpochMillis",
+            "columnName": "occurredAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "merchant",
+            "columnName": "merchant",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "note",
+            "columnName": "note",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cents",
+            "columnName": "cents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recurringInterval",
+            "columnName": "recurringInterval",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'local'"
+          },
+          {
+            "fieldPath": "accountKey",
+            "columnName": "accountKey",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "accountName",
+            "columnName": "accountName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "reviewedAtEpochMillis",
+            "columnName": "reviewedAtEpochMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "providerDescription",
+            "columnName": "providerDescription",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "merchantOverride",
+            "columnName": "merchantOverride",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "flowKind",
+            "columnName": "flowKind",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'NORMAL'"
+          },
+          {
+            "fieldPath": "flowKindOverride",
+            "columnName": "flowKindOverride",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "locationCity",
+            "columnName": "locationCity",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "locationState",
+            "columnName": "locationState",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "locationCountry",
+            "columnName": "locationCountry",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "transactedAtEpochMillis",
+            "columnName": "transactedAtEpochMillis",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transactions_occurredAtEpochMillis",
+            "unique": false,
+            "columnNames": [
+              "occurredAtEpochMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_occurredAtEpochMillis` ON `${TABLE_NAME}` (`occurredAtEpochMillis`)"
+          },
+          {
+            "name": "index_transactions_source",
+            "unique": false,
+            "columnNames": [
+              "source"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_source` ON `${TABLE_NAME}` (`source`)"
+          },
+          {
+            "name": "index_transactions_accountKey",
+            "unique": false,
+            "columnNames": [
+              "accountKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_accountKey` ON `${TABLE_NAME}` (`accountKey`)"
+          },
+          {
+            "name": "index_transactions_source_reviewedAtEpochMillis_occurredAtEpochMillis",
+            "unique": false,
+            "columnNames": [
+              "source",
+              "reviewedAtEpochMillis",
+              "occurredAtEpochMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_source_reviewedAtEpochMillis_occurredAtEpochMillis` ON `${TABLE_NAME}` (`source`, `reviewedAtEpochMillis`, `occurredAtEpochMillis`)"
+          }
+        ]
+      },
+      {
+        "tableName": "simplefin_profile",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL DEFAULT 'default', `connectionId` TEXT NOT NULL DEFAULT 'legacy', `connectedAtEpochMillis` INTEGER, `lastSyncAttemptAtEpochMillis` INTEGER, `lastSuccessfulSyncAtEpochMillis` INTEGER, `lastError` TEXT, `isPaused` INTEGER NOT NULL DEFAULT 0, `automaticSyncsPerDay` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'default'"
+          },
+          {
+            "fieldPath": "connectionId",
+            "columnName": "connectionId",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'legacy'"
+          },
+          {
+            "fieldPath": "connectedAtEpochMillis",
+            "columnName": "connectedAtEpochMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSyncAttemptAtEpochMillis",
+            "columnName": "lastSyncAttemptAtEpochMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSuccessfulSyncAtEpochMillis",
+            "columnName": "lastSuccessfulSyncAtEpochMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isPaused",
+            "columnName": "isPaused",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "automaticSyncsPerDay",
+            "columnName": "automaticSyncsPerDay",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "simplefin_accounts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `name` TEXT NOT NULL, `currency` TEXT, `institutionName` TEXT, `balanceAmount` TEXT, `availableBalanceAmount` TEXT, `balanceDateEpochSeconds` INTEGER, `lastSeenAtEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`accountId`))",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currency",
+            "columnName": "currency",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "institutionName",
+            "columnName": "institutionName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "balanceAmount",
+            "columnName": "balanceAmount",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "availableBalanceAmount",
+            "columnName": "availableBalanceAmount",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "balanceDateEpochSeconds",
+            "columnName": "balanceDateEpochSeconds",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSeenAtEpochMillis",
+            "columnName": "lastSeenAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId"
+          ]
+        }
+      },
+      {
+        "tableName": "simplefin_ignored_transactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`transactionId` TEXT NOT NULL, `ignoredAtEpochMillis` INTEGER NOT NULL, `occurredAtEpochMillis` INTEGER, PRIMARY KEY(`transactionId`))",
+        "fields": [
+          {
+            "fieldPath": "transactionId",
+            "columnName": "transactionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ignoredAtEpochMillis",
+            "columnName": "ignoredAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurredAtEpochMillis",
+            "columnName": "occurredAtEpochMillis",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "transactionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_simplefin_ignored_transactions_occurredAtEpochMillis",
+            "unique": false,
+            "columnNames": [
+              "occurredAtEpochMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_simplefin_ignored_transactions_occurredAtEpochMillis` ON `${TABLE_NAME}` (`occurredAtEpochMillis`)"
+          }
+        ]
+      },
+      {
+        "tableName": "simplefin_identity_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL DEFAULT 'stable_v2', `reconciliationComplete` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'stable_v2'"
+          },
+          {
+            "fieldPath": "reconciliationComplete",
+            "columnName": "reconciliationComplete",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "merchant_rules",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`normalizedProviderMerchant` TEXT NOT NULL, `category` TEXT NOT NULL, `merchantOverride` TEXT, PRIMARY KEY(`normalizedProviderMerchant`))",
+        "fields": [
+          {
+            "fieldPath": "normalizedProviderMerchant",
+            "columnName": "normalizedProviderMerchant",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "merchantOverride",
+            "columnName": "merchantOverride",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "normalizedProviderMerchant"
+          ]
+        }
+      },
+      {
+        "tableName": "place_geocodes",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`placeKey` TEXT NOT NULL, `city` TEXT, `state` TEXT, `country` TEXT, `latitude` REAL, `longitude` REAL, `resolvedAtEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`placeKey`))",
+        "fields": [
+          {
+            "fieldPath": "placeKey",
+            "columnName": "placeKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "city",
+            "columnName": "city",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "country",
+            "columnName": "country",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "latitude",
+            "columnName": "latitude",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "longitude",
+            "columnName": "longitude",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "resolvedAtEpochMillis",
+            "columnName": "resolvedAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "placeKey"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '35b24fdebd9dc684d1c9418e2c1822cc')"
+    ]
+  }
+}

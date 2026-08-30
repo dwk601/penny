@@ -22,6 +22,8 @@ internal const val MIN_AUTOMATIC_SYNCS_PER_DAY = 1
 internal const val MAX_AUTOMATIC_SYNCS_PER_DAY = 12
 internal val SIMPLEFIN_RETRY_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(2)
 internal val SIMPLEFIN_SYNC_WINDOW_SECONDS = TimeUnit.DAYS.toSeconds(45)
+internal val SIMPLEFIN_REQUEST_WINDOW_SECONDS =
+    SIMPLEFIN_SYNC_WINDOW_SECONDS - TimeUnit.HOURS.toSeconds(1)
 
 internal fun isValidAutomaticSyncsPerDay(count: Int) = count in MIN_AUTOMATIC_SYNCS_PER_DAY..MAX_AUTOMATIC_SYNCS_PER_DAY
 
@@ -235,15 +237,21 @@ class SimpleFinSyncRepository internal constructor(
         return try {
             val accessUrl = readCredential(profile.connectionId)
             val end = TimeUnit.MILLISECONDS.toSeconds(time)
-            val start = end - SIMPLEFIN_SYNC_WINDOW_SECONDS
+            val start = end - SIMPLEFIN_REQUEST_WINDOW_SECONDS
             val result = functions.accounts(accessUrl, start, end)
-            if (result.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
+            val providerErrors = partitionProviderErrors(result.errors)
+            if (providerErrors.fatal.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
             val mapped = SimpleFinMapper.map(origin, result.accounts)
             val payloadOccurrences = mapped.payloadOccurrences()
             val error =
-                (mapped.warnings + listOfNotNull(nonUsdMessage(result.accounts)))
-                    .joinToString("; ")
+                (
+                    mapped.warnings +
+                        listOfNotNull(
+                            nonUsdMessage(result.accounts),
+                            joinAdvisoryErrors(providerErrors.advisory).ifBlank { null },
+                        )
+                ).joinToString("; ")
                     .ifBlank { null }
             var writeResult = SyncedTransactionWriteResult(0, 0, 0)
             db.withTransaction {
@@ -344,14 +352,20 @@ class SimpleFinSyncRepository internal constructor(
         try {
             val fetchedAt = now()
             val end = TimeUnit.MILLISECONDS.toSeconds(fetchedAt)
-            val initial = functions.accounts(accessUrl, end - SIMPLEFIN_SYNC_WINDOW_SECONDS, end)
-            if (initial.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
+            val initial = functions.accounts(accessUrl, end - SIMPLEFIN_REQUEST_WINDOW_SECONDS, end)
+            val providerErrors = partitionProviderErrors(initial.errors)
+            if (providerErrors.fatal.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
             val mapped = SimpleFinMapper.map(origin, initial.accounts)
             val payloadOccurrences = mapped.payloadOccurrences()
             val warning =
-                (mapped.warnings + listOfNotNull(nonUsdMessage(initial.accounts)))
-                    .joinToString("; ")
+                (
+                    mapped.warnings +
+                        listOfNotNull(
+                            nonUsdMessage(initial.accounts),
+                            joinAdvisoryErrors(providerErrors.advisory).ifBlank { null },
+                        )
+                ).joinToString("; ")
                     .ifBlank { null }
             var writeResult = SyncedTransactionWriteResult(0, 0, 0)
             lifecycleMutex.withLock {

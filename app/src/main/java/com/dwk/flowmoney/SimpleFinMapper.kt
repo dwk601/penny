@@ -17,7 +17,7 @@ object SimpleFinMapper {
                     it.orgName,
                     it.balance,
                     it.availableBalance,
-                    null,
+                    it.balanceDate,
                     now,
                 )
             }
@@ -56,6 +56,7 @@ object SimpleFinMapper {
                         locationCity = location?.city,
                         locationState = location?.state,
                         locationCountry = location?.country,
+                        transactedAtEpochMillis = tx.transactedAt?.times(1000L),
                     )
                 }
             }

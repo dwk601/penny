@@ -467,6 +467,7 @@ interface TransactionDao {
                                 locationCity = incoming.locationCity,
                                 locationState = incoming.locationState,
                                 locationCountry = incoming.locationCountry,
+                                transactedAtEpochMillis = incoming.transactedAtEpochMillis,
                             )
                         providerRefreshed.copy(
                             reviewedAtEpochMillis =
@@ -499,12 +500,13 @@ interface TransactionDao {
             merchantOverride = merchantOverride,
         )
 
-    suspend fun locationForId(id: String): StoredTransactionLocation? {
+    suspend fun providerOwnedForId(id: String): StoredProviderOwnedFields? {
         val row = transactionsForIds(listOf(id)).singleOrNull() ?: return null
-        return StoredTransactionLocation(
+        return StoredProviderOwnedFields(
             locationCity = row.locationCity,
             locationState = row.locationState,
             locationCountry = row.locationCountry,
+            transactedAtEpochMillis = row.transactedAtEpochMillis,
         )
     }
 
@@ -591,4 +593,5 @@ private fun TransactionEntity.hasSameProviderStateAs(other: TransactionEntity): 
         flowKind == other.flowKind &&
         locationCity == other.locationCity &&
         locationState == other.locationState &&
-        locationCountry == other.locationCountry
+        locationCountry == other.locationCountry &&
+        transactedAtEpochMillis == other.transactedAtEpochMillis

@@ -33,6 +33,7 @@ data class TransactionEntity(
     val locationCity: String? = null,
     val locationState: String? = null,
     val locationCountry: String? = null,
+    val transactedAtEpochMillis: Long? = null,
 ) {
     val isUnreviewed: Boolean
         get() = source == "simplefin" && reviewedAtEpochMillis == null
@@ -61,6 +62,7 @@ fun Transaction.toEntity(): TransactionEntity =
         locationCity = locationCity,
         locationState = locationState,
         locationCountry = locationCountry,
+        transactedAtEpochMillis = transactedAtEpochMillis,
     )
 
 fun TransactionEntity.toTransaction(): Transaction =
@@ -84,6 +86,7 @@ fun TransactionEntity.toTransaction(): Transaction =
         locationCity = locationCity,
         locationState = locationState,
         locationCountry = locationCountry,
+        transactedAtEpochMillis = transactedAtEpochMillis,
     )
 
 private fun String.toRecurrenceIntervalOrNull(): RecurrenceInterval? = RecurrenceInterval.entries.firstOrNull { it.name == this }

@@ -431,6 +431,7 @@ internal data class EditorDraft(
     val providerMerchant: String?,
     val flowKind: FlowKind,
     val flowKindOverride: FlowKind?,
+    val transactedAtEpochMillis: Long? = null,
 ) {
     val effectiveFlowKind: FlowKind
         get() = flowKindOverride ?: flowKind
@@ -464,6 +465,7 @@ internal fun saveEditorDraft(draft: EditorDraft): List<Any> =
         draft.providerMerchant.orEmpty(),
         draft.flowKind.name,
         draft.flowKindOverride?.name.orEmpty(),
+        draft.transactedAtEpochMillis ?: Long.MIN_VALUE,
     )
 
 /** Size-checked restoration keeps process state written by older app versions valid. */
@@ -506,6 +508,8 @@ internal fun restoreEditorDraft(values: List<Any>): EditorDraft {
         flowKindOverride =
             (values.getOrNull(19) as? String)
                 ?.let { saved -> FlowKind.entries.firstOrNull { it.name == saved } },
+        transactedAtEpochMillis =
+            (values.getOrNull(20) as? Long)?.takeUnless { it == Long.MIN_VALUE },
     )
 }
 
@@ -528,6 +532,7 @@ internal fun newEditorDraft(): EditorDraft =
         providerMerchant = null,
         flowKind = FlowKind.NORMAL,
         flowKindOverride = null,
+        transactedAtEpochMillis = null,
     )
 
 internal fun widgetQuickAddDraft(suggestionHistory: TransactionSuggestionHistory): EditorDraft {
@@ -559,6 +564,7 @@ internal fun Transaction.toEditorDraft() =
         providerMerchant = providerMerchant,
         flowKind = flowKind,
         flowKindOverride = flowKindOverride,
+        transactedAtEpochMillis = transactedAtEpochMillis,
     )
 
 internal fun EditorDraft.prepareForEditorSave(
@@ -605,6 +611,7 @@ internal fun EditorDraft.toTransaction(): Transaction {
         providerMerchant = rawProviderMerchant.takeIf { source == "simplefin" },
         flowKind = flowKind,
         flowKindOverride = flowKindOverride,
+        transactedAtEpochMillis = transactedAtEpochMillis,
     )
 }
 
@@ -4159,11 +4166,46 @@ internal fun DataSheet(
                                 } else {
                                     simpleFin.accounts.forEach { account ->
                                         Text(account.name, fontWeight = FontWeight.SemiBold)
+                                        account.balanceAmount?.let { balance ->
+                                            Text(
+                                                MoneyFormatter.formatUsd(
+                                                    MoneyFormatter.parseAmountToCents(balance),
+                                                ),
+                                            )
+                                        }
                                         Text(
                                             account.institutionName ?: account.currency.orEmpty(),
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             fontSize = 13.sp,
                                         )
+                                        if (account.availableBalanceAmount != null &&
+                                            account.availableBalanceAmount != account.balanceAmount
+                                        ) {
+                                            Text(
+                                                "Available ${
+                                                    MoneyFormatter.formatUsd(
+                                                        MoneyFormatter.parseAmountToCents(
+                                                            account.availableBalanceAmount,
+                                                        ),
+                                                    )
+                                                }",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 13.sp,
+                                            )
+                                        }
+                                        account.balanceDateEpochSeconds?.let { seconds ->
+                                            Text(
+                                                "as of ${
+                                                    Instant
+                                                        .ofEpochMilli(seconds * 1000L)
+                                                        .atZone(ZoneId.systemDefault())
+                                                        .toLocalDateTime()
+                                                        .format(ListDateFormatter)
+                                                }",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 13.sp,
+                                            )
+                                        }
                                         Spacer(Modifier.height(8.dp))
                                     }
                                 }
@@ -4697,8 +4739,9 @@ private fun DataCard(
 private fun StatusLine(
     label: String,
     value: String,
+    modifier: Modifier = Modifier,
 ) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+    Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Text(
             label,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -6369,7 +6412,20 @@ private fun SyncedProviderSummary(
         ) {
             Text("Bank details", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             StatusLine("Account", draft.accountName ?: draft.accountKey ?: "Unknown account")
-            StatusLine("Date", dateTime.format(ListDateFormatter))
+            StatusLine("Posted", dateTime.format(ListDateFormatter))
+            if (draft.transactedAtEpochMillis != null &&
+                draft.transactedAtEpochMillis != draft.occurredAtEpochMillis
+            ) {
+                StatusLine(
+                    "Transacted",
+                    Instant
+                        .ofEpochMilli(draft.transactedAtEpochMillis)
+                        .atZone(ZoneId.systemDefault())
+                        .toLocalDateTime()
+                        .format(ListDateFormatter),
+                    Modifier.testTag("synced_transacted_at"),
+                )
+            }
             StatusLine(
                 "Amount",
                 MoneyFormatter.formatUsd(

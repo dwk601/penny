@@ -600,14 +600,14 @@ class TransactionDaoDataPathTest {
                 )
 
                 assertEquals(
-                    StoredTransactionLocation(locationCity = "PORTLAND", locationState = "OR", locationCountry = "US"),
-                    dao.locationForId("located"),
+                    StoredProviderOwnedFields(locationCity = "PORTLAND", locationState = "OR", locationCountry = "US"),
+                    dao.providerOwnedForId("located"),
                 )
                 assertEquals(
-                    StoredTransactionLocation(locationCity = null, locationState = null, locationCountry = null),
-                    dao.locationForId("unlocated"),
+                    StoredProviderOwnedFields(locationCity = null, locationState = null, locationCountry = null),
+                    dao.providerOwnedForId("unlocated"),
                 )
-                assertNull(dao.locationForId("missing"))
+                assertNull(dao.providerOwnedForId("missing"))
             } finally {
                 database.close()
             }

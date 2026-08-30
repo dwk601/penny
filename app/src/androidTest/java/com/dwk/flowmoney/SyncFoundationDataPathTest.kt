@@ -45,6 +45,7 @@ class SyncFoundationDataPathTest {
                         FlowMoneyDatabase.MIGRATION_8_9,
                         FlowMoneyDatabase.MIGRATION_9_10,
                         FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
                     ).build()
             try {
                 val rows = migrated.transactionDao().getAll().associateBy { it.id }
@@ -105,6 +106,7 @@ class SyncFoundationDataPathTest {
                         FlowMoneyDatabase.MIGRATION_8_9,
                         FlowMoneyDatabase.MIGRATION_9_10,
                         FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
                     )
                     .build()
             try {
@@ -179,7 +181,11 @@ class SyncFoundationDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_9_10, FlowMoneyDatabase.MIGRATION_10_11)
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_9_10,
+                        FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
+                    )
                     .build()
             try {
                 val rows = migrated.transactionDao().getAll().associateBy { it.id }
