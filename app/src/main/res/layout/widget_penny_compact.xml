@@ -48,8 +48,7 @@
             android:maxLines="1"
             android:text="@string/widget_unavailable_compact"
             android:textColor="@color/widget_on_surface_inverse"
-            android:textScaleX="0.75"
-            android:textStyle="bold" />
+            android:textScaleX="0.75" />
     </LinearLayout>
 
     <TextView

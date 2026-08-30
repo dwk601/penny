@@ -378,7 +378,7 @@ private fun configureMapChrome(mapView: MapView, map: MapLibreMap) {
     uiSettings.isAttributionEnabled = true
     uiSettings.isLogoEnabled = true
     val density = mapView.resources.displayMetrics.density
-    val inset = 4
+    val inset = (12 * density).toInt() // clear the 28.dp rounded clip
     uiSettings.setLogoMargins(inset, inset, inset, inset)
     uiSettings.setAttributionMargins((92 * density).toInt(), inset, inset, inset)
 }

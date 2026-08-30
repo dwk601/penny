@@ -62,8 +62,7 @@
         android:includeFontPadding="false"
         android:maxLines="1"
         android:text="@string/widget_unavailable"
-        android:textColor="@color/widget_on_surface_inverse"
-        android:textStyle="bold" />
+        android:textColor="@color/widget_on_surface_inverse" />
 
     <TextView
         android:id="@+id/widget_count"
