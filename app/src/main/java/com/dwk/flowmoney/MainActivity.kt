@@ -144,6 +144,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -342,7 +343,7 @@ internal enum class DataOperation(
     Connect("Connecting bank"),
     StartOver("Starting over"),
     Sync("Syncing bank"),
-    UpdateAutomaticSyncs("Saving sync frequency"),
+    UpdateAutomaticSyncs("Saving sync schedule"),
     DeleteMerchantRule("Deleting merchant rule"),
     Disconnect("Disconnecting bank"),
     ResetDays("Resetting days"),
@@ -431,6 +432,7 @@ internal data class EditorDraft(
     val providerMerchant: String?,
     val flowKind: FlowKind,
     val flowKindOverride: FlowKind?,
+    val transactedAtEpochMillis: Long? = null,
 ) {
     val effectiveFlowKind: FlowKind
         get() = flowKindOverride ?: flowKind
@@ -464,6 +466,7 @@ internal fun saveEditorDraft(draft: EditorDraft): List<Any> =
         draft.providerMerchant.orEmpty(),
         draft.flowKind.name,
         draft.flowKindOverride?.name.orEmpty(),
+        draft.transactedAtEpochMillis ?: Long.MIN_VALUE,
     )
 
 /** Size-checked restoration keeps process state written by older app versions valid. */
@@ -506,6 +509,8 @@ internal fun restoreEditorDraft(values: List<Any>): EditorDraft {
         flowKindOverride =
             (values.getOrNull(19) as? String)
                 ?.let { saved -> FlowKind.entries.firstOrNull { it.name == saved } },
+        transactedAtEpochMillis =
+            (values.getOrNull(20) as? Long)?.takeUnless { it == Long.MIN_VALUE },
     )
 }
 
@@ -528,6 +533,7 @@ internal fun newEditorDraft(): EditorDraft =
         providerMerchant = null,
         flowKind = FlowKind.NORMAL,
         flowKindOverride = null,
+        transactedAtEpochMillis = null,
     )
 
 internal fun widgetQuickAddDraft(suggestionHistory: TransactionSuggestionHistory): EditorDraft {
@@ -559,6 +565,7 @@ internal fun Transaction.toEditorDraft() =
         providerMerchant = providerMerchant,
         flowKind = flowKind,
         flowKindOverride = flowKindOverride,
+        transactedAtEpochMillis = transactedAtEpochMillis,
     )
 
 internal fun EditorDraft.prepareForEditorSave(
@@ -605,6 +612,7 @@ internal fun EditorDraft.toTransaction(): Transaction {
         providerMerchant = rawProviderMerchant.takeIf { source == "simplefin" },
         flowKind = flowKind,
         flowKindOverride = flowKindOverride,
+        transactedAtEpochMillis = transactedAtEpochMillis,
     )
 }
 
@@ -638,6 +646,8 @@ fun FlowMoneyApp(
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var editorSessionId by rememberSaveable { mutableStateOf(0) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
+    var geminiKeySaved by remember { mutableStateOf(false) }
+    var geminiStatus by remember { mutableStateOf(GeminiRunStatus()) }
     var navigationState by rememberSaveable(stateSaver = DashboardNavigationStateSaver) {
         mutableStateOf(DashboardNavigationState())
     }
@@ -1104,6 +1114,9 @@ fun FlowMoneyApp(
                 message = "Bank sync failed"
             } finally {
                 dataOperation = null
+                if (showDataSheet) {
+                    geminiStatus = withContext(Dispatchers.IO) { GeminiRunStatusStore(context).load() }
+                }
             }
             hostState.showSnackbar(message)
         }
@@ -1387,6 +1400,17 @@ fun FlowMoneyApp(
         )
     }
 
+    LaunchedEffect(showDataSheet) {
+        if (showDataSheet) {
+            val (hasKey, status) =
+                withContext(Dispatchers.IO) {
+                    GeminiApiKeyStore(context).hasKey() to GeminiRunStatusStore(context).load()
+                }
+            geminiKeySaved = hasKey
+            geminiStatus = status
+        }
+    }
+
     if (showDataSheet) {
         DataSheetModal(
             operation = dataOperation,
@@ -1490,14 +1514,37 @@ fun FlowMoneyApp(
                     if (dataOperation != null) return@DataSheet
                     dataOperation = DataOperation.UpdateAutomaticSyncs
                     scope.launch {
-                        var message = "Could not update automatic sync frequency"
+                        var message = "Could not update automatic sync schedule"
                         try {
                             viewModel.updateAutomaticSyncsPerDay(count)
                             message = "Automatic syncs set to $count per day"
                         } catch (failure: CancellationException) {
                             throw failure
                         } catch (failure: Throwable) {
-                            message = automaticSyncFrequencyUpdateFailureMessage(failure)
+                            message = automaticSyncScheduleUpdateFailureMessage(failure)
+                        } finally {
+                            dataOperation = null
+                        }
+                        dataSnackbarHostState.showSnackbar(message)
+                    }
+                },
+                onAutomaticSyncTimeChange = { time ->
+                    if (dataOperation != null) return@DataSheet
+                    dataOperation = DataOperation.UpdateAutomaticSyncs
+                    scope.launch {
+                        var message = "Could not update automatic sync schedule"
+                        try {
+                            viewModel.updateAutomaticSyncTime(time)
+                            message =
+                                if (time == null) {
+                                    "Automatic sync time cleared"
+                                } else {
+                                    "Automatic sync time set to ${time.format(TimeFormatter)}"
+                                }
+                        } catch (failure: CancellationException) {
+                            throw failure
+                        } catch (failure: Throwable) {
+                            message = automaticSyncScheduleUpdateFailureMessage(failure)
                         } finally {
                             dataOperation = null
                         }
@@ -1543,6 +1590,42 @@ fun FlowMoneyApp(
                 },
                 onClose = {
                     if (dataOperation == null) showDataSheet = false
+                },
+                geminiKeySaved = geminiKeySaved,
+                geminiStatus = geminiStatus,
+                onSaveGeminiKey = { key ->
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                GeminiApiKeyStore(context).save(key.trim())
+                                GeminiRunStatusStore(context).clear()
+                            }
+                            geminiKeySaved = true
+                            geminiStatus = GeminiRunStatus()
+                            dataSnackbarHostState.showSnackbar(
+                                "Gemini key saved. Auto-categorize runs after each sync.",
+                            )
+                        }.onFailure { failure ->
+                            if (failure is CancellationException) throw failure
+                            dataSnackbarHostState.showSnackbar("Could not save Gemini key")
+                        }
+                    }
+                },
+                onClearGeminiKey = {
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                GeminiApiKeyStore(context).delete()
+                                GeminiRunStatusStore(context).clear()
+                            }
+                            geminiKeySaved = false
+                            geminiStatus = GeminiRunStatus()
+                            dataSnackbarHostState.showSnackbar("Gemini key removed. Auto-categorize off.")
+                        }.onFailure { failure ->
+                            if (failure is CancellationException) throw failure
+                            dataSnackbarHostState.showSnackbar("Could not remove Gemini key")
+                        }
+                    }
                 },
                 modifier = Modifier.imePadding(),
             )
@@ -2411,8 +2494,7 @@ private fun OverviewSyncReviewBanner(
             simpleFin.isConnectionPending -> "Connection pending"
             profile == null -> "Bank not connected"
             profile.isPaused -> "Reconnect required"
-            profile.lastSuccessfulSyncAtEpochMillis == null -> "No successful sync yet"
-            else -> "Last successful sync ${profile.lastSuccessfulSyncAtEpochMillis.toSyncTime()}"
+            else -> null
         }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -2426,7 +2508,9 @@ private fun OverviewSyncReviewBanner(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(syncText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            syncText?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            }
             Text(
                 if (pendingReviewCount == 0) {
                     "No synced transactions to check"
@@ -2571,7 +2655,7 @@ internal fun ReviewPage(
                         ) {
                             Text("All caught up", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "New synced transactions will appear here for optional corrections.",
+                                "Synced transactions that are not auto-confirmed will appear here for optional corrections.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -3556,29 +3640,50 @@ private fun InsightsPage(
         }
     val totalSpentCents = remember(dailySpending) { dailySpending.sumOf { it.cents } }
 
-    LaunchedEffect(buckets, categoryTotals) {
-        if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
-        if (selectedCategory != null && categoryTotals.none { it.category == selectedCategory }) selectedCategory = null
-    }
-
     val selectedBucket =
         remember(buckets, selectedBucketKey) {
             selectedBucketKey?.let { key -> buckets.firstOrNull { it.key == key } }
         }
+    val bucketTransactions =
+        remember(rangeTransactions, selectedBucket) {
+            val bucket = selectedBucket ?: return@remember emptyList()
+            rangeTransactions.filter {
+                it.reportingSpendingCategory() != null &&
+                    !it.localDate().isBefore(bucket.startInclusive) &&
+                    it.localDate().isBefore(bucket.endExclusive)
+            }
+        }
+    val visibleCategoryTotals =
+        remember(selectedBucket, bucketTransactions, categoryTotals) {
+            if (selectedBucket == null) {
+                categoryTotals
+            } else {
+                DashboardAnalytics.categoryTotals(bucketTransactions)
+            }
+        }
+    val visibleTotalSpentCents = selectedBucket?.cents ?: totalSpentCents
+
+    LaunchedEffect(buckets, visibleCategoryTotals) {
+        if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
+        if (selectedCategory != null && visibleCategoryTotals.none { it.category == selectedCategory }) {
+            selectedCategory = null
+        }
+    }
+
     val selectedCategoryTotal =
-        remember(categoryTotals, selectedCategory) {
-            selectedCategory?.let { category -> categoryTotals.firstOrNull { it.category == category } }
+        remember(visibleCategoryTotals, selectedCategory) {
+            selectedCategory?.let { category -> visibleCategoryTotals.firstOrNull { it.category == category } }
         }
     val selectedTransactions =
-        remember(rangeTransactions, selectedBucket, selectedCategoryTotal) {
+        remember(rangeTransactions, selectedBucket, selectedCategoryTotal, bucketTransactions) {
             when {
-                selectedBucket != null -> {
-                    rangeTransactions.filter {
-                        it.reportingSpendingCategory() != null &&
-                            !it.localDate().isBefore(selectedBucket.startInclusive) &&
-                            it.localDate().isBefore(selectedBucket.endExclusive)
+                selectedBucket != null && selectedCategoryTotal != null -> {
+                    bucketTransactions.filter {
+                        it.reportingSpendingCategory() == selectedCategoryTotal.category
                     }
                 }
+
+                selectedBucket != null -> bucketTransactions
 
                 selectedCategoryTotal != null -> {
                     rangeTransactions.filter {
@@ -3592,11 +3697,11 @@ private fun InsightsPage(
             }
         }
     val insightTitle =
-        selectedBucket?.label
-            ?: selectedCategoryTotal?.let { "${it.category} spending" }
+        selectedCategoryTotal?.let { "${it.category} spending" }
+            ?: selectedBucket?.label
     val insightAmount =
-        selectedBucket?.let { MoneyFormatter.formatUsd(it.cents) }
-            ?: selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
+        selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
+            ?: selectedBucket?.let { MoneyFormatter.formatUsd(it.cents) }
 
     Box(modifier = modifier) {
         LazyColumn(
@@ -3642,20 +3747,18 @@ private fun InsightsPage(
                         buckets = buckets,
                         selectedKey = selectedBucketKey,
                         onSelect = { bucket ->
-                            selectedBucketKey = bucket.key
-                            selectedCategory = null
+                            selectedBucketKey = if (selectedBucketKey == bucket.key) null else bucket.key
                         },
                         range = dateRange,
                     )
                 }
                 item {
                     CategoryRankList(
-                        totals = categoryTotals,
-                        totalSpentCents = totalSpentCents,
+                        totals = visibleCategoryTotals,
+                        totalSpentCents = visibleTotalSpentCents,
                         selectedCategory = selectedCategory,
                         onSelect = { category ->
-                            selectedCategory = category
-                            selectedBucketKey = null
+                            selectedCategory = if (selectedCategory == category) null else category
                         },
                     )
                 }
@@ -3758,6 +3861,7 @@ internal fun DataSheet(
     onConnect: (String) -> Unit,
     onSync: () -> Unit,
     onAutomaticSyncsPerDayChange: (Int) -> Unit = {},
+    onAutomaticSyncTimeChange: (LocalTime?) -> Unit = {},
     onCountResetDays: suspend (PennyLocalDateRange, ZoneId) -> TransactionRangeCount = { _, _ ->
         TransactionRangeCount(transactionCount = 0, tombstoneCount = 0)
     },
@@ -3773,11 +3877,17 @@ internal fun DataSheet(
     onClose: () -> Unit,
     onRetryConnection: () -> Unit,
     onCancelPendingConnection: () -> Unit,
+    geminiKeySaved: Boolean = false,
+    geminiStatus: GeminiRunStatus = GeminiRunStatus(),
+    onSaveGeminiKey: (String) -> Unit = {},
+    onClearGeminiKey: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val profile = simpleFin.profile
+    val preferredSyncTime = simpleFin.preferredSyncTime
     var setupToken by remember { mutableStateOf("") }
     var automaticSyncsExpanded by rememberSaveable(profile?.connectionId, profile?.isPaused) { mutableStateOf(false) }
+    var showSyncTimePicker by rememberSaveable(profile?.connectionId, profile?.isPaused) { mutableStateOf(false) }
     var ruleToDelete by remember { mutableStateOf<MerchantRuleEntity?>(null) }
     val isBusy = operation != null
 
@@ -3840,16 +3950,19 @@ internal fun DataSheet(
         }
     }
     val resetDaysCard: @Composable () -> Unit = {
-        SimpleFinResetDaysCard(
-            operation = operation,
-            onCountResetDays = onCountResetDays,
-            onResetDays = onResetDays,
-            clock = resetDaysClock,
-            zoneId = resetDaysZoneId,
-            rangeResetPending = rangeResetPending,
-            externalRecountRequest = resetDaysRecountRequest,
-            selectionGeneration = resetDaysReselectRequest,
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            DataSheetSectionHeader("Cleanup")
+            SimpleFinResetDaysCard(
+                operation = operation,
+                onCountResetDays = onCountResetDays,
+                onResetDays = onResetDays,
+                clock = resetDaysClock,
+                zoneId = resetDaysZoneId,
+                rangeResetPending = rangeResetPending,
+                externalRecountRequest = resetDaysRecountRequest,
+                selectionGeneration = resetDaysReselectRequest,
+            )
+        }
     }
 
     Box(
@@ -3996,6 +4109,8 @@ internal fun DataSheet(
                                     modifier = Modifier.testTag("simplefin_reconnect_message"),
                                 )
                                 Spacer(Modifier.height(10.dp))
+                                StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
+                                Spacer(Modifier.height(10.dp))
                                 Text(
                                     "Open SimpleFIN and copy a new setup token.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -4043,11 +4158,15 @@ internal fun DataSheet(
                         item { bankSyncSectionHeader() }
                         item {
                             DataCard(modifier = Modifier.testTag("bank_sync_card")) {
+                                Text("Status", fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
                                 StatusLine("Last sync", profile.lastSuccessfulSyncAtEpochMillis.toSyncTime())
                                 StatusLine("Last error", if (profile.lastError.isNullOrBlank()) "None" else "Sync needs attention")
                                 Spacer(Modifier.height(10.dp))
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                                 Spacer(Modifier.height(10.dp))
+                                Text("Schedule", fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
                                 Row(
                                     modifier =
                                         Modifier
@@ -4105,13 +4224,57 @@ internal fun DataSheet(
                                         }
                                     }
                                 }
+                                Row(
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .semantics {
+                                                contentDescription = "Automatic sync time"
+                                                stateDescription = preferredSyncTime?.format(TimeFormatter) ?: "Any time"
+                                            }.testTag("simplefin_sync_time_control"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Sync time", fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            preferredSyncTime?.format(TimeFormatter) ?: "Any time",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            modifier = Modifier.testTag("simplefin_sync_time_value"),
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (preferredSyncTime != null) {
+                                            TextButton(
+                                                onClick = { onAutomaticSyncTimeChange(null) },
+                                                enabled = !isBusy,
+                                                modifier =
+                                                    Modifier
+                                                        .heightIn(min = 48.dp)
+                                                        .testTag("simplefin_sync_time_clear"),
+                                            ) { Text("Clear") }
+                                        }
+                                        TextButton(
+                                            onClick = { showSyncTimePicker = true },
+                                            enabled = !isBusy,
+                                            modifier =
+                                                Modifier
+                                                    .heightIn(min = 48.dp)
+                                                    .testTag("simplefin_sync_time_action"),
+                                        ) { Text("Change") }
+                                    }
+                                }
                                 Text(
-                                    "Choose 1–12 syncs a day. Timing is approximate; redirects, retries, and setup can use extra requests, so this cadence cannot guarantee SimpleFIN's 24-request daily limit.",
+                                    "The first daily sync is scheduled at this time; later runs follow the interval. Timing is approximate and cannot guarantee SimpleFIN's 24-request daily limit.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.padding(top = 4.dp),
                                 )
                                 Spacer(Modifier.height(10.dp))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                Spacer(Modifier.height(10.dp))
+                                Text("Actions", fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
                                 Button(
                                     onClick = onSync,
                                     enabled = !isBusy,
@@ -4140,11 +4303,46 @@ internal fun DataSheet(
                                 } else {
                                     simpleFin.accounts.forEach { account ->
                                         Text(account.name, fontWeight = FontWeight.SemiBold)
+                                        account.balanceAmount?.let { balance ->
+                                            Text(
+                                                MoneyFormatter.formatUsd(
+                                                    MoneyFormatter.parseAmountToCents(balance),
+                                                ),
+                                            )
+                                        }
                                         Text(
                                             account.institutionName ?: account.currency.orEmpty(),
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             fontSize = 13.sp,
                                         )
+                                        if (account.availableBalanceAmount != null &&
+                                            account.availableBalanceAmount != account.balanceAmount
+                                        ) {
+                                            Text(
+                                                "Available ${
+                                                    MoneyFormatter.formatUsd(
+                                                        MoneyFormatter.parseAmountToCents(
+                                                            account.availableBalanceAmount,
+                                                        ),
+                                                    )
+                                                }",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 13.sp,
+                                            )
+                                        }
+                                        account.balanceDateEpochSeconds?.let { seconds ->
+                                            Text(
+                                                "as of ${
+                                                    Instant
+                                                        .ofEpochMilli(seconds * 1000L)
+                                                        .atZone(ZoneId.systemDefault())
+                                                        .toLocalDateTime()
+                                                        .format(ListDateFormatter)
+                                                }",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 13.sp,
+                                            )
+                                        }
                                         Spacer(Modifier.height(8.dp))
                                     }
                                 }
@@ -4153,6 +4351,15 @@ internal fun DataSheet(
                         item { localDataSection() }
                         item { resetDaysCard() }
                     }
+                }
+                item {
+                    GeminiCategorizeCard(
+                        keySaved = geminiKeySaved,
+                        status = geminiStatus,
+                        enabled = !isBusy,
+                        onSaveKey = onSaveGeminiKey,
+                        onClearKey = onClearGeminiKey,
+                    )
                 }
                 item {
                     MerchantRulesCard(
@@ -4190,6 +4397,112 @@ internal fun DataSheet(
                 TextButton(onClick = { ruleToDelete = null }, enabled = !isBusy) { Text("Cancel") }
             },
         )
+    }
+
+    if (showSyncTimePicker) {
+        PennyRichTimePickerDialog(
+            initialHour = preferredSyncTime?.hour ?: LocalTime.now().hour,
+            initialMinute = preferredSyncTime?.minute ?: LocalTime.now().minute,
+            is24Hour = true,
+            onDismiss = { showSyncTimePicker = false },
+            onConfirm = { hour, minute ->
+                showSyncTimePicker = false
+                onAutomaticSyncTimeChange(LocalTime.of(hour, minute))
+            },
+        )
+    }
+}
+
+private fun geminiRunRelativeTime(fromEpochMillis: Long, nowEpochMillis: Long): String {
+    val elapsed = (nowEpochMillis - fromEpochMillis).coerceAtLeast(0L)
+    val minutes = elapsed / 60_000L
+    val hours = elapsed / 3_600_000L
+    val days = elapsed / 86_400_000L
+    return when {
+        minutes < 1L -> "just now"
+        minutes < 60L -> "$minutes min ago"
+        hours < 24L -> "$hours hr ago"
+        days == 1L -> "1 day ago"
+        else -> "$days days ago"
+    }
+}
+
+private fun geminiRunStatusLine(status: GeminiRunStatus, nowEpochMillis: Long = System.currentTimeMillis()): String {
+    if (status.lastFailed) return "Last run failed · retries after the next sync"
+    val lastRun = status.lastRunAtEpochMillis ?: return "Runs after the next sync"
+    val relative = geminiRunRelativeTime(lastRun, nowEpochMillis)
+    return if (status.lastQueueEmpty) {
+        "Last run $relative · nothing to categorize"
+    } else {
+        "Last run $relative · ${status.lastLabeled} categorized and confirmed"
+    }
+}
+
+@Composable
+private fun GeminiCategorizeCard(
+    keySaved: Boolean,
+    status: GeminiRunStatus,
+    enabled: Boolean,
+    onSaveKey: (String) -> Unit,
+    onClearKey: () -> Unit,
+) {
+    var apiKey by remember { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        DataSheetSectionHeader("Auto-categorize")
+        DataCard(modifier = Modifier.testTag("gemini_key_card")) {
+            Text(
+                "Paste a Google AI Studio key. After each sync, up to $GEMINI_CATEGORIZE_CHUNK_SIZE uncategorized transactions are labelled and marked reviewed automatically. Transactions you already reviewed and merchant-rule categories are never changed. Anything Gemini can't label stays in Review.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                if (keySaved) "Auto-categorize on · key saved" else "Auto-categorize off · no key saved",
+                modifier = Modifier.testTag("gemini_key_status"),
+            )
+            if (keySaved) {
+                Text(
+                    geminiRunStatusLine(status),
+                    modifier = Modifier.testTag("gemini_key_run_status"),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true,
+                enabled = enabled,
+                colors = flowTextFieldColors(),
+                shape = MaterialTheme.shapes.medium,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag("gemini_key_field"),
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = {
+                    val key = apiKey
+                    apiKey = ""
+                    onSaveKey(key)
+                },
+                enabled = enabled && apiKey.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(),
+                shape = MaterialTheme.shapes.large,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag("gemini_key_save_button"),
+            ) { Text("Save") }
+            if (keySaved) {
+                TextButton(
+                    onClick = onClearKey,
+                    enabled = enabled,
+                    modifier = Modifier.testTag("gemini_key_clear_button"),
+                ) { Text("Remove") }
+            }
+        }
     }
 }
 
@@ -4678,8 +4991,9 @@ private fun DataCard(
 private fun StatusLine(
     label: String,
     value: String,
+    modifier: Modifier = Modifier,
 ) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+    Row(modifier = modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Text(
             label,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -5106,7 +5420,6 @@ private fun SpendingBucketsChart(
 ) {
     val total = remember(buckets) { buckets.sumOf { it.cents } }
     val peak = remember(buckets) { buckets.maxOfOrNull { it.cents } ?: 0L }
-    val average = remember(buckets, total) { if (buckets.isEmpty()) 0L else total / buckets.size }
     val selectionColor = LocalFinanceColors.current.expense
     val unselectedColor = MaterialTheme.colorScheme.surfaceContainerHigh
     val chartSummary =
@@ -5175,27 +5488,6 @@ private fun SpendingBucketsChart(
                                         },
                                     ).clip(MaterialTheme.shapes.extraSmall)
                                     .background(if (selected) selectionColor else unselectedColor),
-                        )
-                    }
-                }
-            }
-            if (peak > 0L && buckets.isNotEmpty()) {
-                val averageFraction = (average.toFloat() / peak.toFloat()).coerceIn(0f, 1f)
-                if (averageFraction > 0f) {
-                    Box(
-                        modifier =
-                            Modifier
-                                .align(Alignment.BottomStart)
-                                .fillMaxWidth()
-                                .fillMaxHeight(averageFraction),
-                    ) {
-                        Box(
-                            modifier =
-                                Modifier
-                                    .align(Alignment.TopCenter)
-                                    .fillMaxWidth()
-                                    .height(1.dp)
-                                    .background(MaterialTheme.colorScheme.outlineVariant),
                         )
                     }
                 }
@@ -6372,7 +6664,20 @@ private fun SyncedProviderSummary(
         ) {
             Text("Bank details", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             StatusLine("Account", draft.accountName ?: draft.accountKey ?: "Unknown account")
-            StatusLine("Date", dateTime.format(ListDateFormatter))
+            StatusLine("Posted", dateTime.format(ListDateFormatter))
+            if (draft.transactedAtEpochMillis != null &&
+                draft.transactedAtEpochMillis != draft.occurredAtEpochMillis
+            ) {
+                StatusLine(
+                    "Transacted",
+                    Instant
+                        .ofEpochMilli(draft.transactedAtEpochMillis)
+                        .atZone(ZoneId.systemDefault())
+                        .toLocalDateTime()
+                        .format(ListDateFormatter),
+                    Modifier.testTag("synced_transacted_at"),
+                )
+            }
             StatusLine(
                 "Amount",
                 MoneyFormatter.formatUsd(
@@ -6850,11 +7155,11 @@ private fun Long?.toSyncTime(): String =
 
 private fun automaticSyncFrequencyLabel(count: Int): String = "$count ${if (count == 1) "sync" else "syncs"} per day"
 
-internal fun automaticSyncFrequencyUpdateFailureMessage(failure: Throwable): String =
+internal fun automaticSyncScheduleUpdateFailureMessage(failure: Throwable): String =
     if (failure is SimpleFinAutomaticSchedulingException) {
-        "Frequency saved, but automatic scheduling could not be updated. Try again."
+        "Schedule saved, but automatic scheduling could not be updated. Try again."
     } else {
-        "Could not update automatic sync frequency"
+        "Could not update automatic sync schedule"
     }
 
 internal fun SimpleFinSyncResult.connectionSnackbarMessage(): String =

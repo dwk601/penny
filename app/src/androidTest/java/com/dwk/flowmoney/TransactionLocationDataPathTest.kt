@@ -172,7 +172,11 @@ class TransactionLocationDataPathTest {
                 val exported = CsvCodec.encode(repository.load())
                 val decoded = CsvCodec.decode(exported)
 
-                assertTrue(exported.lineSequence().first().endsWith("locationCity,locationState,locationCountry"))
+                assertTrue(
+                    exported.lineSequence().first().endsWith(
+                        "locationCity,locationState,locationCountry,providerDescription,accountName,transactedAtEpochMillis,reviewedAtEpochMillis",
+                    ),
+                )
                 assertEquals(3, decoded.size)
                 assertEquals(
                     listOf(

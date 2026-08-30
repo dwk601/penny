@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MerchantRuleEntity::class,
         PlaceGeocodeEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 abstract class FlowMoneyDatabase : RoomDatabase() {
@@ -52,6 +52,7 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                         MIGRATION_8_9,
                         MIGRATION_9_10,
                         MIGRATION_10_11,
+                        MIGRATION_11_12,
                     ).build()
                     .also { instance = it }
             }
@@ -220,6 +221,16 @@ abstract class FlowMoneyDatabase : RoomDatabase() {
                             "resolvedAtEpochMillis INTEGER NOT NULL, " +
                             "PRIMARY KEY(placeKey))",
                     )
+                }
+            }
+
+        // No backfill: NULL is honest. transacted_at is not derivable from posted;
+        // fabricating occurredAtEpochMillis would be wrong for 125/209 dump rows.
+        // In-window rows self-heal on next sync; older rows stay NULL.
+        internal val MIGRATION_11_12: Migration =
+            object : Migration(11, 12) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("ALTER TABLE transactions ADD COLUMN transactedAtEpochMillis INTEGER")
                 }
             }
 

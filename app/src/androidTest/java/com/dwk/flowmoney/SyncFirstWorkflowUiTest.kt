@@ -13,6 +13,8 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -20,18 +22,33 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 class SyncFirstWorkflowUiTest {
     @get:Rule val composeRule = createComposeRule()
+
+    private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+
+    @After
+    fun resetDatabase() {
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+    }
 
     @Test
     fun reviewQueueGroupsNewestFirstAndCategoryTargetsAreBoundedAccessible() {
@@ -486,6 +503,229 @@ class SyncFirstWorkflowUiTest {
             assertEquals(FlowKind.TRANSFER, saved?.flowKindOverride)
         }
     }
+
+    @Test
+    fun connectedAccountsCardRendersBalanceAvailableBalanceAndAsOfTimestamp() {
+        val balanceDateSeconds = 1_766_145_600L
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                DataSheet(
+                    simpleFin =
+                        SimpleFinUiState(
+                            profile = SimpleFinProfileEntity(connectionId = "connected"),
+                            accounts =
+                                listOf(
+                                    account("account-a", "Checking", "Bank A").copy(
+                                        balanceAmount = "1234.56",
+                                        availableBalanceAmount = "1000.00",
+                                        balanceDateEpochSeconds = balanceDateSeconds,
+                                    ),
+                                ),
+                        ),
+                    operation = null,
+                    onOpenSetup = {},
+                    onConnect = {},
+                    onSync = {},
+                    onImport = {},
+                    onExport = {},
+                    onDisconnect = {},
+                    onClose = {},
+                    onRetryConnection = {},
+                    onCancelPendingConnection = {},
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("connected_accounts_card"))
+        composeRule.onNodeWithTag("connected_accounts_card").assertIsDisplayed()
+        composeRule.onNodeWithText("Checking").assertIsDisplayed()
+        composeRule.onNodeWithText("$1,234.56").assertIsDisplayed()
+        composeRule.onNodeWithText("Available $1,000.00").assertIsDisplayed()
+        composeRule.onNodeWithText("as of ${listDateText(balanceDateSeconds * 1000L)}").assertIsDisplayed()
+    }
+
+    /**
+     * The Overview banner is a review prompt, not a sync log: a healthy connection must say nothing
+     * about its last successful sync. Only the states the user has to act on keep a status line, and
+     * the pending-review count stays regardless.
+     */
+    @Test
+    fun overviewBannerDropsHealthySyncTimestampsButKeepsReviewAndActionableStates() {
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+        val dao = FlowMoneyDatabase.get(context).simpleFinDao()
+        val healthy =
+            SimpleFinProfileEntity(
+                connectionId = "healthy",
+                connectedAtEpochMillis = 1_800_000_000_000L,
+                lastSyncAttemptAtEpochMillis = 1_800_000_000_000L,
+                lastSuccessfulSyncAtEpochMillis = 1_800_000_000_000L,
+                automaticSyncsPerDay = 4,
+            )
+        runBlocking { dao.upsertProfile(healthy) }
+        val pending =
+            listOf(
+                syncedTransaction("pending-a", LocalDate.of(2026, 7, 10), merchant = "Pending Cafe"),
+                syncedTransaction("pending-b", LocalDate.of(2026, 7, 9), merchant = "Pending Diner"),
+            )
+        val gateway = BannerGateway(pending)
+        val viewModel =
+            MainViewModel(
+                repository = gateway,
+                simpleFinRepository = SimpleFinSyncRepository(context),
+                simpleFinAccounts = MutableStateFlow(emptyList()),
+            )
+        viewModel.reportInitializationComplete()
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                FlowMoneyApp(
+                    viewModel = viewModel,
+                    coldStartSimpleFinSync = { null },
+                    transactionWidgetRefresh = {},
+                )
+            }
+        }
+
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("overview_sync_review_banner").assertExists() }.isSuccess
+        }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("overview_pending_review_count")
+                    .assertTextEquals("2 synced transactions available for optional corrections")
+            }.isSuccess
+        }
+        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
+        composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed()
+        composeRule.onNodeWithTag("overview_sync_data_action").assertDoesNotExist()
+
+        // A never-synced but healthy connection is still silent about sync history.
+        runBlocking { dao.upsertProfile(healthy.copy(lastSuccessfulSyncAtEpochMillis = null)) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
+        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
+        composeRule
+            .onNodeWithTag("overview_pending_review_count")
+            .assertTextEquals("2 synced transactions available for optional corrections")
+
+        // States the user must act on keep their status line.
+        runBlocking { dao.upsertProfile(healthy.copy(isPaused = true, lastError = "SimpleFIN reconnect required")) }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithText("Reconnect required").assertIsDisplayed() }.isSuccess
+        }
+        composeRule.onNodeWithTag("overview_sync_data_action").assertIsDisplayed()
+
+        runBlocking { dao.clearProfile() }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithText("Bank not connected").assertIsDisplayed() }.isSuccess
+        }
+        composeRule.onNodeWithText("Connect bank").assertIsDisplayed()
+        composeRule
+            .onNodeWithTag("overview_pending_review_count")
+            .assertTextEquals("2 synced transactions available for optional corrections")
+
+        // With nothing to review the banner falls back to its empty line, still without sync history.
+        composeRule.runOnIdle {
+            gateway.rows.value = gateway.rows.value.map { it.copy(reviewedAtEpochMillis = 1L) }
+            gateway.pending.value = emptyList()
+        }
+        composeRule.waitUntil(5_000) {
+            runCatching {
+                composeRule
+                    .onNodeWithTag("overview_pending_review_count")
+                    .assertTextEquals("No synced transactions to check")
+            }.isSuccess
+        }
+        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
+    }
+
+    private class BannerGateway(
+        initial: List<Transaction>,
+    ) : TransactionGateway {
+        val rows = MutableStateFlow(initial)
+        val pending = MutableStateFlow(initial)
+        override val transactions: Flow<List<Transaction>> = rows
+        override val unreviewedTransactions: Flow<List<Transaction>> = pending
+
+        override suspend fun load(): List<Transaction> = rows.value
+
+        override suspend fun getUnreviewedTransactions(): List<Transaction> = pending.value
+
+        override suspend fun upsert(transaction: Transaction) = Unit
+
+        override suspend fun importTransactions(transactions: List<Transaction>): Int = transactions.size
+
+        override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>): Int = transactions.size
+
+        override suspend fun delete(id: String) = Unit
+    }
+
+    @Test
+    fun syncedEditorShowsTransactedTimeOnlyWhenItDiffersFromThePostedTime() {
+        val transaction = syncedTransaction("transacted", LocalDate.of(2026, 7, 10))
+        val transactedAt = transaction.occurredAtEpochMillis - 86_400_000L
+        val sameDayDifferentTime = transaction.occurredAtEpochMillis - 3_600_000L
+        var draft by mutableStateOf(transaction.copy(transactedAtEpochMillis = transactedAt).toEditorDraft())
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                TransactionEditor(
+                    transaction = transaction,
+                    draft = draft,
+                    suggestionHistory = TransactionSuggestionHistory.Empty,
+                    onDraftChange = { draft = it },
+                    onSave = {},
+                    onDelete = null,
+                    onCancel = {},
+                    persistenceBusy = false,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule
+            .onNodeWithTag("transaction_editor_form")
+            .performScrollToNode(hasTestTag("synced_provider_summary"))
+        composeRule.onNodeWithTag("synced_transacted_at").assertIsDisplayed()
+        assertTransactedAtShows(transactedAt)
+        composeRule.onNodeWithText("Posted").assertIsDisplayed()
+
+        // Same calendar day, different clock time still deserves the disambiguating line.
+        composeRule.runOnIdle { draft = draft.copy(transactedAtEpochMillis = sameDayDifferentTime) }
+        composeRule.onNodeWithTag("synced_transacted_at").assertIsDisplayed()
+        assertTransactedAtShows(sameDayDifferentTime)
+
+        // Exactly equal timestamps carry no information, so the line disappears entirely.
+        composeRule.runOnIdle {
+            draft = draft.copy(transactedAtEpochMillis = transaction.occurredAtEpochMillis)
+        }
+        composeRule.onNodeWithTag("synced_transacted_at").assertDoesNotExist()
+
+        composeRule.runOnIdle { draft = draft.copy(transactedAtEpochMillis = null) }
+        composeRule.onNodeWithTag("synced_transacted_at").assertDoesNotExist()
+    }
+
+    /** `StatusLine` does not merge its label and value, so match the tagged row's descendants. */
+    private fun assertTransactedAtShows(epochMillis: Long) {
+        composeRule
+            .onNode(
+                hasTestTag("synced_transacted_at") and
+                    hasAnyDescendant(hasText(listDateText(epochMillis))) and
+                    hasAnyDescendant(hasText("Transacted")),
+            ).assertIsDisplayed()
+    }
+
+    /** Mirrors MainActivity's private `ListDateFormatter` so the assertion reads the same text. */
+    private fun listDateText(epochMillis: Long): String =
+        Instant
+            .ofEpochMilli(epochMillis)
+            .atZone(ZoneId.systemDefault())
+            .toLocalDateTime()
+            .format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))
 
     private fun syncedTransaction(
         id: String,

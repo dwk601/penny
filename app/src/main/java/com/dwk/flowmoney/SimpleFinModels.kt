@@ -9,6 +9,7 @@ data class SimpleFinAccount(
     val balance: String?,
     val availableBalance: String?,
     val transactions: List<SimpleFinTransaction>,
+    val balanceDate: Long? = null,
 )
 
 data class SimpleFinTransaction(
@@ -18,12 +19,29 @@ data class SimpleFinTransaction(
     val description: String,
     val pending: Boolean,
     val payee: String? = null,
+    val transactedAt: Long? = null,
 )
 
 data class SimpleFinAccountsResult(
     val accounts: List<SimpleFinAccount>,
     val errors: List<String> = emptyList(),
 )
+
+internal data class SimpleFinProviderErrorPartition(
+    val advisory: List<String>,
+    val fatal: List<String>,
+)
+
+internal fun partitionProviderErrors(errors: List<String>): SimpleFinProviderErrorPartition {
+    val (advisory, fatal) =
+        errors.partition { error ->
+            error.trim().lowercase().contains("exceeds recommended range")
+        }
+    return SimpleFinProviderErrorPartition(advisory = advisory, fatal = fatal)
+}
+
+internal fun joinAdvisoryErrors(advisory: List<String>): String =
+    advisory.take(3).joinToString(separator = "; ") { it.take(200) }
 
 data class SimpleFinMappingResult(
     val transactions: List<TransactionEntity>,

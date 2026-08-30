@@ -28,6 +28,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.time.Clock
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.YearMonth
 import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicLong
@@ -55,6 +56,7 @@ data class SimpleFinUiState(
     val accounts: List<SimpleFinAccountEntity> = emptyList(),
     /** A claim is staged, but its initial sync has not completed. */
     val isConnectionPending: Boolean = false,
+    val preferredSyncTime: LocalTime? = null,
 )
 
 enum class PendingRangeResetStatus {
@@ -143,11 +145,13 @@ class MainViewModel(
             simpleFinRepository.profile,
             simpleFinAccounts,
             simpleFinRepository.pendingConnectionState,
-        ) { profile, accounts, pendingState ->
+            simpleFinRepository.preferredSyncTime,
+        ) { profile, accounts, pendingState, preferredSyncTime ->
             SimpleFinUiState(
                 profile = profile,
                 accounts = accounts,
                 isConnectionPending = pendingState == SimpleFinPendingConnectionState.RETRY_AVAILABLE,
+                preferredSyncTime = preferredSyncTime,
             )
         }
 
@@ -514,6 +518,13 @@ class MainViewModel(
         withContext(ioDispatcher) {
             pendingConnectionRecovery.await()
             simpleFinRepository.updateAutomaticSyncsPerDay(count)
+        }
+    }
+
+    suspend fun updateAutomaticSyncTime(time: LocalTime?) {
+        withContext(ioDispatcher) {
+            pendingConnectionRecovery.await()
+            simpleFinRepository.updateAutomaticSyncTime(time)
         }
     }
 

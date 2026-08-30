@@ -1,5 +1,6 @@
 package com.dwk.flowmoney
 
+import android.content.Context
 import android.net.Uri
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -25,10 +26,14 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
+import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -41,6 +46,8 @@ import java.time.ZoneOffset
 
 class DataOperationUiTest {
     @get:Rule val composeRule = createComposeRule()
+
+    private val context = ApplicationProvider.getApplicationContext<Context>()
 
     @Test
     fun activeOperationAnnouncesProgressAndDisablesConflictingControls() {
@@ -510,11 +517,190 @@ class DataOperationUiTest {
     }
 
     @Test
+    fun geminiCardShowsSavedAndAutoCategorizeOn() {
+        FlowMoneyDatabase.resetForTest()
+        context.deleteDatabase("flow_money.db")
+        val keyStore = GeminiApiKeyStore(context)
+        val statusStore = GeminiRunStatusStore(context)
+        try {
+            keyStore.save(EXISTING_GEMINI_KEY)
+            statusStore.recordSuccess(
+                atEpochMillis = System.currentTimeMillis() - TWELVE_MINUTES_AGO,
+                labeled = 7,
+                queueEmpty = false,
+            )
+            val viewModel =
+                MainViewModel(
+                    repository = GeminiCardGateway(),
+                    simpleFinRepository = SimpleFinSyncRepository(context),
+                    simpleFinAccounts = MutableStateFlow(emptyList()),
+                )
+            viewModel.reportInitializationComplete()
+            composeRule.setContent {
+                FlowMoneyTheme(dynamicColor = false) {
+                    FlowMoneyApp(
+                        viewModel = viewModel,
+                        coldStartSimpleFinSync = { null },
+                        transactionWidgetRefresh = {},
+                    )
+                }
+            }
+            composeRule.waitUntil(5_000) {
+                runCatching { composeRule.onNodeWithText("Penny").assertIsDisplayed() }.isSuccess
+            }
+
+            composeRule.onNodeWithText("Data").performClick()
+            scrollToGeminiCard()
+            composeRule.onNodeWithTag("gemini_key_status").assertTextContains("Auto-categorize on · key saved")
+            composeRule
+                .onNodeWithText("marked reviewed automatically", substring = true)
+                .assertIsDisplayed()
+            composeRule.waitUntil(5_000) {
+                runCatching {
+                    composeRule
+                        .onNodeWithTag("gemini_key_run_status")
+                        .assertTextContains("Last run 12 min ago · 7 categorized and confirmed")
+                }.isSuccess
+            }
+
+            // Saving a replacement key resets the recorded run and confirms the state change.
+            composeRule.onNodeWithTag("gemini_key_field").performTextInput(REPLACEMENT_GEMINI_KEY)
+            composeRule.onNodeWithTag("gemini_key_save_button").performClick()
+            composeRule.waitUntil(5_000) {
+                runCatching {
+                    composeRule
+                        .onNodeWithText("Gemini key saved. Auto-categorize runs after each sync.")
+                        .assertIsDisplayed()
+                }.isSuccess
+            }
+            scrollToGeminiCard()
+            composeRule.onNodeWithTag("gemini_key_status").assertTextContains("Auto-categorize on · key saved")
+            composeRule.onNodeWithTag("gemini_key_run_status").assertTextContains("Runs after the next sync")
+            assertEquals(REPLACEMENT_GEMINI_KEY, keyStore.read())
+            assertEquals(GeminiRunStatus(), statusStore.load())
+
+            // Clearing the key turns auto-categorize off and drops the run line entirely.
+            composeRule.onNodeWithTag("gemini_key_clear_button").performScrollTo().performClick()
+            composeRule.waitUntil(5_000) {
+                runCatching {
+                    composeRule
+                        .onNodeWithTag("gemini_key_status")
+                        .assertTextContains("Auto-categorize off · no key saved")
+                }.isSuccess
+            }
+            composeRule.onNodeWithTag("gemini_key_run_status").assertDoesNotExist()
+            composeRule.onNodeWithTag("gemini_key_clear_button").assertDoesNotExist()
+            composeRule.waitUntil(10_000) {
+                runCatching {
+                    composeRule
+                        .onNodeWithText("Gemini key removed. Auto-categorize off.")
+                        .assertIsDisplayed()
+                }.isSuccess
+            }
+            assertNull(keyStore.read())
+            assertEquals(GeminiRunStatus(), statusStore.load())
+        } finally {
+            keyStore.delete()
+            statusStore.clear()
+            FlowMoneyDatabase.resetForTest()
+            context.deleteDatabase("flow_money.db")
+        }
+    }
+
+    @Test
+    fun geminiRunStatusLineCoversEveryRecordedRunState() {
+        val keySaved = mutableStateOf(true)
+        val status = mutableStateOf(GeminiRunStatus())
+        composeRule.setContent {
+            MaterialTheme {
+                DataSheet(
+                    simpleFin = SimpleFinUiState(),
+                    operation = null,
+                    geminiKeySaved = keySaved.value,
+                    geminiStatus = status.value,
+                    onOpenSetup = {},
+                    onConnect = {},
+                    onSync = {},
+                    onImport = {},
+                    onExport = {},
+                    onDisconnect = {},
+                    onClose = {},
+                    onRetryConnection = {},
+                    onCancelPendingConnection = {},
+                )
+            }
+        }
+
+        fun assertRunStatus(expected: String) {
+            scrollToGeminiCard()
+            composeRule.onNodeWithTag("gemini_key_run_status").assertTextContains(expected)
+        }
+
+        scrollToGeminiCard()
+        composeRule.onNodeWithTag("gemini_key_status").assertTextContains("Auto-categorize on · key saved")
+        assertRunStatus("Runs after the next sync")
+
+        val twelveMinutesAgo = System.currentTimeMillis() - TWELVE_MINUTES_AGO
+        composeRule.runOnIdle {
+            status.value = GeminiRunStatus(lastRunAtEpochMillis = twelveMinutesAgo, lastLabeled = 7)
+        }
+        assertRunStatus("Last run 12 min ago · 7 categorized and confirmed")
+        composeRule.runOnIdle {
+            status.value = GeminiRunStatus(lastRunAtEpochMillis = twelveMinutesAgo, lastLabeled = 0)
+        }
+        assertRunStatus("Last run 12 min ago · 0 categorized and confirmed")
+        composeRule.runOnIdle {
+            status.value =
+                GeminiRunStatus(lastRunAtEpochMillis = twelveMinutesAgo, lastQueueEmpty = true)
+        }
+        assertRunStatus("Last run 12 min ago · nothing to categorize")
+        composeRule.runOnIdle {
+            status.value = GeminiRunStatus(lastRunAtEpochMillis = twelveMinutesAgo, lastFailed = true)
+        }
+        assertRunStatus("Last run failed · retries after the next sync")
+
+        composeRule.runOnIdle { keySaved.value = false }
+        scrollToGeminiCard()
+        composeRule.onNodeWithTag("gemini_key_status").assertTextContains("Auto-categorize off · no key saved")
+        composeRule.onNodeWithTag("gemini_key_run_status").assertDoesNotExist()
+        composeRule.onNodeWithTag("gemini_key_clear_button").assertDoesNotExist()
+    }
+
+    private fun scrollToGeminiCard() {
+        composeRule
+            .onNodeWithTag("data_sheet_list")
+            .performScrollToNode(hasTestTag("gemini_key_card"))
+    }
+
+    private class GeminiCardGateway : TransactionGateway {
+        private val rows = MutableStateFlow<List<Transaction>>(emptyList())
+        override val transactions: Flow<List<Transaction>> = rows
+
+        override suspend fun load(): List<Transaction> = rows.value
+
+        override suspend fun upsert(transaction: Transaction) = Unit
+
+        override suspend fun importTransactions(transactions: List<Transaction>): Int = transactions.size
+
+        override suspend fun importTrustedLegacyTransactions(transactions: List<Transaction>): Int = transactions.size
+
+        override suspend fun delete(id: String) = Unit
+    }
+
+    @Test
     fun pickerCallbackUsesKnownOperationWhenRecreatedStateWasLost() {
         val uri = Uri.parse("content://test/recreated.csv")
 
         assertEquals(DataOperation.Import, pickerResultOperation(uri, DataOperation.Import))
         assertEquals(DataOperation.Export, pickerResultOperation(uri, DataOperation.Export))
         assertNull(pickerResultOperation(null, DataOperation.Import))
+    }
+
+    private companion object {
+        const val EXISTING_GEMINI_KEY = "existing-gemini-key-fixture"
+        const val REPLACEMENT_GEMINI_KEY = "replacement-gemini-key-fixture"
+
+        /** Twelve minutes plus a little slack so the rendered relative time stays "12 min ago". */
+        const val TWELVE_MINUTES_AGO = 12 * 60_000L + 5_000L
     }
 }

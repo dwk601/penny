@@ -14,6 +14,7 @@ import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.time.ZonedDateTime
 import java.util.concurrent.TimeUnit
 
 class SimpleFinSyncWorker(
@@ -59,18 +60,26 @@ class SimpleFinSyncWorker(
         suspend fun schedule(
             context: Context,
             automaticSyncsPerDay: Int,
+            reanchor: Boolean = false,
         ) = withContext(Dispatchers.IO) {
             WorkManager
                 .getInstance(context)
                 .enqueueUniquePeriodicWork(
                     PERIODIC_WORK_NAME,
-                    ExistingPeriodicWorkPolicy.UPDATE,
+                    if (reanchor) {
+                        ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE
+                    } else {
+                        ExistingPeriodicWorkPolicy.UPDATE
+                    },
                     PeriodicWorkRequestBuilder<SimpleFinSyncWorker>(
                         automaticSyncIntervalMillis(automaticSyncsPerDay),
                         TimeUnit.MILLISECONDS,
                     ).setBackoffCriteria(BackoffPolicy.LINEAR, SIMPLEFIN_RETRY_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
                         .setConstraints(networkConstraints())
-                        .build(),
+                        .setInitialDelay(
+                            initialSyncDelayMillis(readPreferredSyncTime(context), ZonedDateTime.now()),
+                            TimeUnit.MILLISECONDS,
+                        ).build(),
                 ).result
                 .get()
         }

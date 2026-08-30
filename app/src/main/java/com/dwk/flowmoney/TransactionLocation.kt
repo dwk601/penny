@@ -8,10 +8,11 @@ data class ParsedTransactionLocation(
     val country: String? = null,
 )
 
-data class StoredTransactionLocation(
+data class StoredProviderOwnedFields(
     val locationCity: String?,
     val locationState: String?,
     val locationCountry: String?,
+    val transactedAtEpochMillis: Long? = null,
 )
 
 object TransactionLocation {

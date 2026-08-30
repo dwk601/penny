@@ -33,6 +33,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.time.LocalTime
+import java.time.ZonedDateTime
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -116,7 +118,133 @@ class SimpleFinLifecycleTest {
 
                 val (start, end) = checkNotNull(requestedWindow)
                 assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
-                assertEquals(TimeUnit.DAYS.toSeconds(45), end - start)
+                // Strictly inside the provider's recommended 45-day range so no advisory is earned.
+                assertEquals(SIMPLEFIN_REQUEST_WINDOW_SECONDS, end - start)
+                assertTrue("span=${end - start}", end - start < TimeUnit.DAYS.toSeconds(45))
+            }
+        }
+
+    @Test
+    fun connectRequestsAWindowStrictlyInsideTheRecommendedFortyFiveDays() =
+        runBlocking {
+            withRepository { _, fake, repository ->
+                fake.currentTime = 1_700_000_000_000L
+                var requestedWindow: Pair<Long, Long>? = null
+                fake.accounts = { _, start, end ->
+                    requestedWindow = start to end
+                    SimpleFinAccountsResult(emptyList())
+                }
+
+                assertTrue(repository.connect("window-token") is SimpleFinSyncResult.Success)
+
+                val (start, end) = checkNotNull(requestedWindow)
+                assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
+                assertEquals(SIMPLEFIN_REQUEST_WINDOW_SECONDS, end - start)
+                assertTrue("span=${end - start}", end - start < TimeUnit.DAYS.toSeconds(45))
+            }
+        }
+
+    @Test
+    fun advisoryOnlyErrorListSyncsSuccessfullyAndKeepsTheAdvisoryInLastError() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_000_000_000L
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "advisory"))
+                fake.credential = "advisory" to OLD_URL
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "advisory-row")),
+                        errors = listOf(RANGE_ADVISORY),
+                    )
+                }
+
+                val result = repository.syncNow()
+
+                assertTrue(result is SimpleFinSyncResult.Success)
+                assertEquals(1, db.transactionDao().getAll().size)
+                val profile = db.simpleFinDao().getProfile()!!
+                assertEquals(fake.currentTime, profile.lastSuccessfulSyncAtEpochMillis)
+                assertEquals(RANGE_ADVISORY, profile.lastError)
+            }
+        }
+
+    @Test
+    fun fatalErrorListStillFailsSyncAndWritesNoRows() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_100_000_000L
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "fatal"))
+                fake.credential = "fatal" to OLD_URL
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "must-not-write")),
+                        errors = listOf(RANGE_ADVISORY, "Connection to institution failed"),
+                    )
+                }
+
+                val result = repository.syncNow()
+
+                assertTrue(result is SimpleFinSyncResult.Failure)
+                assertTrue(db.transactionDao().getAll().isEmpty())
+                assertTrue(
+                    db
+                        .simpleFinDao()
+                        .observeAccounts()
+                        .firstValue()
+                        .isEmpty(),
+                )
+                val profile = db.simpleFinDao().getProfile()!!
+                assertNull(profile.lastSuccessfulSyncAtEpochMillis)
+                assertEquals("SimpleFIN returned an invalid sync response.", profile.lastError)
+            }
+        }
+
+    @Test
+    fun advisoryOnlyErrorListConnectsSuccessfullyAndKeepsTheAdvisoryInLastError() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_200_000_000L
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "connect-advisory-row")),
+                        errors = listOf(RANGE_ADVISORY),
+                    )
+                }
+
+                assertTrue(repository.connect("advisory-token") is SimpleFinSyncResult.Success)
+
+                assertEquals(1, db.transactionDao().getAll().size)
+                val profile = db.simpleFinDao().getProfile()!!
+                assertEquals(fake.currentTime, profile.lastSuccessfulSyncAtEpochMillis)
+                assertEquals(RANGE_ADVISORY, profile.lastError)
+            }
+        }
+
+    @Test
+    fun fatalErrorListStillFailsPendingConnectionAndWritesNoRows() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                fake.currentTime = 6_300_000_000L
+                fake.pendingCredential = SimpleFinPendingCredential("pending-fatal", NEW_URL)
+                fake.accounts = { _, _, _ ->
+                    SimpleFinAccountsResult(
+                        accounts = listOf(account("checking", transactionId = "must-not-write")),
+                        errors = listOf(RANGE_ADVISORY, "auth failure"),
+                    )
+                }
+
+                val result = repository.retryPendingConnection()
+
+                assertTrue(result is SimpleFinSyncResult.Failure)
+                assertNull(db.simpleFinDao().getProfile())
+                assertTrue(db.transactionDao().getAll().isEmpty())
+                assertTrue(
+                    db
+                        .simpleFinDao()
+                        .observeAccounts()
+                        .firstValue()
+                        .isEmpty(),
+                )
             }
         }
 
@@ -341,6 +469,94 @@ class SimpleFinLifecycleTest {
             }
         }
 
+    /**
+     * The preferred time lives outside the profile row, so it has to be durable before the worker is
+     * re-anchored: a crash between the two must leave the saved time, never a schedule pointing at a
+     * time the app has forgotten.
+     */
+    @Test
+    fun preferredSyncTimeIsSavedBeforeReanchoringAtTheProfileCadence() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                val original = SimpleFinProfileEntity(connectionId = "current", automaticSyncsPerDay = 5)
+                db.simpleFinDao().upsertProfile(original)
+                val timesVisibleToScheduling = mutableListOf<LocalTime?>()
+                fake.schedule = { count ->
+                    timesVisibleToScheduling += fake.preferredSyncTime
+                    fake.scheduledCounts += count
+                }
+
+                repository.updateAutomaticSyncTime(LocalTime.of(6, 45))
+
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45)), fake.savedSyncTimes)
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45)), timesVisibleToScheduling)
+                assertEquals(listOf(5), fake.scheduledCounts)
+                assertEquals(LocalTime.of(6, 45), repository.preferredSyncTime.value)
+                assertEquals(original, db.simpleFinDao().getProfile())
+
+                // Clearing is the same path and must publish the unset state, not keep the old time.
+                repository.updateAutomaticSyncTime(null)
+
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45), null), fake.savedSyncTimes)
+                assertEquals(listOf<LocalTime?>(LocalTime.of(6, 45), null), timesVisibleToScheduling)
+                assertEquals(listOf(5, 5), fake.scheduledCounts)
+                assertNull(repository.preferredSyncTime.value)
+                assertNull(fake.preferredSyncTime)
+            }
+        }
+
+    @Test
+    fun preferredSyncTimeSurvivesReanchorFailureAndStillSurfacesTheSchedulingException() =
+        runBlocking {
+            withRepository { db, fake, repository ->
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
+                fake.schedule = { throw IllegalStateException("reanchor failed") }
+
+                val failure = runCatching { repository.updateAutomaticSyncTime(LocalTime.of(23, 15)) }.exceptionOrNull()
+
+                assertTrue(failure is SimpleFinAutomaticSchedulingException)
+                assertEquals(
+                    "Automatic sync schedule was saved, but scheduling could not be updated",
+                    failure?.message,
+                )
+                assertEquals("reanchor failed", failure?.cause?.message)
+                assertEquals(LocalTime.of(23, 15), fake.preferredSyncTime)
+                assertEquals(LocalTime.of(23, 15), repository.preferredSyncTime.value)
+            }
+        }
+
+    @Test
+    fun disconnectedPreferredSyncTimeUpdateSavesNothingAndSchedulesNothing() =
+        runBlocking {
+            withRepository { _, fake, repository ->
+                val failure = runCatching { repository.updateAutomaticSyncTime(LocalTime.of(9, 0)) }.exceptionOrNull()
+
+                assertTrue(failure is IllegalStateException)
+                assertFalse(failure is SimpleFinAutomaticSchedulingException)
+                assertTrue(fake.savedSyncTimes.isEmpty())
+                assertTrue(fake.scheduledCounts.isEmpty())
+                assertNull(repository.preferredSyncTime.value)
+            }
+        }
+
+    @Test
+    fun recoveryPublishesTheStoredPreferredSyncTimeAndTreatsAReadFailureAsUnset() =
+        runBlocking {
+            withRepository { _, fake, repository ->
+                fake.preferredSyncTime = LocalTime.of(7, 30)
+
+                repository.recoverPendingConnection()
+
+                assertEquals(LocalTime.of(7, 30), repository.preferredSyncTime.value)
+
+                fake.readPreferredTime = { throw IOException("preferences unreadable") }
+
+                repository.recoverPendingConnection()
+
+                assertNull(repository.preferredSyncTime.value)
+            }
+        }
+
     @Test
     fun disconnectedQueuedPreferenceUpdateDoesNotSchedule() =
         runBlocking {
@@ -413,7 +629,9 @@ class SimpleFinLifecycleTest {
 
                 val (start, end) = checkNotNull(requestedWindow)
                 assertEquals(TimeUnit.MILLISECONDS.toSeconds(fake.currentTime), end)
-                assertEquals(TimeUnit.DAYS.toSeconds(45), end - start)
+                // Strictly inside the provider's recommended 45-day range so no advisory is earned.
+                assertEquals(SIMPLEFIN_REQUEST_WINDOW_SECONDS, end - start)
+                assertTrue("span=${end - start}", end - start < TimeUnit.DAYS.toSeconds(45))
             }
         }
 
@@ -655,21 +873,49 @@ class SimpleFinLifecycleTest {
     fun periodicSchedulingUpdatesSingleUniqueWork() =
         runBlocking {
             SimpleFinSyncWorker.cancel(context)
+            writePreferredSyncTime(context, null)
             try {
                 SimpleFinSyncWorker.schedule(context, 1)
                 SimpleFinSyncWorker.schedule(context, 12)
 
-                val active =
-                    WorkManager
-                        .getInstance(context)
-                        .getWorkInfosForUniqueWork(SimpleFinSyncWorker.PERIODIC_WORK_NAME)
-                        .get()
-                        .filter { !it.state.isFinished }
+                val active = activePeriodicWork()
                 assertEquals(1, active.size)
+                assertEquals(0L, active.single().initialDelayMillis)
+                val updatedId = active.single().id
+
+                // Re-anchoring must move the first run to the chosen time, which WorkManager can only
+                // do by replacing the request rather than updating it in place.
+                val preferred = LocalTime.now().plusHours(3).withSecond(0).withNano(0)
+                writePreferredSyncTime(context, preferred)
+                SimpleFinSyncWorker.schedule(context, 12, reanchor = true)
+                val enqueuedAt = System.currentTimeMillis()
+                val expectedDelay = initialSyncDelayMillis(preferred, ZonedDateTime.now())
+
+                val reanchored = activePeriodicWork()
+                assertEquals(1, reanchored.size)
+                assertFalse(updatedId == reanchored.single().id)
+                assertTrue(
+                    "initial delay ${reanchored.single().initialDelayMillis} should be about $expectedDelay",
+                    Math.abs(reanchored.single().initialDelayMillis - expectedDelay) <= SCHEDULE_TOLERANCE_MILLIS,
+                )
+                assertTrue(
+                    "next run ${reanchored.single().nextScheduleTimeMillis} should be about " +
+                        "${enqueuedAt + expectedDelay}",
+                    Math.abs(reanchored.single().nextScheduleTimeMillis - (enqueuedAt + expectedDelay)) <=
+                        SCHEDULE_TOLERANCE_MILLIS,
+                )
             } finally {
                 SimpleFinSyncWorker.cancel(context)
+                writePreferredSyncTime(context, null)
             }
         }
+
+    private fun activePeriodicWork(): List<WorkInfo> =
+        WorkManager
+            .getInstance(context)
+            .getWorkInfosForUniqueWork(SimpleFinSyncWorker.PERIODIC_WORK_NAME)
+            .get()
+            .filter { !it.state.isFinished }
 
     @Test
     fun partialErrorsRecordGuardedFailureWithoutWritingDataOrAdvancingSuccess() =
@@ -1216,6 +1462,7 @@ class SimpleFinLifecycleTest {
                         FlowMoneyDatabase.MIGRATION_8_9,
                         FlowMoneyDatabase.MIGRATION_9_10,
                         FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
                     ).build()
             try {
                 assertNull(migrated.simpleFinDao().getProfile())
@@ -1294,6 +1541,7 @@ class SimpleFinLifecycleTest {
                         FlowMoneyDatabase.MIGRATION_8_9,
                         FlowMoneyDatabase.MIGRATION_9_10,
                         FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
                     ).build()
             try {
                 val transaction = migrated.transactionDao().getAll().single()
@@ -1345,6 +1593,7 @@ class SimpleFinLifecycleTest {
                         FlowMoneyDatabase.MIGRATION_8_9,
                         FlowMoneyDatabase.MIGRATION_9_10,
                         FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
                     ).build()
             try {
                 val profile = migrated.simpleFinDao().getProfile()!!
@@ -1393,6 +1642,13 @@ class SimpleFinLifecycleTest {
             credential = connectionId to accessUrl
         }
         var schedule: suspend (Int) -> Unit = { scheduledCounts += it }
+        var preferredSyncTime: LocalTime? = null
+        val savedSyncTimes = mutableListOf<LocalTime?>()
+        var readPreferredTime: suspend () -> LocalTime? = { preferredSyncTime }
+        var savePreferredTime: suspend (LocalTime?) -> Unit = { time ->
+            savedSyncTimes += time
+            preferredSyncTime = time
+        }
 
         val scheduleCount get() = scheduledCounts.size
 
@@ -1442,6 +1698,8 @@ class SimpleFinLifecycleTest {
                 scheduleWork = { schedule(it) },
                 cancelWork = { cancelCount++ },
                 now = { currentTime },
+                readPreferredSyncTime = { readPreferredTime() },
+                savePreferredSyncTime = { savePreferredTime(it) },
             )
     }
 
@@ -1479,7 +1737,14 @@ class SimpleFinLifecycleTest {
     private suspend fun <T> kotlinx.coroutines.flow.Flow<T>.firstValue(): T = first()
 
     private companion object {
+        /** WorkManager stores wall-clock schedule times, so allow for the enqueue round trip. */
+        const val SCHEDULE_TOLERANCE_MILLIS = 60_000L
         const val OLD_URL = "https://old-user:old-password@bridge.simplefin.org/simplefin"
         const val NEW_URL = "https://new-user:new-password@bridge.simplefin.org/simplefin"
+
+        /** Copied byte-for-byte from a real SimpleFIN response dump (error_code `gen.api`). */
+        const val RANGE_ADVISORY =
+            "Requested date range exceeds recommended range of 45 days. " +
+                "In the future, this may be capped."
     }
 }

@@ -26,11 +26,12 @@ class CsvCodecTest {
                 flowKindOverride = FlowKind.TRANSFER,
             )
         val csv = CsvCodec.encode(listOf(sample, overridden))
-        // Export is v3 now: the three location columns are appended after flowKind.
+        // Export is v4 now: the three location columns plus the four provider/detail columns follow flowKind.
         assertThat(csv.lineSequence().first())
             .isEqualTo(
                 "id,occurredAtEpochMillis,merchant,category,note,cents,recurring,flowKind," +
-                    "locationCity,locationState,locationCountry",
+                    "locationCity,locationState,locationCountry," +
+                    "providerDescription,accountName,transactedAtEpochMillis,reviewedAtEpochMillis",
             )
         assertThat(csv).doesNotContain("flowKindOverride")
         assertThat(csv).contains("\"Coffee, Inc.\"")
@@ -532,6 +533,83 @@ class CsvCodecTest {
         assertThat(decoded[0].locationCity).isEqualTo("'=HYPERLINK(\"http://evil\")")
         assertThat(decoded[0].locationState).isEqualTo("'+OR")
         assertThat(decoded[1].locationCity).isEqualTo("'@Portland")
+    }
+
+    @Test
+    fun csvV4RoundTripPreservesProviderDetailsAndReviewTimestamps() {
+        val detailed =
+            sample.copy(
+                id = "tx-detailed",
+                providerDescription = "TRADER JOES #123, PORTLAND OR",
+                accountName = "Checking",
+                transactedAtEpochMillis = 1766142000000,
+                reviewedAtEpochMillis = 1766149200000,
+            )
+        val bare = sample.copy(id = "tx-bare")
+
+        val csv = CsvCodec.encode(listOf(detailed, bare))
+        val decoded = CsvCodec.decode(csv)
+
+        assertThat(decoded).hasSize(2)
+        assertThat(decoded[0].providerDescription).isEqualTo("TRADER JOES #123, PORTLAND OR")
+        assertThat(decoded[0].accountName).isEqualTo("Checking")
+        assertThat(decoded[0].transactedAtEpochMillis).isEqualTo(1766142000000)
+        assertThat(decoded[0].reviewedAtEpochMillis).isEqualTo(1766149200000)
+        assertThat(decoded[0]).isEqualTo(detailed.copy(id = decoded[0].id))
+
+        assertThat(decoded[1].providerDescription).isNull()
+        assertThat(decoded[1].accountName).isNull()
+        assertThat(decoded[1].transactedAtEpochMillis).isNull()
+        assertThat(decoded[1].reviewedAtEpochMillis).isNull()
+        assertThat(decoded[1]).isEqualTo(bare.copy(id = decoded[1].id))
+
+        assertThat(decoded.map { it.id }.toSet()).hasSize(2)
+        decoded.forEach { assertCsvId(it.id) }
+        // A second pass over the same export reproduces exactly the same identities.
+        assertThat(CsvCodec.decode(csv).map { it.id }).containsExactlyElementsIn(decoded.map { it.id }).inOrder()
+    }
+
+    @Test
+    fun v4StableIdsDistinguishRowsThatDifferOnlyByProviderDescription() {
+        val csv =
+            CsvCodec.encode(
+                listOf(
+                    sample.copy(id = "tx-a", providerDescription = "SQ *COFFEE INC 001"),
+                    sample.copy(id = "tx-b", providerDescription = "SQ *COFFEE INC 002"),
+                ),
+            )
+
+        val firstDecode = CsvCodec.decode(csv)
+        val secondDecode = CsvCodec.decode(csv)
+
+        assertThat(firstDecode.map { it.providerDescription })
+            .containsExactly("SQ *COFFEE INC 001", "SQ *COFFEE INC 002")
+            .inOrder()
+        assertThat(firstDecode.map { it.id }.toSet()).hasSize(2)
+        assertThat(secondDecode.map { it.id }).containsExactlyElementsIn(firstDecode.map { it.id }).inOrder()
+        firstDecode.forEach { assertCsvId(it.id) }
+    }
+
+    @Test
+    fun v4StableIdsIgnoreTheReviewTimestampSoAFilledExportKeepsItsIdentity() {
+        val unreviewed = sample.copy(id = "tx-unreviewed", providerDescription = "SQ *COFFEE", reviewedAtEpochMillis = null)
+        val reviewed = unreviewed.copy(id = "tx-reviewed", reviewedAtEpochMillis = 1766149200000)
+
+        val unreviewedDecoded = CsvCodec.decode(CsvCodec.encode(listOf(unreviewed))).single()
+        val reviewedDecoded = CsvCodec.decode(CsvCodec.encode(listOf(reviewed))).single()
+
+        // Review state is user-owned bookkeeping, not row identity: filling it must not forge a new row.
+        assertThat(reviewedDecoded.id).isEqualTo(unreviewedDecoded.id)
+        assertThat(unreviewedDecoded.reviewedAtEpochMillis).isNull()
+        assertThat(reviewedDecoded.reviewedAtEpochMillis).isEqualTo(1766149200000)
+        assertCsvId(unreviewedDecoded.id)
+        // Every other detail column still participates in identity.
+        assertThat(CsvCodec.decode(CsvCodec.encode(listOf(reviewed.copy(providerDescription = "SQ *TEA")))).single().id)
+            .isNotEqualTo(unreviewedDecoded.id)
+        assertThat(CsvCodec.decode(CsvCodec.encode(listOf(reviewed.copy(accountName = "Savings")))).single().id)
+            .isNotEqualTo(unreviewedDecoded.id)
+        assertThat(CsvCodec.decode(CsvCodec.encode(listOf(reviewed.copy(transactedAtEpochMillis = 1766142000000)))).single().id)
+            .isNotEqualTo(unreviewedDecoded.id)
     }
 
     /** Drops the leading id cell; every fixture id in this file is comma-free. */

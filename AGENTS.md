@@ -1,80 +1,83 @@
-# Penny
+# FlowMoney
 
-A single-module Android personal finance app: manual transaction entry, CSV
-import/export, a dashboard, a home-screen widget, and optional bank sync over
-SimpleFIN.
+Android app that tracks money transactions automatically by syncing a bank
+connection over SimpleFIN. Single-module, production, in daily use by its one
+user (the repo owner). There is no second user, no account system, no Play
+Store listing, no localization (`resourceConfigurations += listOf("en")`).
 
-Two names are both load-bearing and neither is a typo — the Gradle root project
-and the user-facing app are `Penny`, while the package, namespace, and database
-are `flowmoney`. Don't normalize one into the other.
+**It is not a manual ledger.** Sync is the primary model: transactions arrive
+from SimpleFIN, get classified, and land in a review queue. Manual entry, the
+transaction editor, and CSV import/export exist as correction and repair paths
+around that pipeline — do not design features that assume the user is keeping
+books by hand.
 
-## Shape of the code
+Because there is exactly one user and one device with real data on it,
+irreversible data loss is the top risk in this repo. Migrations and upgrade
+rehearsal are load-bearing (see skills below); a wiped install is a real loss,
+not a test-fixture reset.
 
-Everything lives flat in `com.dwk.flowmoney` — no layer packages, no module
-split. `MainActivity.kt` is ~3,500 lines and holds nearly all of the Compose
-UI; new screens go in it unless you are deliberately extracting.
+## Two names, both intentional
 
-There is no DI framework. Dependencies are constructed where they are used, and
-`FlowMoneyDatabase.get(context)` is a hand-rolled double-checked singleton.
-There is also no version catalog — dependencies are declared inline in
-`app/build.gradle.kts`.
+The Gradle root project and the user-facing app are `Penny`. The package,
+namespace, and database are `flowmoney`. Neither is a typo. Don't normalize
+one into the other, and don't rename the DB file (`flow_money.db`).
 
-## Build
+## Load-bearing gotchas
 
-- AGP 9.2.1 with `android.newDsl=false` and `android.builtInKotlin=false`. The
-  build opts out of AGP 9's new DSL and built-in Kotlin on purpose, so keep
-  using the classic `android { compileOptions/kotlinOptions }` blocks and the
-  standalone Kotlin plugin.
-- Compose comes from `compose-bom-alpha`, and Material3 is pinned
-  `strictly("1.5.0-alpha23")`. `ExpressiveCompat.kt` exists to absorb that
-  churn — expressive M3 APIs (`MediumFlexibleTopAppBar`, `ButtonGroup`,
-  `RichTimePickerDialog`) are wrapped there rather than called from
-  `MainActivity`. Put new expressive usages in the same place.
-- English only, by config: `resourceConfigurations += listOf("en")`.
-- Releases are hand-archived debug builds. Bump `versionCode`/`versionName`,
-  then copy the APK to `dist/` as `Penny-v<versionName>-<what-changed>-debug.apk`.
-
-```
-./gradlew testDebugUnitTest        # local unit tests
-./gradlew lintDebug assembleDebug
-./gradlew connectedDebugAndroidTest # requires a running emulator or device
-./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.dwk.flowmoney.SimpleFinLifecycleTest
-```
+- **No DI, no version catalog, no layer packages.** Everything is flat in
+  `com.dwk.flowmoney`; dependencies are constructed at use sites;
+  `FlowMoneyDatabase.get(context)` is a hand-rolled double-checked singleton.
+  Match that, or extract deliberately — don't half-introduce a framework.
+- **`MainActivity.kt` is ~6,900 lines** and holds nearly all Compose UI. New
+  screens go there unless you are deliberately extracting one.
+- **AGP 9.2.1 with `android.newDsl=false` and `android.builtInKotlin=false`.**
+  The opt-out is on purpose: keep the classic `android { compileOptions /
+  kotlinOptions }` blocks and the standalone Kotlin plugin.
+- **Material3 is pinned `strictly("1.5.0-alpha23")` on a Compose BOM alpha.**
+  `ExpressiveCompat.kt` exists to absorb that churn. New expressive M3 usages
+  (`MediumFlexibleTopAppBar`, `ButtonGroup`, `RichTimePickerDialog`, …) go in
+  `ExpressiveCompat.kt`, not inline in `MainActivity`.
+- **Untrusted bytes go through `StrictUtf8Reader`** — CSV imports and SimpleFIN
+  response bodies. It enforces size caps and rejects malformed UTF-8. Route any
+  new external input through it too.
+- **`allowBackup=false` + `data_extraction_rules.xml` is hardening**, not
+  leftover scaffolding. SimpleFIN credentials must never move to a backed-up
+  location. See the `simplefin-sync` skill.
+- **`FlowMoneyApplication.onCreate` blocks startup once** under `runBlocking`
+  to delete a credential whose profile no longer exists
+  (`SimpleFinMigrationCleanup`). The blocking call is intentional and runs at
+  most once, guarded by a SharedPreferences flag.
 
 ## Tests
 
-No Robolectric, no mocking framework. Local tests are JUnit4 + Truth +
-`kotlinx-coroutines-test`; anything that needs Android runs instrumented.
+JUnit4 + Truth + `kotlinx-coroutines-test`. No Robolectric, no mocking
+framework — if it needs Android, it runs instrumented.
 
-ViewModel and DAO tests sit in `androidTest`, not `test` — `MainViewModelDataPathTest`,
-`TransactionDaoDataPathTest`, and friends are logic tests that need a real
-Room/SQLite engine. Don't "fix" them by moving them.
+ViewModel and DAO tests live in `androidTest`, not `test`
+(`MainViewModelDataPathTest`, `TransactionDaoDataPathTest`, and friends).
+They are logic tests that need a real Room/SQLite engine. Don't "fix" them by
+moving them to `test`. Screenshot testing is not set up.
 
-Screenshot testing is not set up. `.agents/skills/testing-setup` covers adding
-it, along with the rest of the Android testing stack.
+```
+./gradlew testDebugUnitTest
+./gradlew lintDebug assembleDebug
+./gradlew connectedDebugAndroidTest   # needs a running emulator or device
+./gradlew connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.dwk.flowmoney.SimpleFinLifecycleTest
+```
 
-## Data and credentials
+## Skills
 
-- Room is at schema version 8. Migrations 1→8 are hand-written in
-  `FlowMoneyDatabase.kt`, but `app/schemas/` only contains exported schemas
-  5 through 8, so automated migration tests can't reach further back than 5.
-- SimpleFIN access URLs are encrypted with an AndroidKeystore AES/GCM key and
-  written to `noBackupFilesDir` (`SimpleFinCredentialStore`). They must never
-  be logged, and must never move to SharedPreferences or any backed-up
-  location.
-- `allowBackup=false` plus `data_extraction_rules.xml` is a deliberate
-  hardening choice, not leftover scaffolding.
-- `FlowMoneyApplication.onCreate` blocks startup once, under `runBlocking`, to
-  delete a credential whose profile no longer exists
-  (`SimpleFinMigrationCleanup`). The blocking call is intentional and runs at
-  most once, guarded by a SharedPreferences flag.
-- Untrusted bytes — CSV imports and SimpleFIN responses — go through
-  `StrictUtf8Reader`, which enforces a size cap and rejects malformed UTF-8.
-  Route new external input through it too.
+| Skill | Load when |
+| --- | --- |
+| `.agents/skills/simplefin-sync/` | Touching bank sync: connect/reconnect/disconnect, credential storage, the sync worker or throttle, provider-owned columns, the review queue, merchant rules, or transfer classification. |
+| `.agents/skills/room-migrations/` | Changing any `@Entity`, DAO schema, or the Room version in `FlowMoneyDatabase.kt`. |
+| `.agents/skills/release-build/` | Cutting a build into `dist/`, bumping version, or running the on-device upgrade rehearsal. |
 
-## Notes from prior work
+## Maintaining this file
 
-`.slim/deepwork/` holds write-ups from earlier tasks (SimpleFIN sync, security
-remediation, Material 3 Expressive migration, widget and performance work).
-They are history, not spec — useful for understanding why something looks the
-way it does.
+Keep only what is useful in almost every session. When a rule belongs to one
+area, put it in that skill and delete it here — a rule lives in exactly one
+place. Prune stale entries instead of appending; this file has already drifted
+once (it claimed schema v8 and a `.slim/deepwork/` directory that no longer
+exists). If something is visible by reading the repo, it does not belong here.

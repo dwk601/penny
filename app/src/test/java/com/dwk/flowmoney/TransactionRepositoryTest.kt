@@ -35,12 +35,165 @@ class TransactionRepositoryTest {
             val transactions = repository.transactions.first()
             assertThat(transactions).hasSize(3)
             assertThat(transactions.single { it.id == "local" }.merchant).isEqualTo("Local")
+            // Import strips provider ownership but keeps the descriptive provider context.
             assertThat(
                 transactions.filter { it.merchant == "Imported" }.all {
                     it.source == "local" && it.accountKey == null &&
-                        it.accountName == null
+                        it.accountName == "name"
                 },
             ).isTrue()
+        }
+
+    @Test fun importKeepsProviderContextAndStripsProviderOwnership() =
+        runTest {
+            val dao = FakeTransactionDao()
+            val repository = TransactionRepository(dao) { 4_242L }
+            val csv =
+                """
+                id,occurredAtEpochMillis,merchant,category,note,cents
+                forged,1766145600000,Coffee,Food,imported,-625
+                """.trimIndent()
+            val decoded = CsvCodec.decode(csv).single()
+            val imported =
+                decoded.copy(
+                    source = "simplefin",
+                    accountKey = "acct",
+                    accountName = "Checking",
+                    reviewedAtEpochMillis = null,
+                    providerDescription = "TRADER JOES #123, PORTLAND OR",
+                    merchantOverride = "Trader Joe's",
+                    providerMerchant = "TRADER JOES",
+                    transactedAtEpochMillis = 1_766_059_200_000L,
+                )
+
+            assertThat(repository.importTransactions(listOf(imported))).isEqualTo(1)
+
+            val row = dao.getAll().single()
+            // Kept: the provider fields a later classifier reads.
+            assertThat(row.accountName).isEqualTo("Checking")
+            assertThat(row.providerDescription).isEqualTo("TRADER JOES #123, PORTLAND OR")
+            assertThat(row.transactedAtEpochMillis).isEqualTo(1_766_059_200_000L)
+            // Stripped: everything that would make the row look provider-owned.
+            assertThat(row.source).isEqualTo("local")
+            assertThat(row.accountKey).isNull()
+            assertThat(row.merchantOverride).isNull()
+            assertThat(row.merchant).isEqualTo(decoded.merchant)
+            assertThat(row.reviewedAtEpochMillis).isEqualTo(4_242L)
+        }
+
+    @Test fun autoCategoryWritesOnlyEligibleRowsAndConfirmsThemInTheSameWrite() =
+        runTest {
+            val dao = FakeTransactionDao()
+            dao.upsertAll(
+                listOf(
+                    syncedEntity(id = "eligible"),
+                    syncedEntity(id = "reviewed").copy(reviewedAtEpochMillis = 5),
+                    syncedEntity(id = "categorized").copy(category = "Food"),
+                    syncedEntity(id = "local").copy(source = "local"),
+                ),
+            )
+
+            val changed =
+                dao.applyAutoCategories(
+                    mapOf(
+                        "eligible" to "Groceries",
+                        "reviewed" to "Groceries",
+                        "categorized" to "Groceries",
+                        "local" to "Groceries",
+                        "missing" to "Groceries",
+                    ),
+                    7_000L,
+                )
+
+            val rows = dao.getAll().associateBy { it.id }
+            assertThat(changed).isEqualTo(1)
+            assertThat(rows.getValue("eligible").category).isEqualTo("Groceries")
+            assertThat(rows.getValue("eligible").reviewedAtEpochMillis).isEqualTo(7_000L)
+            assertThat(rows.getValue("reviewed").category).isEqualTo("Other")
+            assertThat(rows.getValue("reviewed").reviewedAtEpochMillis).isEqualTo(5L)
+            assertThat(rows.getValue("categorized").category).isEqualTo("Food")
+            assertThat(rows.getValue("categorized").reviewedAtEpochMillis).isNull()
+            assertThat(rows.getValue("local").category).isEqualTo("Other")
+            assertThat(rows.getValue("local").reviewedAtEpochMillis).isNull()
+            assertThat(rows.keys).doesNotContain("missing")
+        }
+
+    @Test fun autoCategoryRejectsOversizedChunksAndBlankCategories() =
+        runTest {
+            val dao = FakeTransactionDao()
+            dao.upsert(syncedEntity(id = "eligible"))
+
+            assertThat(
+                runCatching {
+                    dao.applyAutoCategories(
+                        (0..GEMINI_CATEGORIZE_CHUNK_SIZE).associate { "id-$it" to "Food" },
+                        7_000L,
+                    )
+                }.exceptionOrNull(),
+            ).isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(
+                runCatching { dao.applyAutoCategories(mapOf("eligible" to " "), 7_000L) }.exceptionOrNull(),
+            ).isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(dao.getAll().single().category).isEqualTo("Other")
+            assertThat(dao.getAll().single().reviewedAtEpochMillis).isNull()
+        }
+
+    @Test fun uncategorizedSyncedReadIsNewestFirstAndBounded() =
+        runTest {
+            val dao = FakeTransactionDao()
+            dao.upsertAll(
+                listOf(
+                    syncedEntity(id = "oldest").copy(occurredAtEpochMillis = 1),
+                    syncedEntity(id = "newest").copy(occurredAtEpochMillis = 3),
+                    syncedEntity(id = "middle").copy(occurredAtEpochMillis = 2),
+                    syncedEntity(id = "reviewed").copy(occurredAtEpochMillis = 4, reviewedAtEpochMillis = 9),
+                    syncedEntity(id = "categorized").copy(occurredAtEpochMillis = 5, category = "Food"),
+                    syncedEntity(id = "local").copy(occurredAtEpochMillis = 6, source = "local"),
+                ),
+            )
+
+            assertThat(dao.uncategorizedSyncedTransactions(2).map { it.id })
+                .containsExactly("newest", "middle")
+                .inOrder()
+            assertThat(dao.uncategorizedSyncedTransactions(25).map { it.id })
+                .containsExactly("newest", "middle", "oldest")
+                .inOrder()
+        }
+
+    @Test fun csvV4ExportImportExportImportDoesNotDuplicateWhenReviewTimestampIsFilled() =
+        runTest {
+            val now = 5_000L
+            val dao = FakeTransactionDao()
+            val repository = TransactionRepository(dao, now = { now })
+            val original =
+                transaction(id = "ignored", merchant = "Coffee").copy(
+                    providerDescription = "SQ *COFFEE",
+                    accountName = "Checking",
+                    transactedAtEpochMillis = 1_000L,
+                    reviewedAtEpochMillis = null,
+                )
+            val firstImport = CsvCodec.decode(CsvCodec.encode(listOf(original)))
+            assertThat(firstImport.single().reviewedAtEpochMillis).isNull()
+            assertThat(repository.importTransactions(firstImport)).isEqualTo(1)
+
+            // Import filled the blank review timestamp, so the next export is no longer byte-identical.
+            val secondCsv = CsvCodec.encode(repository.load())
+            val secondImport = CsvCodec.decode(secondCsv)
+            assertThat(secondImport.single().reviewedAtEpochMillis).isEqualTo(now)
+            assertThat(secondImport.single().id).isEqualTo(firstImport.single().id)
+            assertThat(repository.importTransactions(secondImport)).isEqualTo(0)
+            assertThat(repository.load()).hasSize(1)
+
+            // A third cycle is a fixed point too: the export is now stable and still re-imports as a no-op.
+            val thirdImport = CsvCodec.decode(CsvCodec.encode(repository.load()))
+            assertThat(thirdImport.single().id).isEqualTo(firstImport.single().id)
+            assertThat(repository.importTransactions(thirdImport)).isEqualTo(0)
+            assertThat(repository.load()).hasSize(1)
+            val stored = repository.load().single()
+            assertThat(stored.reviewedAtEpochMillis).isEqualTo(now)
+            assertThat(stored.providerDescription).isEqualTo("SQ *COFFEE")
+            assertThat(stored.accountName).isEqualTo("Checking")
+            assertThat(stored.transactedAtEpochMillis).isEqualTo(1_000L)
         }
 
     @Test fun deleteRemovesOnlyRequestedTransaction() =
@@ -380,6 +533,43 @@ class TransactionRepositoryTest {
         override fun observeUnreviewedTransactions(): Flow<List<TransactionEntity>> = unreviewedRows
 
         override suspend fun getUnreviewedTransactions(): List<TransactionEntity> = unreviewedRows.value
+
+        override suspend fun uncategorizedSyncedTransactions(limit: Int): List<TransactionEntity> =
+            entities.values
+                .filter(::isAutoCategoryEligible)
+                .sortedByDescending { it.occurredAtEpochMillis }
+                .take(limit)
+
+        override suspend fun applyAutoCategory(
+            id: String,
+            category: String,
+            reviewedAtEpochMillis: Long,
+        ): Int {
+            val current = entities[id]?.takeIf(::isAutoCategoryEligible) ?: return 0
+            entities[id] = current.copy(category = category, reviewedAtEpochMillis = reviewedAtEpochMillis)
+            publish()
+            return 1
+        }
+
+        override suspend fun reviewAutoCategorizedBacklog(
+            limit: Int,
+            reviewedAtEpochMillis: Long,
+        ): Int {
+            val drained =
+                entities.values
+                    .filter {
+                        it.source == "simplefin" && it.reviewedAtEpochMillis == null && it.category != "Other"
+                    }.sortedByDescending { it.occurredAtEpochMillis }
+                    .take(limit)
+            for (row in drained) {
+                entities[row.id] = row.copy(reviewedAtEpochMillis = reviewedAtEpochMillis)
+            }
+            if (drained.isNotEmpty()) publish()
+            return drained.size
+        }
+
+        private fun isAutoCategoryEligible(row: TransactionEntity) =
+            row.source == "simplefin" && row.reviewedAtEpochMillis == null && row.category == "Other"
 
         override fun observeMerchantRules(): Flow<List<MerchantRuleEntity>> = ruleRows
 

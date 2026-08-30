@@ -45,6 +45,7 @@ class SyncFoundationDataPathTest {
                         FlowMoneyDatabase.MIGRATION_8_9,
                         FlowMoneyDatabase.MIGRATION_9_10,
                         FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
                     ).build()
             try {
                 val rows = migrated.transactionDao().getAll().associateBy { it.id }
@@ -105,6 +106,7 @@ class SyncFoundationDataPathTest {
                         FlowMoneyDatabase.MIGRATION_8_9,
                         FlowMoneyDatabase.MIGRATION_9_10,
                         FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
                     )
                     .build()
             try {
@@ -179,7 +181,11 @@ class SyncFoundationDataPathTest {
             val migrated =
                 Room
                     .databaseBuilder(context, FlowMoneyDatabase::class.java, name)
-                    .addMigrations(FlowMoneyDatabase.MIGRATION_9_10, FlowMoneyDatabase.MIGRATION_10_11)
+                    .addMigrations(
+                        FlowMoneyDatabase.MIGRATION_9_10,
+                        FlowMoneyDatabase.MIGRATION_10_11,
+                        FlowMoneyDatabase.MIGRATION_11_12,
+                    )
                     .build()
             try {
                 val rows = migrated.transactionDao().getAll().associateBy { it.id }
@@ -430,6 +436,7 @@ class SyncFoundationDataPathTest {
                         providerDescription = "RAW OLD",
                         flowKind = FlowKind.TRANSFER,
                         flowKindOverride = FlowKind.NORMAL,
+                        transactedAtEpochMillis = TRANSACTED_AT_BEFORE,
                     )
                 val previousRule = MerchantRuleEntity("undo market", "Travel", "Old rule display")
                 dao.upsert(origin)
@@ -477,12 +484,113 @@ class SyncFoundationDataPathTest {
                         accountName = "New Checking",
                         providerDescription = "RAW REFRESHED",
                         flowKind = FlowKind.NORMAL,
+                        transactedAtEpochMillis = TRANSACTED_AT_AFTER,
                     )
                 dao.upsertSyncedTransactionsIgnoringTombstones(listOf(refreshed))
+                assertEquals(TRANSACTED_AT_AFTER, dao.getAll().single().transactedAtEpochMillis)
                 repository.undoMerchantRuleSave(secondSave.undoToken)
 
                 assertEquals(previousRule, dao.getMerchantRules().single())
                 assertEquals(refreshed, dao.getAll().single())
+                // The undo rolls back user-owned columns only; the later provider refresh survives.
+                val undone = dao.getAll().single()
+                assertEquals(TRANSACTED_AT_AFTER, undone.transactedAtEpochMillis)
+                assertEquals(origin.category, undone.category)
+                assertEquals(origin.note, undone.note)
+                assertEquals(origin.recurringInterval, undone.recurringInterval)
+                assertEquals(origin.merchantOverride, undone.merchantOverride)
+                assertEquals(origin.flowKindOverride, undone.flowKindOverride)
+                assertEquals(origin.reviewedAtEpochMillis, undone.reviewedAtEpochMillis)
+            }
+        }
+
+    @Test
+    fun resyncOverwritesProviderTransactedAtAndLeavesEveryUserOwnedColumnIntact() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val stored =
+                    syncedEntity("resync-transacted", 10).copy(
+                        category = "Food",
+                        note = "User note",
+                        merchantOverride = "User display",
+                        flowKindOverride = FlowKind.TRANSFER,
+                        reviewedAtEpochMillis = 4_444L,
+                        transactedAtEpochMillis = TRANSACTED_AT_BEFORE,
+                    )
+                dao.upsert(stored)
+
+                val incoming =
+                    stored.copy(
+                        category = "Other",
+                        note = "",
+                        merchantOverride = null,
+                        flowKindOverride = null,
+                        reviewedAtEpochMillis = null,
+                        transactedAtEpochMillis = TRANSACTED_AT_AFTER,
+                    )
+                dao.upsertSyncedTransactionsIgnoringTombstones(
+                    transactions = listOf(incoming),
+                    reviewedAtEpochMillis = 9_999L,
+                )
+
+                val refreshed = dao.getAll().single()
+                assertEquals(TRANSACTED_AT_AFTER, refreshed.transactedAtEpochMillis)
+                assertEquals("Food", refreshed.category)
+                assertEquals("User display", refreshed.merchantOverride)
+                assertEquals("User note", refreshed.note)
+                assertEquals(FlowKind.TRANSFER, refreshed.flowKindOverride)
+                assertEquals(4_444L, refreshed.reviewedAtEpochMillis)
+
+                // The column is provider-owned in both directions: a payload that drops it clears it.
+                dao.upsertSyncedTransactionsIgnoringTombstones(
+                    listOf(incoming.copy(transactedAtEpochMillis = null)),
+                )
+                val cleared = dao.getAll().single()
+                assertNull(cleared.transactedAtEpochMillis)
+                assertEquals("Food", cleared.category)
+                assertEquals("User note", cleared.note)
+                assertEquals(4_444L, cleared.reviewedAtEpochMillis)
+            }
+        }
+
+    @Test
+    fun syncDuringAnOpenEditorKeepsTheRefreshedTransactedAtAndTheUserEdits() =
+        runBlocking {
+            withDatabase { db ->
+                val dao = db.transactionDao()
+                val repository = TransactionRepository(dao) { 8_000L }
+                val seeded =
+                    syncedEntity("editor-race", 10).copy(
+                        reviewedAtEpochMillis = 1_000L,
+                        transactedAtEpochMillis = TRANSACTED_AT_BEFORE,
+                    )
+                dao.upsert(seeded)
+
+                // The editor opens and captures a draft while the stored value is still T1.
+                val staleDraft = dao.getAll().single().toTransaction()
+                assertEquals(TRANSACTED_AT_BEFORE, staleDraft.transactedAtEpochMillis)
+
+                // A sync lands underneath the open editor and refreshes the provider column to T2.
+                dao.upsertSyncedTransactionsIgnoringTombstones(
+                    listOf(
+                        seeded.copy(
+                            transactedAtEpochMillis = TRANSACTED_AT_AFTER,
+                            providerDescription = "RAW REFRESHED",
+                        ),
+                    ),
+                )
+
+                // Saving the now-stale draft must not resurrect T1.
+                repository.upsert(
+                    staleDraft.copy(category = "Food", note = "Edited while syncing"),
+                )
+
+                val row = dao.getAll().single()
+                assertEquals(TRANSACTED_AT_AFTER, row.transactedAtEpochMillis)
+                assertEquals("Food", row.category)
+                assertEquals("Edited while syncing", row.note)
+                assertEquals(1_000L, row.reviewedAtEpochMillis)
             }
         }
 
@@ -690,6 +798,119 @@ class SyncFoundationDataPathTest {
             }
         }
 
+    @Test
+    fun throwingAutoCategorizeStillCommitsTheSyncAndLeavesTheProfileErrorAlone() =
+        runBlocking {
+            withDatabase { db ->
+                db.simpleFinIdentityDao().upsertState(SimpleFinIdentityStateEntity(reconciliationComplete = true))
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
+                val fake = FakeFunctions(accounts(existingDescription = "Old raw", newDescription = "New raw"))
+                var hookCalls = 0
+                val repository =
+                    SimpleFinSyncRepository(
+                        db,
+                        fake.bundle(
+                            autoCategorize = {
+                                hookCalls++
+                                error("synthetic categorization failure")
+                            },
+                        ),
+                    )
+
+                val result = repository.syncNow()
+
+                assertTrue(result is SimpleFinSyncResult.Success)
+                assertEquals(1, hookCalls)
+                assertEquals(3, db.transactionDao().getAll().size)
+                val profile = checkNotNull(db.simpleFinDao().getProfile())
+                assertNull(profile.lastError)
+                assertEquals(fake.currentTime, profile.lastSuccessfulSyncAtEpochMillis)
+            }
+        }
+
+    @Test
+    fun throwingAutoCategorizeAfterConnectLeavesTheNewConnectionFullyPublished() =
+        runBlocking {
+            withDatabase { db ->
+                val fake = FakeFunctions(accounts(existingDescription = "Old raw", newDescription = "New raw"))
+                var hookCalls = 0
+                val repository =
+                    SimpleFinSyncRepository(
+                        db,
+                        fake.bundle(
+                            autoCategorize = {
+                                hookCalls++
+                                error("synthetic categorization failure")
+                            },
+                        ),
+                    )
+
+                val result = repository.connect(SETUP_TOKEN)
+
+                assertTrue(result is SimpleFinSyncResult.Success)
+                assertEquals(1, hookCalls)
+                val profile = checkNotNull(db.simpleFinDao().getProfile())
+                assertEquals(fake.currentTime, profile.connectedAtEpochMillis)
+                assertNull(profile.lastError)
+                // No compensation ran: the promoted credential and its schedule survive.
+                assertEquals(ACCESS_URL, fake.credentials[profile.connectionId])
+                assertEquals(0, fake.deleteCredentialCount)
+                assertEquals(0, fake.cancelCount)
+                assertEquals(1, fake.scheduleCount)
+                assertNull(fake.pendingCredential)
+                assertEquals(SimpleFinPendingConnectionState.NONE, repository.pendingConnectionState.value)
+                assertEquals(3, db.transactionDao().getAll().size)
+            }
+        }
+
+    @Test
+    fun autoCategorizeRunsAfterTheCommitOnBothTheConnectAndSyncPaths() =
+        runBlocking {
+            withDatabase { db ->
+                val fake = FakeFunctions(accounts(existingDescription = "Old raw", newDescription = "New raw"))
+                val seenByHook = mutableListOf<String>()
+                val repository = SimpleFinSyncRepository(db, fake.bundle(autoCategorize = { autoCategorize(db, seenByHook) }))
+
+                assertTrue(repository.connect(SETUP_TOKEN) is SimpleFinSyncResult.Success)
+
+                // The hook saw committed rows, so it ran after the connect transaction.
+                assertEquals(2, seenByHook.size)
+                val rows = db.transactionDao().getAll().filter { it.id in seenByHook }
+                assertEquals(2, rows.size)
+                assertTrue(rows.all { it.category == "Groceries" })
+                // Labelled rows are auto-confirmed by the same write.
+                assertTrue(rows.all { it.reviewedAtEpochMillis == AUTO_CATEGORIZE_AT })
+            }
+
+            withDatabase { db ->
+                db.simpleFinIdentityDao().upsertState(SimpleFinIdentityStateEntity(reconciliationComplete = true))
+                db.simpleFinDao().upsertProfile(SimpleFinProfileEntity(connectionId = "current"))
+                val fake = FakeFunctions(accounts(existingDescription = "Old raw", newDescription = "New raw"))
+                val seenByHook = mutableListOf<String>()
+                val repository = SimpleFinSyncRepository(db, fake.bundle(autoCategorize = { autoCategorize(db, seenByHook) }))
+
+                assertTrue(repository.syncNow() is SimpleFinSyncResult.Success)
+
+                assertEquals(2, seenByHook.size)
+                val rows = db.transactionDao().getAll().filter { it.id in seenByHook }
+                assertEquals(2, rows.size)
+                assertTrue(rows.all { it.category == "Groceries" })
+                assertTrue(rows.all { it.reviewedAtEpochMillis == AUTO_CATEGORIZE_AT })
+                // The auto-reviewed transfer never enters the categorization queue.
+                assertTrue(db.transactionDao().getAll().single { it.merchant == "Card payment" }.id !in seenByHook)
+            }
+        }
+
+    private suspend fun autoCategorize(
+        db: FlowMoneyDatabase,
+        seenByHook: MutableList<String>,
+    ) {
+        val dao = db.transactionDao()
+        val queued = dao.uncategorizedSyncedTransactions(GEMINI_CATEGORIZE_CHUNK_SIZE)
+        seenByHook += queued.map { it.id }
+        dao.applyAutoCategories(queued.associate { it.id to "Groceries" }, AUTO_CATEGORIZE_AT)
+    }
+
     private suspend fun withDatabase(block: suspend (FlowMoneyDatabase) -> Unit) {
         val db = Room.inMemoryDatabaseBuilder(context, FlowMoneyDatabase::class.java).build()
         try {
@@ -761,23 +982,38 @@ class SyncFoundationDataPathTest {
         private val accountRows: List<SimpleFinAccount>,
     ) {
         val currentTime = 1_700_000_000_000L
+        val credentials = mutableMapOf<String, String>()
+        var pendingCredential: SimpleFinPendingCredential? = null
+        var deleteCredentialCount = 0
+        var scheduleCount = 0
+        var cancelCount = 0
 
-        fun bundle() =
+        fun bundle(autoCategorize: suspend () -> Unit = {}) =
             SimpleFinSyncFunctions(
                 claim = { ACCESS_URL },
                 accounts = { _, _, _ -> SimpleFinAccountsResult(accountRows) },
-                saveCredential = { _, _ -> },
-                readCredential = { ACCESS_URL },
-                deleteCredential = {},
-                stagePendingCredential = { _, _ -> },
-                readPendingCredential = { null },
-                promotePendingCredential = { _, _, _ -> },
+                saveCredential = { connectionId, accessUrl -> credentials[connectionId] = accessUrl },
+                readCredential = { connectionId -> credentials[connectionId] ?: ACCESS_URL },
+                deleteCredential = {
+                    deleteCredentialCount++
+                    credentials.clear()
+                },
+                stagePendingCredential = { connectionId, accessUrl ->
+                    pendingCredential = SimpleFinPendingCredential(connectionId, accessUrl)
+                },
+                readPendingCredential = { pendingCredential },
+                promotePendingCredential = { expectedConnectionId, _, _ ->
+                    val staged = checkNotNull(pendingCredential)
+                    check(staged.connectionId == expectedConnectionId)
+                    credentials[staged.connectionId] = staged.accessUrl
+                },
                 restoreRollbackCredential = { false },
-                deletePendingCredential = {},
+                deletePendingCredential = { pendingCredential = null },
                 deleteRollbackCredential = {},
-                scheduleWork = {},
-                cancelWork = {},
+                scheduleWork = { scheduleCount++ },
+                cancelWork = { cancelCount++ },
                 now = { currentTime },
+                autoCategorize = autoCategorize,
             )
     }
 
@@ -898,5 +1134,9 @@ class SyncFoundationDataPathTest {
 
     private companion object {
         const val ACCESS_URL = "https://user:password@bridge.simplefin.org/simplefin"
+        const val SETUP_TOKEN = "setup-token-fixture"
+        const val TRANSACTED_AT_BEFORE = 1_766_059_200_000L
+        const val TRANSACTED_AT_AFTER = 1_766_145_600_000L
+        const val AUTO_CATEGORIZE_AT = 1_767_000_000_000L
     }
 }

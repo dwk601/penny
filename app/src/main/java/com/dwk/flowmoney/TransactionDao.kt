@@ -75,6 +75,36 @@ interface TransactionDao {
     )
     suspend fun getUnreviewedTransactions(): List<TransactionEntity>
 
+    @Query(
+        "SELECT * FROM transactions WHERE source = 'simplefin' " +
+            "AND reviewedAtEpochMillis IS NULL AND category = 'Other' " +
+            "ORDER BY occurredAtEpochMillis DESC LIMIT :limit",
+    )
+    suspend fun uncategorizedSyncedTransactions(limit: Int): List<TransactionEntity>
+
+    @Query(
+        "UPDATE transactions SET category = :category, reviewedAtEpochMillis = :reviewedAtEpochMillis " +
+            "WHERE id = :id " +
+            "AND source = 'simplefin' AND reviewedAtEpochMillis IS NULL AND category = 'Other'",
+    )
+    suspend fun applyAutoCategory(id: String, category: String, reviewedAtEpochMillis: Long): Int
+
+    @Transaction
+    suspend fun applyAutoCategories(categoriesById: Map<String, String>, reviewedAtEpochMillis: Long): Int {
+        require(categoriesById.size <= GEMINI_CATEGORIZE_CHUNK_SIZE)
+        return categoriesById.entries.sumOf { (id, category) ->
+            require(category.isNotBlank())
+            applyAutoCategory(id, category, reviewedAtEpochMillis)
+        }
+    }
+
+    @Query(
+        "UPDATE transactions SET reviewedAtEpochMillis = :reviewedAtEpochMillis WHERE id IN " +
+            "(SELECT id FROM transactions WHERE source='simplefin' AND reviewedAtEpochMillis IS NULL " +
+            "AND category <> 'Other' ORDER BY occurredAtEpochMillis DESC LIMIT :limit)",
+    )
+    suspend fun reviewAutoCategorizedBacklog(limit: Int, reviewedAtEpochMillis: Long): Int
+
     @Query("SELECT * FROM merchant_rules ORDER BY normalizedProviderMerchant")
     fun observeMerchantRules(): Flow<List<MerchantRuleEntity>>
 
@@ -467,6 +497,7 @@ interface TransactionDao {
                                 locationCity = incoming.locationCity,
                                 locationState = incoming.locationState,
                                 locationCountry = incoming.locationCountry,
+                                transactedAtEpochMillis = incoming.transactedAtEpochMillis,
                             )
                         providerRefreshed.copy(
                             reviewedAtEpochMillis =
@@ -499,12 +530,13 @@ interface TransactionDao {
             merchantOverride = merchantOverride,
         )
 
-    suspend fun locationForId(id: String): StoredTransactionLocation? {
+    suspend fun providerOwnedForId(id: String): StoredProviderOwnedFields? {
         val row = transactionsForIds(listOf(id)).singleOrNull() ?: return null
-        return StoredTransactionLocation(
+        return StoredProviderOwnedFields(
             locationCity = row.locationCity,
             locationState = row.locationState,
             locationCountry = row.locationCountry,
+            transactedAtEpochMillis = row.transactedAtEpochMillis,
         )
     }
 
@@ -591,4 +623,5 @@ private fun TransactionEntity.hasSameProviderStateAs(other: TransactionEntity): 
         flowKind == other.flowKind &&
         locationCity == other.locationCity &&
         locationState == other.locationState &&
-        locationCountry == other.locationCountry
+        locationCountry == other.locationCountry &&
+        transactedAtEpochMillis == other.transactedAtEpochMillis

@@ -21,6 +21,7 @@ data class Transaction(
     val locationCity: String? = null,
     val locationState: String? = null,
     val locationCountry: String? = null,
+    val transactedAtEpochMillis: Long? = null,
 ) {
     val isUnreviewed: Boolean
         get() = source == "simplefin" && reviewedAtEpochMillis == null

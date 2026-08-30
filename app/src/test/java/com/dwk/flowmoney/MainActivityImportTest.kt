@@ -92,6 +92,67 @@ class MainActivityImportTest {
         assertThat(restored.accountKey).isNull()
     }
 
+    @Test fun editorDraftRoundTripPreservesProviderTransactedAt() {
+        val original =
+            transaction("synced-transacted", LocalDate.of(2026, 7, 10), -500)
+                .copy(
+                    source = "simplefin",
+                    providerMerchant = "Provider Cafe",
+                    transactedAtEpochMillis = 1_766_059_200_000L,
+                ).toEditorDraft()
+
+        val saved = saveEditorDraft(original)
+        val restored = restoreEditorDraft(saved)
+
+        assertThat(saved).hasSize(21)
+        assertThat(restored.transactedAtEpochMillis).isEqualTo(1_766_059_200_000L)
+        assertThat(restored).isEqualTo(original)
+        assertThat(restored.toTransaction().transactedAtEpochMillis).isEqualTo(1_766_059_200_000L)
+
+        val absent = original.copy(transactedAtEpochMillis = null)
+        val restoredAbsent = restoreEditorDraft(saveEditorDraft(absent))
+        assertThat(restoredAbsent.transactedAtEpochMillis).isNull()
+        assertThat(restoredAbsent).isEqualTo(absent)
+    }
+
+    @Test fun legacyTwentyElementEditorDraftRestoresWithNullTransactedAt() {
+        val legacy =
+            listOf<Any>(
+                "simplefin:id",
+                1234L,
+                "Provider Merchant 17",
+                "12.34",
+                true,
+                "Other",
+                "note",
+                "Monthly",
+                "simplefin",
+                "account-key",
+                "Checking",
+                5678L,
+                true,
+                "RAW DESCRIPTION",
+                true,
+                "Override display",
+                true,
+                "Provider Merchant 17",
+                FlowKind.TRANSFER.name,
+                FlowKind.NORMAL.name,
+            )
+
+        val restored = restoreEditorDraft(legacy)
+
+        assertThat(legacy).hasSize(20)
+        assertThat(restored.transactedAtEpochMillis).isNull()
+        assertThat(restored.id).isEqualTo("simplefin:id")
+        assertThat(restored.reviewedAtEpochMillis).isEqualTo(5678L)
+        assertThat(restored.providerDescription).isEqualTo("RAW DESCRIPTION")
+        assertThat(restored.merchantOverride).isEqualTo("Override display")
+        assertThat(restored.flowKind).isEqualTo(FlowKind.TRANSFER)
+        assertThat(restored.flowKindOverride).isEqualTo(FlowKind.NORMAL)
+        assertThat(restored.toTransaction().transactedAtEpochMillis).isNull()
+    }
+
     @Test fun trueColdStartCompletesOnOverview() {
         val routed =
             completeColdStartNavigation(

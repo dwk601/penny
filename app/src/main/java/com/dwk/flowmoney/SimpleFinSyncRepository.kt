@@ -14,6 +14,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.time.LocalTime
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
@@ -22,6 +23,8 @@ internal const val MIN_AUTOMATIC_SYNCS_PER_DAY = 1
 internal const val MAX_AUTOMATIC_SYNCS_PER_DAY = 12
 internal val SIMPLEFIN_RETRY_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(2)
 internal val SIMPLEFIN_SYNC_WINDOW_SECONDS = TimeUnit.DAYS.toSeconds(45)
+internal val SIMPLEFIN_REQUEST_WINDOW_SECONDS =
+    SIMPLEFIN_SYNC_WINDOW_SECONDS - TimeUnit.HOURS.toSeconds(1)
 
 internal fun isValidAutomaticSyncsPerDay(count: Int) = count in MIN_AUTOMATIC_SYNCS_PER_DAY..MAX_AUTOMATIC_SYNCS_PER_DAY
 
@@ -58,7 +61,7 @@ internal fun isSimpleFinSyncEligible(
 internal class SimpleFinAutomaticSchedulingException(
     cause: Throwable,
 ) : Exception(
-        "Automatic sync frequency was saved, but scheduling could not be updated",
+        "Automatic sync schedule was saved, but scheduling could not be updated",
         cause,
     )
 
@@ -75,8 +78,12 @@ internal class SimpleFinSyncFunctions(
     val deletePendingCredential: suspend () -> Unit,
     val deleteRollbackCredential: suspend () -> Unit,
     val scheduleWork: suspend (Int) -> Unit,
+    val reanchorWork: suspend (Int) -> Unit = scheduleWork,
     val cancelWork: suspend () -> Unit,
     val now: () -> Long,
+    val autoCategorize: suspend () -> Unit = {},
+    val readPreferredSyncTime: suspend () -> LocalTime? = { null },
+    val savePreferredSyncTime: suspend (LocalTime?) -> Unit = {},
 )
 
 class SimpleFinSyncRepository internal constructor(
@@ -86,12 +93,21 @@ class SimpleFinSyncRepository internal constructor(
     constructor(context: Context) : this(FlowMoneyDatabase.get(context), productionFunctions(context))
 
     private val mutablePendingConnectionState = MutableStateFlow(SimpleFinPendingConnectionState.UNKNOWN)
+    private val mutablePreferredSyncTime = MutableStateFlow<LocalTime?>(null)
 
     val profile = db.simpleFinDao().observeProfile()
     val pendingConnectionState: StateFlow<SimpleFinPendingConnectionState> = mutablePendingConnectionState.asStateFlow()
+    val preferredSyncTime: StateFlow<LocalTime?> = mutablePreferredSyncTime.asStateFlow()
 
     suspend fun recoverPendingConnection(): SimpleFinPendingConnectionState =
         lifecycleMutex.withLock {
+            try {
+                mutablePreferredSyncTime.value = functions.readPreferredSyncTime()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                mutablePreferredSyncTime.value = null
+            }
             try {
                 val pending = functions.readPendingCredential()
                 val publishedProfile = db.simpleFinDao().getProfile()
@@ -143,7 +159,7 @@ class SimpleFinSyncRepository internal constructor(
                 } catch (failure: Throwable) {
                     return failure.toConnectFailure()
                 }
-            finishPendingConnection(connectionId, accessUrl, previous)
+            finishPendingConnection(connectionId, accessUrl, previous).alsoAutoCategorize()
         } finally {
             clearActiveConnection(connectionId)
         }
@@ -186,7 +202,7 @@ class SimpleFinSyncRepository internal constructor(
                 deleteRejectedPendingConnection(staged.connectionId)
                 return failure.toConnectFailure()
             }
-            finishPendingConnection(staged.connectionId, staged.accessUrl, checkNotNull(previous))
+            finishPendingConnection(staged.connectionId, staged.accessUrl, checkNotNull(previous)).alsoAutoCategorize()
         } finally {
             clearActiveConnection(staged.connectionId)
         }
@@ -235,15 +251,21 @@ class SimpleFinSyncRepository internal constructor(
         return try {
             val accessUrl = readCredential(profile.connectionId)
             val end = TimeUnit.MILLISECONDS.toSeconds(time)
-            val start = end - SIMPLEFIN_SYNC_WINDOW_SECONDS
+            val start = end - SIMPLEFIN_REQUEST_WINDOW_SECONDS
             val result = functions.accounts(accessUrl, start, end)
-            if (result.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
+            val providerErrors = partitionProviderErrors(result.errors)
+            if (providerErrors.fatal.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
             val mapped = SimpleFinMapper.map(origin, result.accounts)
             val payloadOccurrences = mapped.payloadOccurrences()
             val error =
-                (mapped.warnings + listOfNotNull(nonUsdMessage(result.accounts)))
-                    .joinToString("; ")
+                (
+                    mapped.warnings +
+                        listOfNotNull(
+                            nonUsdMessage(result.accounts),
+                            joinAdvisoryErrors(providerErrors.advisory).ifBlank { null },
+                        )
+                ).joinToString("; ")
                     .ifBlank { null }
             var writeResult = SyncedTransactionWriteResult(0, 0, 0)
             db.withTransaction {
@@ -267,6 +289,7 @@ class SimpleFinSyncRepository internal constructor(
                     identityDao.upsertState(SimpleFinIdentityStateEntity(reconciliationComplete = true))
                 }
             }
+            autoCategorizeAfterCommit()
             SimpleFinSyncResult.Success(writeResult.inserted, writeResult.updated, writeResult.skipped)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -292,7 +315,22 @@ class SimpleFinSyncRepository internal constructor(
                 "SimpleFIN connection changed while updating automatic syncs"
             }
             try {
-                functions.scheduleWork(count)
+                functions.reanchorWork(count)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Throwable) {
+                throw SimpleFinAutomaticSchedulingException(failure)
+            }
+        }
+    }
+
+    suspend fun updateAutomaticSyncTime(time: LocalTime?) {
+        lifecycleMutex.withLock {
+            val profile = db.simpleFinDao().getProfile() ?: error("SimpleFIN is not connected")
+            functions.savePreferredSyncTime(time)
+            mutablePreferredSyncTime.value = time
+            try {
+                functions.reanchorWork(profile.automaticSyncsPerDay)
             } catch (failure: CancellationException) {
                 throw failure
             } catch (failure: Throwable) {
@@ -344,14 +382,20 @@ class SimpleFinSyncRepository internal constructor(
         try {
             val fetchedAt = now()
             val end = TimeUnit.MILLISECONDS.toSeconds(fetchedAt)
-            val initial = functions.accounts(accessUrl, end - SIMPLEFIN_SYNC_WINDOW_SECONDS, end)
-            if (initial.errors.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
+            val initial = functions.accounts(accessUrl, end - SIMPLEFIN_REQUEST_WINDOW_SECONDS, end)
+            val providerErrors = partitionProviderErrors(initial.errors)
+            if (providerErrors.fatal.isNotEmpty()) throw SimpleFinException("SimpleFIN response reported account errors")
             val origin = SimpleFinServerOrigin.fromAccessUrl(accessUrl)
             val mapped = SimpleFinMapper.map(origin, initial.accounts)
             val payloadOccurrences = mapped.payloadOccurrences()
             val warning =
-                (mapped.warnings + listOfNotNull(nonUsdMessage(initial.accounts)))
-                    .joinToString("; ")
+                (
+                    mapped.warnings +
+                        listOfNotNull(
+                            nonUsdMessage(initial.accounts),
+                            joinAdvisoryErrors(providerErrors.advisory).ifBlank { null },
+                        )
+                ).joinToString("; ")
                     .ifBlank { null }
             var writeResult = SyncedTransactionWriteResult(0, 0, 0)
             lifecycleMutex.withLock {
@@ -657,6 +701,19 @@ class SimpleFinSyncRepository internal constructor(
             kind = SimpleFinFailureKind.PROTOCOL,
         )
 
+    private suspend fun autoCategorizeAfterCommit() {
+        try {
+            functions.autoCategorize()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // The sync is already committed; categorization retries on the next sync.
+        }
+    }
+
+    private suspend fun SimpleFinSyncResult.alsoAutoCategorize(): SimpleFinSyncResult =
+        also { if (it is SimpleFinSyncResult.Success) autoCategorizeAfterCommit() }
+
     private fun now() = functions.now()
 
     private fun SimpleFinMappingResult.payloadOccurrences(): List<SimpleFinPayloadOccurrence> =
@@ -707,8 +764,16 @@ class SimpleFinSyncRepository internal constructor(
                     withContext(Dispatchers.IO) { credentialStore.deleteRollback() }
                 },
                 scheduleWork = { SimpleFinSyncWorker.schedule(appContext, it) },
+                reanchorWork = { SimpleFinSyncWorker.schedule(appContext, it, reanchor = true) },
                 cancelWork = { SimpleFinSyncWorker.cancel(appContext) },
                 now = System::currentTimeMillis,
+                autoCategorize = { GeminiAutoCategorizer(appContext).categorizeOneChunk() },
+                readPreferredSyncTime = {
+                    withContext(Dispatchers.IO) { readPreferredSyncTime(appContext) }
+                },
+                savePreferredSyncTime = { time ->
+                    withContext(Dispatchers.IO) { writePreferredSyncTime(appContext, time) }
+                },
             )
         }
     }

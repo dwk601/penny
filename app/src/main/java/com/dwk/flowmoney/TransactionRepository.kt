@@ -106,15 +106,16 @@ class TransactionRepository(
                 transaction
             }
         val entity = reviewed.toEntity()
-        val stored = dao.locationForId(entity.id)
+        val stored = dao.providerOwnedForId(entity.id)
         val preserved =
             if (stored == null) {
-                entity
+                entity.copy(transactedAtEpochMillis = null)
             } else {
                 entity.copy(
                     locationCity = stored.locationCity,
                     locationState = stored.locationState,
                     locationCountry = stored.locationCountry,
+                    transactedAtEpochMillis = stored.transactedAtEpochMillis,
                 )
             }
         dao.upsertAndClearIgnored(preserved)
@@ -128,11 +129,12 @@ class TransactionRepository(
                     .copy(
                         source = "local",
                         accountKey = null,
-                        accountName = null,
+                        accountName = it.accountName,
                         reviewedAtEpochMillis = it.reviewedAtEpochMillis ?: now(),
-                        providerDescription = null,
+                        providerDescription = it.providerDescription,
                         merchantOverride = null,
                         providerMerchant = null,
+                        transactedAtEpochMillis = it.transactedAtEpochMillis,
                     ).toEntity()
             },
         )
