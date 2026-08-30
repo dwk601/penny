@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -329,6 +330,46 @@ class GeminiAutoCategorizerTest {
                 )
             }
         }
+
+    @Test
+    fun persistedRunStatusResetsCountersWhenARunFails() {
+        val store = GeminiRunStatusStore(context)
+        try {
+            store.clear()
+            assertEquals(GeminiRunStatus(), store.load())
+
+            store.recordSuccess(atEpochMillis = FIXED_NOW, labeled = 7, queueEmpty = true)
+            assertEquals(
+                GeminiRunStatus(
+                    lastRunAtEpochMillis = FIXED_NOW,
+                    lastLabeled = 7,
+                    lastQueueEmpty = true,
+                    lastFailed = false,
+                ),
+                store.load(),
+            )
+
+            store.recordFailure(atEpochMillis = FIXED_NOW + 60_000L)
+
+            // A failure must not leave the previous run's counters behind.
+            val reloaded = GeminiRunStatusStore(context).load()
+            assertEquals(
+                GeminiRunStatus(
+                    lastRunAtEpochMillis = FIXED_NOW + 60_000L,
+                    lastLabeled = 0,
+                    lastQueueEmpty = false,
+                    lastFailed = true,
+                ),
+                reloaded,
+            )
+            assertTrue(reloaded.lastFailed)
+            assertEquals(0, reloaded.lastLabeled)
+            assertFalse(reloaded.lastQueueEmpty)
+            assertEquals(FIXED_NOW + 60_000L, reloaded.lastRunAtEpochMillis)
+        } finally {
+            store.clear()
+        }
+    }
 
     private suspend fun seedEligible(
         db: FlowMoneyDatabase,
