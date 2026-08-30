@@ -83,19 +83,27 @@ interface TransactionDao {
     suspend fun uncategorizedSyncedTransactions(limit: Int): List<TransactionEntity>
 
     @Query(
-        "UPDATE transactions SET category = :category WHERE id = :id " +
+        "UPDATE transactions SET category = :category, reviewedAtEpochMillis = :reviewedAtEpochMillis " +
+            "WHERE id = :id " +
             "AND source = 'simplefin' AND reviewedAtEpochMillis IS NULL AND category = 'Other'",
     )
-    suspend fun applyAutoCategory(id: String, category: String): Int
+    suspend fun applyAutoCategory(id: String, category: String, reviewedAtEpochMillis: Long): Int
 
     @Transaction
-    suspend fun applyAutoCategories(categoriesById: Map<String, String>): Int {
+    suspend fun applyAutoCategories(categoriesById: Map<String, String>, reviewedAtEpochMillis: Long): Int {
         require(categoriesById.size <= GEMINI_CATEGORIZE_CHUNK_SIZE)
         return categoriesById.entries.sumOf { (id, category) ->
             require(category.isNotBlank())
-            applyAutoCategory(id, category)
+            applyAutoCategory(id, category, reviewedAtEpochMillis)
         }
     }
+
+    @Query(
+        "UPDATE transactions SET reviewedAtEpochMillis = :reviewedAtEpochMillis WHERE id IN " +
+            "(SELECT id FROM transactions WHERE source='simplefin' AND reviewedAtEpochMillis IS NULL " +
+            "AND category <> 'Other' ORDER BY occurredAtEpochMillis DESC LIMIT :limit)",
+    )
+    suspend fun reviewAutoCategorizedBacklog(limit: Int, reviewedAtEpochMillis: Long): Int
 
     @Query("SELECT * FROM merchant_rules ORDER BY normalizedProviderMerchant")
     fun observeMerchantRules(): Flow<List<MerchantRuleEntity>>

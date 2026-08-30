@@ -647,6 +647,7 @@ fun FlowMoneyApp(
     var editorSessionId by rememberSaveable { mutableStateOf(0) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
     var geminiKeySaved by remember { mutableStateOf(false) }
+    var geminiStatus by remember { mutableStateOf(GeminiRunStatus()) }
     var navigationState by rememberSaveable(stateSaver = DashboardNavigationStateSaver) {
         mutableStateOf(DashboardNavigationState())
     }
@@ -1113,6 +1114,9 @@ fun FlowMoneyApp(
                 message = "Bank sync failed"
             } finally {
                 dataOperation = null
+                if (showDataSheet) {
+                    geminiStatus = withContext(Dispatchers.IO) { GeminiRunStatusStore(context).load() }
+                }
             }
             hostState.showSnackbar(message)
         }
@@ -1398,7 +1402,12 @@ fun FlowMoneyApp(
 
     LaunchedEffect(showDataSheet) {
         if (showDataSheet) {
-            geminiKeySaved = withContext(Dispatchers.IO) { GeminiApiKeyStore(context).hasKey() }
+            val (hasKey, status) =
+                withContext(Dispatchers.IO) {
+                    GeminiApiKeyStore(context).hasKey() to GeminiRunStatusStore(context).load()
+                }
+            geminiKeySaved = hasKey
+            geminiStatus = status
         }
     }
 
@@ -1560,11 +1569,19 @@ fun FlowMoneyApp(
                     if (dataOperation == null) showDataSheet = false
                 },
                 geminiKeySaved = geminiKeySaved,
+                geminiStatus = geminiStatus,
                 onSaveGeminiKey = { key ->
                     scope.launch {
                         runCatching {
-                            withContext(Dispatchers.IO) { GeminiApiKeyStore(context).save(key.trim()) }
+                            withContext(Dispatchers.IO) {
+                                GeminiApiKeyStore(context).save(key.trim())
+                                GeminiRunStatusStore(context).clear()
+                            }
                             geminiKeySaved = true
+                            geminiStatus = GeminiRunStatus()
+                            dataSnackbarHostState.showSnackbar(
+                                "Gemini key saved. Auto-categorize runs after each sync.",
+                            )
                         }.onFailure { failure ->
                             if (failure is CancellationException) throw failure
                             dataSnackbarHostState.showSnackbar("Could not save Gemini key")
@@ -1574,8 +1591,13 @@ fun FlowMoneyApp(
                 onClearGeminiKey = {
                     scope.launch {
                         runCatching {
-                            withContext(Dispatchers.IO) { GeminiApiKeyStore(context).delete() }
+                            withContext(Dispatchers.IO) {
+                                GeminiApiKeyStore(context).delete()
+                                GeminiRunStatusStore(context).clear()
+                            }
                             geminiKeySaved = false
+                            geminiStatus = GeminiRunStatus()
+                            dataSnackbarHostState.showSnackbar("Gemini key removed. Auto-categorize off.")
                         }.onFailure { failure ->
                             if (failure is CancellationException) throw failure
                             dataSnackbarHostState.showSnackbar("Could not remove Gemini key")
@@ -2609,7 +2631,7 @@ internal fun ReviewPage(
                         ) {
                             Text("All caught up", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "New synced transactions will appear here for optional corrections.",
+                                "Synced transactions that are not auto-confirmed will appear here for optional corrections.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -3831,6 +3853,7 @@ internal fun DataSheet(
     onRetryConnection: () -> Unit,
     onCancelPendingConnection: () -> Unit,
     geminiKeySaved: Boolean = false,
+    geminiStatus: GeminiRunStatus = GeminiRunStatus(),
     onSaveGeminiKey: (String) -> Unit = {},
     onClearGeminiKey: () -> Unit = {},
     modifier: Modifier = Modifier,
@@ -4252,6 +4275,7 @@ internal fun DataSheet(
                 item {
                     GeminiCategorizeCard(
                         keySaved = geminiKeySaved,
+                        status = geminiStatus,
                         enabled = !isBusy,
                         onSaveKey = onSaveGeminiKey,
                         onClearKey = onClearGeminiKey,
@@ -4296,9 +4320,35 @@ internal fun DataSheet(
     }
 }
 
+private fun geminiRunRelativeTime(fromEpochMillis: Long, nowEpochMillis: Long): String {
+    val elapsed = (nowEpochMillis - fromEpochMillis).coerceAtLeast(0L)
+    val minutes = elapsed / 60_000L
+    val hours = elapsed / 3_600_000L
+    val days = elapsed / 86_400_000L
+    return when {
+        minutes < 1L -> "just now"
+        minutes < 60L -> "$minutes min ago"
+        hours < 24L -> "$hours hr ago"
+        days == 1L -> "1 day ago"
+        else -> "$days days ago"
+    }
+}
+
+private fun geminiRunStatusLine(status: GeminiRunStatus, nowEpochMillis: Long = System.currentTimeMillis()): String {
+    if (status.lastFailed) return "Last run failed · retries after the next sync"
+    val lastRun = status.lastRunAtEpochMillis ?: return "Runs after the next sync"
+    val relative = geminiRunRelativeTime(lastRun, nowEpochMillis)
+    return if (status.lastQueueEmpty) {
+        "Last run $relative · nothing to categorize"
+    } else {
+        "Last run $relative · ${status.lastLabeled} categorized and confirmed"
+    }
+}
+
 @Composable
 private fun GeminiCategorizeCard(
     keySaved: Boolean,
+    status: GeminiRunStatus,
     enabled: Boolean,
     onSaveKey: (String) -> Unit,
     onClearKey: () -> Unit,
@@ -4308,15 +4358,21 @@ private fun GeminiCategorizeCard(
         DataSheetSectionHeader("Auto-categorize")
         DataCard(modifier = Modifier.testTag("gemini_key_card")) {
             Text(
-                "Paste a Google AI Studio key. After each sync, up to $GEMINI_CATEGORIZE_CHUNK_SIZE uncategorized transactions are labelled. Reviewed transactions and merchant rules are never changed.",
+                "Paste a Google AI Studio key. After each sync, up to $GEMINI_CATEGORIZE_CHUNK_SIZE uncategorized transactions are labelled and marked reviewed automatically. Transactions you already reviewed and merchant-rule categories are never changed. Anything Gemini can't label stays in Review.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                if (keySaved) "Key saved" else "No key saved",
+                if (keySaved) "Auto-categorize on · key saved" else "Auto-categorize off · no key saved",
                 modifier = Modifier.testTag("gemini_key_status"),
             )
+            if (keySaved) {
+                Text(
+                    geminiRunStatusLine(status),
+                    modifier = Modifier.testTag("gemini_key_run_status"),
+                )
+            }
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(
                 value = apiKey,
