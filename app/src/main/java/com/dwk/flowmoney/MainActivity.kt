@@ -141,6 +141,7 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -2463,11 +2464,12 @@ private fun OverviewPage(
                                         transaction = transaction,
                                         onEdit = { onEdit(transaction) },
                                         onDelete = { onDelete(transaction) },
+                                        showDate = true,
                                     )
                                 }
                                 if (index < latestSpendingTransactions.lastIndex) {
                                     HorizontalDivider(
-                                        modifier = Modifier.padding(start = 68.dp),
+                                        modifier = Modifier.padding(start = 14.dp),
                                         thickness = 1.dp,
                                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                                     )
@@ -2816,11 +2818,7 @@ private fun ReviewTransactionCard(
                     Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
                     Spacer(Modifier.width(8.dp))
                 }
-                TransactionCategoryBadge(transaction.category)
-                Spacer(Modifier.width(12.dp))
-                TransactionIdentity(transaction, Modifier.weight(1f))
-                Spacer(Modifier.width(8.dp))
-                TransactionAmount(transaction)
+                TransactionPresentation(transaction, modifier = Modifier.weight(1f))
             }
             if (!selectionMode) {
                 Row(
@@ -3180,7 +3178,7 @@ private fun TransactionsPage(
                                     }
                                     if (index < group.transactions.lastIndex) {
                                         HorizontalDivider(
-                                            modifier = Modifier.padding(start = 68.dp),
+                                            modifier = Modifier.padding(start = 14.dp),
                                             thickness = 1.dp,
                                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                                         )
@@ -3331,7 +3329,7 @@ private fun TransactionFilterBar(
         OutlinedTextField(
             value = whereFilter,
             onValueChange = onWhereFilterChange,
-            placeholder = { Text("Merchant, note, or account") },
+            placeholder = { Text("Merchant, place, note, or account") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             colors = flowTextFieldColors(),
@@ -3776,6 +3774,7 @@ private fun InsightsPage(
                             transaction = transaction,
                             onClick = { onEdit(transaction) },
                             modifier = Modifier.testTag("insight_transaction_${transaction.id}"),
+                            showDate = true,
                         )
                     }
                 }
@@ -5779,6 +5778,7 @@ private fun SwipeTransactionRow(
     transaction: Transaction,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    showDate: Boolean = false,
 ) {
     val haptic = LocalHapticFeedback.current
     val latestOnEdit by rememberUpdatedState(onEdit)
@@ -5816,7 +5816,7 @@ private fun SwipeTransactionRow(
                     .fillMaxWidth()
                     .testTag("transaction_row"),
         ) {
-            TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete)
+            TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete, showDate = showDate)
         }
     }
 }
@@ -5867,9 +5867,9 @@ private fun TransactionRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onDelete: (() -> Unit)? = null,
+    showDate: Boolean = false,
 ) {
-    val fontScale = LocalDensity.current.fontScale
-    BoxWithConstraints(
+    Box(
         modifier =
             modifier
                 .fillMaxWidth()
@@ -5896,81 +5896,50 @@ private fun TransactionRow(
                         }
                 },
     ) {
-        val shouldStack = maxWidth < 420.dp || fontScale >= 1.3f
-        if (shouldStack) {
-            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TransactionCategoryBadge(transaction.category)
-                    Spacer(Modifier.width(12.dp))
-                    TransactionIdentity(transaction, Modifier.weight(1f))
-                }
-                TransactionAmount(
-                    transaction = transaction,
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(top = 4.dp),
-                )
-            }
-        } else {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TransactionCategoryBadge(transaction.category)
-                Spacer(Modifier.width(12.dp))
-                TransactionIdentity(transaction, Modifier.weight(1f))
-                Spacer(Modifier.width(10.dp))
-                TransactionAmount(transaction, Modifier.widthIn(min = 96.dp))
-            }
-        }
+        TransactionPresentation(transaction, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), showDate, 28.dp)
     }
 }
 
 @Composable
-private fun TransactionCategoryBadge(category: String) {
-    val badgeColors = categoryBadgeColors(category)
-    Box(
-        modifier =
-            Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .background(badgeColors.container),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = category.firstOrNull()?.uppercase() ?: "$",
-            fontWeight = FontWeight.Bold,
-            color = badgeColors.content,
-        )
-    }
-}
-
-@Composable
-private fun TransactionIdentity(
+private fun TransactionPresentation(
     transaction: Transaction,
     modifier: Modifier = Modifier,
+    showDate: Boolean = false,
+    widthAdjustment: androidx.compose.ui.unit.Dp = 0.dp,
 ) {
-    Column(modifier = modifier) {
-        Text(
-            text = transaction.merchant.ifBlank { "Untitled" },
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val amountStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")
+    val amountText = MoneyFormatter.formatUsd(transaction.cents)
+    val measuredWidth = measurer.measure(amountText, style = amountStyle, softWrap = false).size.width
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val stack = density.fontScale >= 1.3f || maxWidth + widthAdjustment < 280.dp
+        val availablePx = with(density) { (if (stack) maxWidth else (maxWidth - 8.dp).coerceAtLeast(0.dp)).toPx() }
+        val scale = if (measuredWidth > availablePx && availablePx > 0) availablePx / measuredWidth else 1f
+        val amountWidth = with(density) { minOf(measuredWidth.toFloat(), availablePx).toDp() }
+        val accessibility = transaction.rowAccessibility()
+        Column(modifier = Modifier.fillMaxWidth().semantics { contentDescription = accessibility }) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = transaction.merchant.ifBlank { "Untitled" },
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (!stack) {
+                    Spacer(Modifier.width(8.dp))
+                    TransactionAmount(transaction, Modifier.width(amountWidth), scale)
+                }
+            }
             Text(
-                text = transaction.rowSubtitle(),
+                text = transaction.rowSubtitle(showDate),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
             )
-            transaction.recurringInterval?.let { recurringInterval ->
-                Spacer(Modifier.width(6.dp))
-                RecurringPill(recurringInterval = recurringInterval)
-            }
+            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), scale)
         }
     }
 }
@@ -5979,6 +5948,7 @@ private fun TransactionIdentity(
 private fun TransactionAmount(
     transaction: Transaction,
     modifier: Modifier = Modifier,
+    scale: Float = 1f,
 ) {
     Text(
         text = MoneyFormatter.formatUsd(transaction.cents),
@@ -5987,31 +5957,15 @@ private fun TransactionAmount(
             transaction.cents < 0 -> LocalFinanceColors.current.expense
             else -> LocalFinanceColors.current.income
         },
-        style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+        style = MaterialTheme.typography.titleMedium.copy(
+            fontFeatureSettings = "tnum",
+            fontSize = MaterialTheme.typography.titleMedium.fontSize * scale,
+        ),
+        softWrap = false,
+        maxLines = 1,
         textAlign = TextAlign.End,
         modifier = modifier,
     )
-}
-
-@Composable
-private fun RecurringPill(recurringInterval: RecurrenceInterval) {
-    Box(
-        modifier =
-            Modifier
-                .clip(MaterialTheme.shapes.small)
-                .background(MaterialTheme.colorScheme.secondaryContainer)
-                .semantics { contentDescription = "Recurring ${recurringInterval.label}" }
-                .padding(horizontal = 7.dp, vertical = 3.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = recurringInterval.label,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-        )
-    }
 }
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
@@ -7129,15 +7083,27 @@ private fun EditorDraft.occurredAtDateTime(): LocalDateTime =
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
 
-private fun Transaction.rowSubtitle(): String {
-    val categoryLabel = category.ifBlank { "Other" }
-    val date = occurredAtDateTime()
-    val account = accountName?.takeIf { source == "simplefin" && it.isNotBlank() }
-    return if (account == null) {
-        "$categoryLabel • ${date.format(ListDateFormatter)}"
+private fun Transaction.rowSubtitle(showDate: Boolean): String {
+    val categoryLabel = if (effectiveFlowKind == FlowKind.TRANSFER) "Transfer" else category.trim().ifBlank { "Other" }
+    val location = listOfNotNull(locationCity?.trim()?.takeIf { it.isNotEmpty() }, locationState?.trim()?.takeIf { it.isNotEmpty() })
+        .joinToString(", ").ifBlank { accountName?.trim().orEmpty() }
+    val timestamp = transactedAtEpochMillis ?: occurredAtEpochMillis.takeIf { source != "simplefin" }
+    val whenLabel = if (showDate) {
+        Instant.ofEpochMilli(timestamp ?: occurredAtEpochMillis).atZone(ZoneId.systemDefault()).format(ShortDateFormatter)
     } else {
-        "$categoryLabel • $account • ${date.format(ShortDateFormatter)}"
+        timestamp?.let { Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).format(RowTimeFormatter) }.orEmpty()
     }
+    return listOf(categoryLabel, location, whenLabel).filter { it.isNotBlank() }.joinToString(" · ")
+}
+
+private fun Transaction.rowAccessibility(): String {
+    val timestamp = transactedAtEpochMillis
+    val date = when {
+        timestamp != null -> "Purchase ${Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).format(ListDateFormatter)}"
+        source == "simplefin" -> "Posted ${occurredAtDateTime().format(ShortDateFormatter)}"
+        else -> "Occurred ${occurredAtDateTime().format(ListDateFormatter)}"
+    }
+    return listOfNotNull(accountName?.trim()?.takeIf { it.isNotEmpty() }, date, recurringInterval?.let { "Recurring ${it.label}" }).joinToString(", ")
 }
 
 private fun Transaction.deleteDescription(): String {
@@ -7202,50 +7168,11 @@ private fun parseDateTime(
         null
     }
 
-private data class CategoryBadgeColors(
-    val container: Color,
-    val content: Color,
-)
-
-@Composable
-private fun categoryBadgeColors(category: String): CategoryBadgeColors {
-    val colors = MaterialTheme.colorScheme
-    return when (category) {
-        "Food", "Groceries", "Restaurants", "Coffee",
-        "Healthcare", "Pharmacy", "Fitness", "Education", "Charity",
-        -> {
-            CategoryBadgeColors(colors.secondaryContainer, colors.onSecondaryContainer)
-        }
-
-        "Transit", "Gas", "Ride share", "Car", "Parking", "Travel",
-        "Salary", "Bonus", "Freelance", "Business", "Deposit", "Refund", "Interest",
-        "Dividends", "Investments", "Rental", "Reimbursement", "Transfer", "Gift", "Sale",
-        -> {
-            CategoryBadgeColors(colors.primaryContainer, colors.onPrimaryContainer)
-        }
-
-        "Home", "Rent", "Mortgage", "Utilities", "Phone", "Internet" -> {
-            CategoryBadgeColors(colors.tertiaryContainer, colors.onTertiaryContainer)
-        }
-
-        "Insurance", "Taxes", "Fees", "Debt", "Subscriptions" -> {
-            CategoryBadgeColors(colors.surfaceContainerHighest, colors.onSurface)
-        }
-
-        "Entertainment", "Shopping", "Clothing", "Gifts", "Kids", "Pets" -> {
-            CategoryBadgeColors(colors.errorContainer, colors.onErrorContainer)
-        }
-
-        else -> {
-            CategoryBadgeColors(colors.surfaceContainerHighest, colors.onSurface)
-        }
-    }
-}
-
 private val DateFormatter = DateTimeFormatter.ISO_LOCAL_DATE
 private val TimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val ListDateFormatter = DateTimeFormatter.ofPattern("MMM d, h:mm a")
 private val ShortDateFormatter = DateTimeFormatter.ofPattern("MMM d")
+private val RowTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
 private val DayHeaderFormatter = DateTimeFormatter.ofPattern("EEEE, MMM d")
 private val MonthLabelFormatter = DateTimeFormatter.ofPattern("MMM", Locale.US)
 private const val SimpleFinCreateUrl = "https://bridge.simplefin.org/simplefin/create"

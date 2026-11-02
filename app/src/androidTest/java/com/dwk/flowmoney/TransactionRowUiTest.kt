@@ -72,6 +72,36 @@ class TransactionRowUiTest {
     }
 
     @Test
+    fun defaultWidthShowsAmountBesideMerchantAndPlaceOnSecondLine() {
+        val transaction = transaction("place", -783).copy(
+            merchant = "Starbucks", category = "Coffee", source = "simplefin",
+            accountName = "Checking", locationCity = "New York", locationState = "NY",
+            transactedAtEpochMillis = null,
+        )
+        setTransactionScreen(transaction)
+        scrollToTransaction(transaction.id)
+        val merchant = composeRule.onNodeWithText("Starbucks", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val amount = composeRule.onNodeWithText("-\$7.83", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertTrue("amount should share the merchant line", amount.top < merchant.bottom && merchant.top < amount.bottom)
+        composeRule.onNodeWithText("Coffee · New York, NY", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test fun rowAt280DpDoesNotStack() = assertAmountPlacement(screenWidth = 320, stacked = false)
+
+    @Test fun rowBelow280DpStacks() = assertAmountPlacement(screenWidth = 319, stacked = true)
+
+    @Test fun rowAtLargeFontScaleStacks() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = true)
+
+    private fun assertAmountPlacement(screenWidth: Int, fontScale: Float = 1f, stacked: Boolean) {
+        val transaction = transaction("threshold", -783).copy(merchant = "Shop")
+        setTransactionScreen(transaction, width = screenWidth, fontScale = fontScale)
+        scrollToTransaction(transaction.id)
+        val merchant = composeRule.onNodeWithText("Shop", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val amount = composeRule.onNodeWithText("-\$7.83", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertEquals(stacked, amount.top >= merchant.bottom)
+    }
+
+    @Test
     fun swipeLabelsAreAbsentAtRestAndOnlyShownForActiveDirection() {
         val transaction = transaction(id = "swipe", cents = -1_250)
         setTransactionScreen(transaction = transaction)
