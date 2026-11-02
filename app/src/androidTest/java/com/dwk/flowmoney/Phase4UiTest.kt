@@ -461,6 +461,8 @@ class Phase4UiTest {
             val received = composeRule.onNodeWithTag("transaction_day_received_$date")
             if (offset == 0L || offset == 3L) spent.assertExists() else spent.assertDoesNotExist()
             if (offset == 1L || offset == 3L) received.assertExists() else received.assertDoesNotExist()
+            if (offset == 2L) composeRule.onNodeWithTag("transaction_day_totals_$date").assertDoesNotExist()
+            else composeRule.onNodeWithTag("transaction_day_totals_$date").assertExists()
         }
     }
 

@@ -21,6 +21,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyDescendant
@@ -132,14 +133,35 @@ class SyncFirstWorkflowUiTest {
             val merchant = composeRule.onNodeWithText(transaction.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
             val amount = composeRule.onNodeWithText("-\$5.00", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
             val metadata = composeRule.onNodeWithText("Other · Checking", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
-            return listOf(merchant.left - row.left, merchant.top - row.top, amount.left - row.left, amount.top - row.top, metadata.left - row.left, metadata.width)
+            return listOf(merchant.left - row.left, merchant.top - row.top, merchant.bottom - row.top, amount.left - row.left, amount.top - row.top, metadata.left - row.left, metadata.width)
         }
         val before = geometry()
         composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_select_action"))
         composeRule.onNodeWithTag("review_select_action").performClick()
-        assertEquals(before, geometry())
+        val after = geometry()
+        val density = composeRule.onNodeWithTag("review_row_stable").fetchSemanticsNode().layoutInfo.density.density
+        assertTrue("normal mode must not have checkbox gutter", kotlin.math.abs(after[0] - before[0] - 56f * density) < 2f)
+        assertEquals(before[4] >= before[2], after[4] >= after[2])
+        assertEquals(before[3], after[3], 1f)
+        assertTrue(after[6] < before[6])
         composeRule.onNodeWithTag("review_row_stable").performClick().assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
         assertEquals(0, edits)
+    }
+
+    @Test fun reviewBulkControlsRemainStickyAndDisabledUntilSelected() {
+        val rows = (0..12).map { syncedTransaction("sticky-$it", LocalDate.of(2026, 7, 10).minusDays(it.toLong()), "Merchant $it") }
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                ReviewPage(rows, onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false, modifier = Modifier.fillMaxSize())
+            }
+        }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_bulk_category_food").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_accept_other_action").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_sticky-12"))
+        composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed()
+        composeRule.onNodeWithTag("review_row_sticky-12").performClick()
+        composeRule.onNodeWithTag("review_bulk_category_food").assertIsDisplayed().assertIsEnabled()
     }
 
     @Test

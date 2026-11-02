@@ -121,7 +121,7 @@ class TransactionRowUiTest {
 
     @Test fun longMerchantYieldsToAmount() = assertAmountPlacement(screenWidth = 300, stacked = false, merchantName = "A very long merchant name")
 
-    @Test fun largeFontStacksEvenWhenContentFits() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = true)
+    @Test fun largeFontRemainsInlineWhenReservationFits() = assertAmountPlacement(screenWidth = 360, fontScale = 1.5f, stacked = false)
 
     @Test fun amountCandidatesAreBoundedForBothSigns() {
         val transactions = (1..10000).map { transaction("$it", if (it % 2 == 0) it else -it) } + transaction("min", Int.MIN_VALUE)
@@ -160,6 +160,36 @@ class TransactionRowUiTest {
             val amount = composeRule.onNodeWithText(MoneyFormatter.formatUsd(row.cents), useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
             assertTrue("${row.id} amount must stack", amount.top >= merchant.bottom)
         }
+    }
+
+    @Test fun mixedListAtOnePointFiveXStaysInlineWhenWidestAmountFits() {
+        val rows = listOf(transaction("mixed-wide", -1200).copy(merchant = "Longer merchant name"), transaction("mixed-short", -100).copy(merchant = "Short"))
+        setTransactionScreen(rows, width = 360, fontScale = 1.5f)
+        rows.forEach { row ->
+            scrollToTransaction(row.id)
+            val merchant = composeRule.onNodeWithText(row.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val amount = composeRule.onNodeWithText(MoneyFormatter.formatUsd(row.cents), useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            assertTrue("${row.id} should be inline", amount.top < merchant.bottom)
+        }
+    }
+
+    @Test fun shortAmountsGiveMerchantMoreRoomWithinSameList() {
+        val rows = listOf(transaction("long-amount", -12_345_678).copy(merchant = "First"), transaction("short-amount", -100).copy(merchant = "Second"))
+        setTransactionScreen(rows)
+        scrollToTransaction("short-amount")
+        val first = composeRule.onNodeWithText("First", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val second = composeRule.onNodeWithText("Second", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertTrue("short amount should leave more merchant width", second.width > first.width)
+    }
+
+    @Test fun metadataDropsPlaceInsteadOfLeavingSeparatorAndEllipsis() {
+        val occurred = LocalDateTime.of(2026, 7, 10, 9, 45).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val row = transaction("no-dangling", -100).copy(category = "Subscriptions", accountName = "Checking", occurredAtEpochMillis = occurred)
+        setTransactionScreen(row, width = 300, fontScale = 2f)
+        scrollToTransaction(row.id)
+        composeRule.onNodeWithText("Subscriptions", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("Subscriptions · Checking", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithText("9:45 AM", useUnmergedTree = true).assertExists()
     }
 
     @Test fun metadataKeepsTimeCompleteAndEllipsizesPlaceAtOneX() = assertMetadata(1f)

@@ -184,9 +184,9 @@ class TransactionLocationUiTest {
     @Test fun unmappableSheetUsesSharedRowsAndScrollsToEditableLastItem() {
         val date = LocalDate.of(2026, 7, 10).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val rows = (0..11).map { index ->
-            Transaction("sheet-$index", date, "Merchant $index", "Other", "", -12300 - index,
+            Transaction("sheet-$index", date + 11 - index, "Merchant $index", "Other", "", -12300 - index,
                 accountName = "Checking", locationState = if (index == 0) "NY" else null)
-        }
+        }.reversed()
         var edited: String? = null
         val geocoder = PlaceGeocoder(FlowMoneyDatabase.get(context).placeGeocodeDao())
         composeRule.setContent {
@@ -196,9 +196,12 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithTag("transactions_unmappable").performClick()
         composeRule.onNodeWithTag("transaction_unmappable_sheet").assertExists()
         composeRule.onNodeWithText("Other · NY", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_map_divider_sheet-0", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_content_sheet-0").assertExists()
         composeRule.onNode(hasText("Jul 10") and hasAnyAncestor(hasTestTag("transaction_content_sheet-0")), useUnmergedTree = true).assertExists()
         composeRule.onNodeWithText("-\$123.00", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_map_rows").performScrollToNode(hasTestTag("transaction_content_sheet-11"))
+        composeRule.onNodeWithTag("transaction_map_divider_sheet-11", useUnmergedTree = true).assertDoesNotExist()
         composeRule.onNode(hasText("Other · Checking") and hasAnyAncestor(hasTestTag("transaction_content_sheet-11")), useUnmergedTree = true).assertExists()
         composeRule.onNodeWithText("-\$123.11", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_content_sheet-11").performClick()

@@ -12,8 +12,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -317,7 +318,8 @@ private fun PlaceTransactionSheet(
     onDismiss: () -> Unit,
     testTag: String,
 ) {
-    val amountWidth = rememberTransactionAmountWidth(transactions)
+    val orderedTransactions = remember(transactions) { transactions.sortedByDescending(Transaction::occurredAtEpochMillis) }
+    val amountWidth = rememberTransactionAmountWidth(orderedTransactions)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -339,7 +341,7 @@ private fun PlaceTransactionSheet(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
             ) {
                 LazyColumn(modifier = Modifier.testTag("transaction_map_rows")) {
-                    items(transactions, key = { it.id }) { transaction ->
+                    itemsIndexed(orderedTransactions, key = { _, transaction -> transaction.id }) { index, transaction ->
                         Box(Modifier.testTag("transaction_map_row")) {
                             TransactionRow(
                                 transaction = transaction,
@@ -347,6 +349,9 @@ private fun PlaceTransactionSheet(
                                 showDate = true,
                                 onClick = { onEdit(transaction) },
                             )
+                        }
+                        if (index < orderedTransactions.lastIndex) {
+                            HorizontalDivider(modifier = Modifier.padding(start = 14.dp).testTag("transaction_map_divider_${transaction.id}"), thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
                         }
                     }
                 }

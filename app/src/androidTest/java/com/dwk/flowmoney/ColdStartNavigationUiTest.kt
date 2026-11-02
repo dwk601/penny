@@ -126,6 +126,7 @@ class ColdStartNavigationUiTest {
         composeRule.onNodeWithTag("overview_review_action").performClick()
         composeRule.onNodeWithTag("tab_overview").assertIsSelected()
         composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_pending-after-restore"))
         composeRule.onNodeWithTag("review_row_pending-after-restore").performClick()
         composeRule.onNodeWithTag("review_selected_count").assertExists()
         composeRule.onNodeWithTag("review_accept_other_action").performClick()

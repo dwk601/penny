@@ -84,6 +84,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -2533,7 +2534,7 @@ internal fun ReviewPage(
                 }
             }
             if (selectionMode) {
-                item {
+                stickyHeader(key = "review_bulk_header") {
                     ReviewBulkControls(
                         selectedCount = selectedIds.size,
                         enabled = selectedIds.isNotEmpty() && !operationBusy,
@@ -2567,7 +2568,11 @@ internal fun ReviewPage(
                 }
             } else {
                 groups.forEach { group ->
-                    stickyHeader(key = "review_day_${group.date}") { TransactionDayHeader(group) }
+                    if (selectionMode) {
+                        item(key = "review_day_${group.date}") { TransactionDayHeader(group) }
+                    } else {
+                        stickyHeader(key = "review_day_${group.date}") { TransactionDayHeader(group) }
+                    }
                     item(key = "review_rows_${group.date}") {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             group.transactions.forEach { transaction ->
@@ -2717,13 +2722,16 @@ private fun ReviewTransactionCard(
                         ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
-                    if (selectionMode) Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+                if (selectionMode) {
+                    Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
+                        Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+                    }
+                    Spacer(Modifier.width(8.dp))
                 }
-                Spacer(Modifier.width(8.dp))
                 TransactionPresentation(
                     transaction,
                     amountWidth = amountWidth,
+                    decisionWidthInset = if (selectionMode) 0.dp else 56.dp,
                     modifier = Modifier.weight(1f).clearAndSetSemantics { contentDescription = transaction.rowAccessibility() },
                 )
             }
@@ -3108,7 +3116,8 @@ private fun TransactionDayHeader(group: TransactionDayGroup) {
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            FlowRow(
+            if (group.spentCents != 0L || group.receivedCents != 0L) FlowRow(
+                modifier = Modifier.testTag("transaction_day_totals_${group.date}"),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -5705,26 +5714,30 @@ internal fun rememberTransactionAmountWidth(transactions: List<Transaction>): In
 }
 
 @Composable
-private fun TransactionMetadata(transaction: Transaction, showDate: Boolean) {
-    val (flexible, temporal) = transaction.rowMetadata(showDate)
+private fun TransactionMetadata(transaction: Transaction, showDate: Boolean, availablePx: Float) {
+    val (category, place, temporal) = transaction.rowMetadata(showDate)
     val style = MaterialTheme.typography.bodyMedium
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val temporalWidth = remember(temporal, style, density, measurer) {
         if (temporal.isEmpty()) 0 else measurer.measure(temporal, style = style, softWrap = false).size.width
     }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val together = temporal.isEmpty() || with(density) { maxWidth.toPx() } >= temporalWidth + with(density) { 74.dp.toPx() }
-        Column {
-            Row(Modifier.fillMaxWidth()) {
-                Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (together && temporal.isNotEmpty()) {
-                    Spacer(Modifier.width(8.dp))
-                    Text(temporal, modifier = Modifier.width(with(density) { temporalWidth.toDp() } + 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, softWrap = false)
-                }
+    val together = temporal.isEmpty() || availablePx >= temporalWidth + with(density) { 74.dp.toPx() }
+    val flexibleWidth = if (together && temporal.isNotEmpty()) availablePx - temporalWidth - with(density) { 10.dp.toPx() } else availablePx
+    val minimumPlaceWidth = remember(category, place, style, density, measurer) {
+        if (place.isEmpty()) 0 else measurer.measure("$category · ${place.take(1)}…", style = style, softWrap = false).size.width
+    }
+    val showPlace = place.isNotEmpty() && flexibleWidth >= with(density) { 64.dp.toPx() } && flexibleWidth >= minimumPlaceWidth
+    val flexible = if (showPlace) "$category · $place" else category
+    Column {
+        Row(Modifier.fillMaxWidth()) {
+            Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (together && temporal.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
+                Text(temporal, modifier = Modifier.width(with(density) { temporalWidth.toDp() } + 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, softWrap = false)
             }
-            if (!together) Text(temporal, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style)
         }
+        if (!together) Text(temporal, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style)
     }
 }
 
@@ -5735,11 +5748,18 @@ private fun TransactionPresentation(
     modifier: Modifier = Modifier,
     showDate: Boolean = false,
     padded: Boolean = false,
+    decisionWidthInset: androidx.compose.ui.unit.Dp = 0.dp,
 ) {
     val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val amountStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")
+    val amountText = MoneyFormatter.formatUsd(transaction.cents)
+    val ownAmountWidth = remember(amountText, amountStyle, density, measurer) {
+        measurer.measure(amountText, style = amountStyle, softWrap = false).size.width
+    }
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val actualAvailable = with(density) { (maxWidth - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
-        val stack = density.fontScale >= 1.3f || amountWidth + with(density) { 104.dp.toPx() } > actualAvailable
+        val stack = amountWidth + with(density) { (104.dp + decisionWidthInset).toPx() } > actualAvailable
         Column(modifier = Modifier.fillMaxWidth().then(if (padded) Modifier.padding(horizontal = 14.dp, vertical = 10.dp) else Modifier)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -5751,11 +5771,11 @@ private fun TransactionPresentation(
                 )
                 if (!stack) {
                     Spacer(Modifier.width(8.dp))
-                    TransactionAmount(transaction, Modifier.width(with(density) { amountWidth.toDp() }), availablePx = actualAvailable, measuredWidth = amountWidth)
+                    TransactionAmount(transaction, Modifier.width(with(density) { ownAmountWidth.toDp() }), availablePx = actualAvailable, measuredWidth = ownAmountWidth)
                 }
             }
-            TransactionMetadata(transaction, showDate)
-            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), availablePx = actualAvailable, measuredWidth = amountWidth)
+            TransactionMetadata(transaction, showDate, actualAvailable)
+            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), availablePx = actualAvailable, measuredWidth = ownAmountWidth)
         }
     }
 }
@@ -6785,6 +6805,17 @@ private fun SuggestionChip(
     onClick: () -> Unit,
 ) {
     val tagModifier = if (testTag == null) Modifier else Modifier.testTag(testTag)
+    if (!enabled && !isSelection) {
+        AssistChip(
+            onClick = onClick,
+            enabled = false,
+            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            modifier = tagModifier.heightIn(min = 48.dp).widthIn(max = 220.dp).then(
+                if (accessibilityLabel == null) Modifier else Modifier.semantics { contentDescription = accessibilityLabel },
+            ),
+        )
+        return
+    }
     val interactionModifier =
         if (isSelection) {
             Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
@@ -6911,7 +6942,7 @@ private fun EditorDraft.occurredAtDateTime(): LocalDateTime =
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
 
-private fun Transaction.rowMetadata(showDate: Boolean): Pair<String, String> {
+private fun Transaction.rowMetadata(showDate: Boolean): Triple<String, String, String> {
     val categoryLabel = if (effectiveFlowKind == FlowKind.TRANSFER) "Transfer" else category.trim().ifBlank { "Other" }
     val location = listOfNotNull(locationCity?.trim()?.takeIf { it.isNotEmpty() }, locationState?.trim()?.takeIf { it.isNotEmpty() })
         .joinToString(", ").ifBlank { accountName?.trim().orEmpty() }
@@ -6929,7 +6960,7 @@ private fun Transaction.rowMetadata(showDate: Boolean): Pair<String, String> {
             }
         }.orEmpty()
     }
-    return listOf(categoryLabel, location).filter { it.isNotBlank() }.joinToString(" · ") to whenLabel
+    return Triple(categoryLabel, location, whenLabel)
 }
 
 private fun Transaction.rowAccessibility(): String {
