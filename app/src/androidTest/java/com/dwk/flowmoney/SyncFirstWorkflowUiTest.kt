@@ -19,6 +19,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
@@ -101,6 +102,25 @@ class SyncFirstWorkflowUiTest {
                 .fetchSemanticsNode()
                 .children.size,
         )
+    }
+
+    @Test
+    fun reviewIdentityAnnouncesPostedAndPurchaseDatesAndRecurrence() {
+        val posted = syncedTransaction("posted", LocalDate.of(2026, 7, 10), "Posted cafe")
+        val purchased = syncedTransaction("purchase", LocalDate.of(2026, 7, 10), "Purchase cafe").copy(
+            transactedAtEpochMillis = posted.occurredAtEpochMillis,
+            recurringInterval = RecurrenceInterval.Monthly,
+        )
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                ReviewPage(
+                    unreviewedTransactions = listOf(posted, purchased), onEdit = {}, onCategorize = { _, _, _ -> },
+                    onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false,
+                )
+            }
+        }
+        composeRule.onNodeWithContentDescription("Posted cafe, -\$5.00, Other, Posted Jul 10, 2026", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithContentDescription("Purchase cafe, -\$5.00, Other, Purchase Jul 10, 2026, 12:00 PM, Recurring Monthly", useUnmergedTree = true).assertExists()
     }
 
     @Test

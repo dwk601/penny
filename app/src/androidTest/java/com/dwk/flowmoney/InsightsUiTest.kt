@@ -214,6 +214,22 @@ class InsightsUiTest {
         composeRule.onNodeWithText("2 transactions · Transfers excluded").performScrollTo().assertIsDisplayed()
     }
 
+    @Test fun emptyRangeExplainsMissingLatestSpending() {
+        setScreen(uiState = reportingState().copy(latestSpendingTransactions = emptyList()), selectedTab = DashboardTab.Overview)
+        composeRule.onNodeWithText("No spending in this period").assertIsDisplayed()
+        composeRule.onNodeWithText("Latest spending").assertDoesNotExist()
+    }
+
+    @Test fun insightsDisclosesExcludedTransfers() {
+        setScreen(uiState = reportingState())
+        composeRule.onNodeWithText("Transfers excluded", substring = true).assertIsDisplayed()
+    }
+
+    @Test fun transactionsDisclosesExcludedTransfers() {
+        setScreen(uiState = reportingState(), selectedTab = DashboardTab.Transactions)
+        composeRule.onNodeWithText("Transfers excluded", substring = true).assertIsDisplayed()
+    }
+
     private fun setScreen(
         uiState: MainUiState,
         selectedTab: DashboardTab = DashboardTab.Insights,

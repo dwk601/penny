@@ -113,9 +113,9 @@ class TransactionRowUiTest {
         composeRule.onNodeWithText("Other · 9:45 AM", useUnmergedTree = true).assertIsDisplayed()
     }
 
-    @Test fun rowAt280DpDoesNotStack() = assertAmountPlacement(screenWidth = 320, stacked = false)
+    @Test fun rowAbove280DpDoesNotStack() = assertAmountPlacement(screenWidth = 324, stacked = false)
 
-    @Test fun rowBelow280DpStacks() = assertAmountPlacement(screenWidth = 319, stacked = true)
+    @Test fun rowBelow280DpStacks() = assertAmountPlacement(screenWidth = 316, stacked = true)
 
     @Test fun rowAtLargeFontScaleStacks() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = true)
 

@@ -345,9 +345,11 @@ class Phase4UiTest {
         val transfer = Transaction("transfer", timestamp + 2, "Payment", "Food", "", -2_000, flowKind = FlowKind.TRANSFER)
         var overridden by mutableStateOf(false)
         var neutral = Color.Unspecified
+        var expenseColor = Color.Unspecified
         composeRule.setContent {
             MaterialTheme {
                 neutral = MaterialTheme.colorScheme.onSurfaceVariant
+                expenseColor = LocalFinanceColors.current.expense
                 FlowMoneyScreen(
                     uiState = MainUiState(isLoading = false, sortedTransactions = listOf(transfer, income, expense.copy(flowKindOverride = if (overridden) FlowKind.TRANSFER else null))),
                     selectedTab = DashboardTab.Transactions,
@@ -364,6 +366,11 @@ class Phase4UiTest {
         val layouts = mutableListOf<TextLayoutResult>()
         composeRule.onNodeWithText("-\$20.00", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
         assertEquals(neutral, layouts.single().layoutInput.style.color)
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_normal"))
+        val expenseLayouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("-\$12.50", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(expenseLayouts) }
+        assertEquals(expenseColor, expenseLayouts.single().layoutInput.style.color)
+        assertTrue(expenseColor != neutral)
         composeRule.runOnIdle { overridden = true }
         composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
         composeRule.onNodeWithTag("transaction_day_spent_$date").assertTextContains("Spent \$0.00")

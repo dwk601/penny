@@ -2684,7 +2684,10 @@ private fun ReviewTransactionCard(
                     Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
                     Spacer(Modifier.width(8.dp))
                 }
-                TransactionPresentation(transaction, modifier = Modifier.weight(1f))
+                TransactionPresentation(
+                    transaction,
+                    modifier = Modifier.weight(1f).clearAndSetSemantics { contentDescription = transaction.rowAccessibility() },
+                )
             }
             if (!selectionMode) {
                 Row(
@@ -3215,7 +3218,7 @@ private fun TransactionFilterBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Filters", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Filters", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
                     summary,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3224,15 +3227,14 @@ private fun TransactionFilterBar(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (hasActiveFilter) {
-                TextButton(
-                    onClick = onClear,
-                    modifier = Modifier.testTag("transaction_filter_clear_compact"),
-                ) {
-                    Text("Clear", fontSize = 12.sp)
-                }
-            }
+            Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium)
         }
+        }
+        if (hasActiveFilter) {
+            TextButton(
+                onClick = onClear,
+                modifier = Modifier.align(Alignment.End).heightIn(min = 48.dp).testTag("transaction_filter_clear_compact"),
+            ) { Text("Clear") }
         }
 
         AnimatedVisibility(

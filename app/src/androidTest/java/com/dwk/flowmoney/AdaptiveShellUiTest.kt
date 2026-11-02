@@ -116,9 +116,7 @@ class AdaptiveShellUiTest {
         assertTrue("rail=$rail content=$wideContent", rail.right <= wideContent.left)
         val root = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
         val wideFab = bounds("add_transaction_fab")
-        // The fixed top bar has no floating action button inset; wide content may reach the root bottom
-        // when the forced-size test environment reports zero navigation-bar inset.
-        assertTrue("content=$wideContent root=$root", wideContent.bottom <= root.bottom)
+        assertTrue("content=$wideContent root=$root", wideContent.bottom < root.bottom)
         val wideBar = bounds("penny_top_bar")
         assertTrue("add=$wideFab bar=$wideBar", wideFab.top >= wideBar.top && wideFab.bottom <= wideBar.bottom && wideFab.right <= wideBar.right)
         assertTrue("add=$wideFab content=$wideContent", wideFab.bottom <= wideContent.top)

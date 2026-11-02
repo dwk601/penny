@@ -262,7 +262,7 @@ class FlowMoneyE2ETest {
         composeRule.onNodeWithTag("transaction_filter_week").performClick()
         composeRule.onNodeWithTag("transaction_category_filter_food").performClick()
 
-        composeRule.onAllNodesWithText(merchant).onFirst().assertIsDisplayed()
+        composeRule.onAllNodesWithText(merchant, useUnmergedTree = true).onFirst().assertIsDisplayed()
     }
 
     private fun seedSimpleFinProfile(
@@ -306,9 +306,9 @@ class FlowMoneyE2ETest {
 
     private fun waitForMerchant(merchant: String) {
         composeRule.waitUntil(5_000) {
-            composeRule.onAllNodesWithText(merchant).fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText(merchant, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onAllNodesWithText(merchant).onFirst().assertIsDisplayed()
+        composeRule.onAllNodesWithText(merchant, useUnmergedTree = true).onFirst().assertIsDisplayed()
     }
 
     private companion object {
