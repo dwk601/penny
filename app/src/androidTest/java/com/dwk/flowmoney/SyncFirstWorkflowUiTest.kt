@@ -9,6 +9,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.DeviceConfigurationOverride
+import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
@@ -104,6 +108,33 @@ class SyncFirstWorkflowUiTest {
                 .fetchSemanticsNode()
                 .children.size,
         )
+    }
+
+    @Test
+    fun reviewSelectionKeepsPresentationGeometryAt300Dp() {
+        val transaction = syncedTransaction("stable", LocalDate.of(2026, 7, 10), "A long merchant name for the review queue").copy(accountName = "Checking")
+        var edits = 0
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 800.dp))) {
+                FlowMoneyTheme(dynamicColor = false) {
+                    ReviewPage(listOf(transaction), onEdit = { edits++ }, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false)
+                }
+            }
+        }
+        fun geometry(): List<Float> {
+            composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_stable"))
+            val row = composeRule.onNodeWithTag("review_row_stable").fetchSemanticsNode().boundsInRoot
+            val merchant = composeRule.onNodeWithText(transaction.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val amount = composeRule.onNodeWithText("-\$5.00", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val metadata = composeRule.onNodeWithText("Other · Checking", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            return listOf(merchant.left - row.left, merchant.top - row.top, amount.left - row.left, amount.top - row.top, metadata.left - row.left, metadata.width)
+        }
+        val before = geometry()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_select_action"))
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        assertEquals(before, geometry())
+        composeRule.onNodeWithTag("review_row_stable").performClick().assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
+        assertEquals(0, edits)
     }
 
     @Test

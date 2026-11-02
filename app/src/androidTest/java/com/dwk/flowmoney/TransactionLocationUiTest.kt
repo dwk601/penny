@@ -11,8 +11,11 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
@@ -175,6 +178,31 @@ class TransactionLocationUiTest {
 
         composeRule.onNodeWithTag("transactions_map").assertExists()
         composeRule.onNodeWithTag("transactions_unmappable").assertExists()
+    }
+
+    @Test fun unmappableSheetUsesSharedRowsAndScrollsToEditableLastItem() {
+        val date = LocalDate.of(2026, 7, 10).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = (0..11).map { index ->
+            Transaction("sheet-$index", date, "Merchant $index", "Other", "", -12300 - index,
+                accountName = "Checking", locationState = if (index == 0) "NY" else null)
+        }
+        var edited: String? = null
+        val geocoder = PlaceGeocoder(FlowMoneyDatabase.get(context).placeGeocodeDao())
+        composeRule.setContent {
+            MaterialTheme { TransactionMap(transactions = rows, geocoder = geocoder, onEdit = { edited = it.id }, modifier = Modifier.fillMaxSize()) }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("transactions_unmappable").performClick()
+        composeRule.onNodeWithTag("transaction_unmappable_sheet").assertExists()
+        composeRule.onNodeWithText("Other · NY", useUnmergedTree = true).assertExists()
+        composeRule.onNode(hasText("Jul 10") and hasAnyAncestor(hasTestTag("transaction_content_sheet-0")), useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("-\$123.00", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_map_rows").performScrollToNode(hasTestTag("transaction_content_sheet-11"))
+        composeRule.onNode(hasText("Other · Checking") and hasAnyAncestor(hasTestTag("transaction_content_sheet-11")), useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("-\$123.11", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_content_sheet-11").performClick()
+        composeRule.runOnIdle { org.junit.Assert.assertEquals("sheet-11", edited) }
+        composeRule.onNodeWithTag("transaction_unmappable_sheet").assertDoesNotExist()
     }
 
     @Test fun everyLocationFilterGroupIsOfferedOnlyForPlacesThatExist() {

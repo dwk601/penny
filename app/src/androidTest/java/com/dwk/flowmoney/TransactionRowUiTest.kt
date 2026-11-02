@@ -104,7 +104,8 @@ class TransactionRowUiTest {
         )
         setTransactionScreen(transaction)
         scrollToTransaction(transaction.id)
-        composeRule.onNodeWithText("Other · Checking · Jul 10, 2:15 PM", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Other · Checking", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Jul 10, 2:15 PM", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test fun localRowWithoutPurchaseTimeUsesOccurrenceTime() {
@@ -112,14 +113,78 @@ class TransactionRowUiTest {
         val transaction = transaction("local-time", -100).copy(occurredAtEpochMillis = occurred)
         setTransactionScreen(transaction)
         scrollToTransaction(transaction.id)
-        composeRule.onNodeWithText("Other · 9:45 AM", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Other", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("9:45 AM", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test fun rowAbove280DpDoesNotStack() = assertAmountPlacement(screenWidth = 324, stacked = false)
 
-    @Test fun narrowRowStacksWhenMerchantAndAmountDoNotFit() = assertAmountPlacement(screenWidth = 316, stacked = true, merchantName = "A very long merchant name")
+    @Test fun longMerchantYieldsToAmount() = assertAmountPlacement(screenWidth = 300, stacked = false, merchantName = "A very long merchant name")
 
-    @Test fun largeFontDoesNotStackWhenContentFits() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = false)
+    @Test fun largeFontStacksEvenWhenContentFits() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = true)
+
+    @Test fun amountCandidatesAreBoundedForBothSigns() {
+        val transactions = (1..10000).map { transaction("$it", if (it % 2 == 0) it else -it) } + transaction("min", Int.MIN_VALUE)
+        assertEquals(listOf(Int.MIN_VALUE, 10000), transactionAmountCandidates(transactions))
+        val measured = mutableListOf<String>()
+        transactionAmountWidth(transactions) { measured += it; it.length }
+        assertEquals(listOf("-\$21,474,836.48", "\$100.00"), measured)
+        assertEquals(0, transactionAmountWidth(emptyList()) { error("empty list measured") })
+    }
+
+    @Test fun amazonNamesEllipsizeInsteadOfStackingAt360Dp() {
+        val names = listOf("AMAZON MKTPLACE PMTS WA", "AMAZON MKTPLACE PMTS WA SEATTLE MARKETPLACE")
+        val rows = names.mapIndexed { i, name -> transaction("amazon$i", -12300 - i).copy(merchant = name, occurredAtEpochMillis = 86_400_000L * (i + 1)) }
+        setTransactionScreen(rows)
+        rows.forEach { row ->
+            scrollToTransaction(row.id)
+            val merchant = composeRule.onNodeWithText(row.merchant, useUnmergedTree = true)
+            val merchantBounds = merchant.fetchSemanticsNode().boundsInRoot
+            val amount = composeRule.onNodeWithText(MoneyFormatter.formatUsd(row.cents), useUnmergedTree = true)
+            assertTrue(amount.fetchSemanticsNode().boundsInRoot.top < merchantBounds.bottom)
+            val merchantLayout = mutableListOf<TextLayoutResult>()
+            merchant.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(merchantLayout) }
+            assertTrue(merchantLayout.single().isLineEllipsized(0))
+            val amountLayout = mutableListOf<TextLayoutResult>()
+            amount.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(amountLayout) }
+            assertEquals(16f, amountLayout.single().layoutInput.style.fontSize.value)
+        }
+    }
+
+    @Test fun wideAmountStacksAllRowsAcrossDaysAtOneX() {
+        val rows = listOf(transaction("wide", Int.MIN_VALUE).copy(merchant = "Wide", occurredAtEpochMillis = 172_800_000L), transaction("short", -100).copy(merchant = "Short", occurredAtEpochMillis = 86_400_000L))
+        setTransactionScreen(rows, width = 300)
+        rows.forEach { row ->
+            scrollToTransaction(row.id)
+            val merchant = composeRule.onNodeWithText(row.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val amount = composeRule.onNodeWithText(MoneyFormatter.formatUsd(row.cents), useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            assertTrue("${row.id} amount must stack", amount.top >= merchant.bottom)
+        }
+    }
+
+    @Test fun metadataKeepsTimeCompleteAndEllipsizesPlaceAtOneX() = assertMetadata(1f)
+    @Test fun metadataKeepsTimeCompleteAndEllipsizesPlaceAtTwoX() = assertMetadata(2f)
+
+    private fun assertMetadata(fontScale: Float) {
+        val posted = LocalDateTime.of(2026, 7, 11, 2, 30).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val purchased = LocalDateTime.of(2026, 7, 10, 14, 15).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val row = transaction("metadata", -100).copy(source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchased, locationCity = "An exceptionally long municipality name that must yield", locationState = "NY")
+        setTransactionScreen(row, width = 300, fontScale = fontScale)
+        scrollToTransaction(row.id)
+        val flexible = composeRule.onNodeWithText("Other · An exceptionally long municipality name that must yield, NY", useUnmergedTree = true)
+        val temporal = composeRule.onNodeWithText("Jul 10, 2:15 PM", useUnmergedTree = true)
+        val flexLayout = mutableListOf<TextLayoutResult>()
+        val timeLayout = mutableListOf<TextLayoutResult>()
+        flexible.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(flexLayout) }
+        temporal.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(timeLayout) }
+        assertTrue(flexLayout.single().isLineEllipsized(0))
+        assertFalse("temporal layout: ${timeLayout.single()} size=${timeLayout.single().size} input=${timeLayout.single().layoutInput}", timeLayout.single().hasVisualOverflow)
+        repeat(timeLayout.single().lineCount) { assertFalse(timeLayout.single().isLineEllipsized(it)) }
+        val flexBounds = flexible.fetchSemanticsNode().boundsInRoot
+        val timeBounds = temporal.fetchSemanticsNode().boundsInRoot
+        if (timeBounds.top < flexBounds.bottom) assertTrue(flexBounds.width / composeRule.density.density >= 64f)
+        else assertTrue(timeBounds.top >= flexBounds.bottom)
+    }
 
     private fun assertAmountPlacement(screenWidth: Int, fontScale: Float = 1f, stacked: Boolean, merchantName: String = "Shop") {
         val transaction = transaction("threshold", -783).copy(merchant = merchantName)
@@ -168,8 +233,11 @@ class TransactionRowUiTest {
         composeRule.onNodeWithText("Delete").assertDoesNotExist()
     }
 
+    private fun setTransactionScreen(transaction: Transaction, width: Int = 360, fontScale: Float = 1f) =
+        setTransactionScreen(listOf(transaction), width, fontScale)
+
     private fun setTransactionScreen(
-        transaction: Transaction,
+        transactions: List<Transaction>,
         width: Int = 360,
         fontScale: Float = 1f,
     ) {
@@ -180,7 +248,7 @@ class TransactionRowUiTest {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(fontScale)) {
                     FlowMoneyTheme(dynamicColor = false) {
                         FlowMoneyScreen(
-                            uiState = MainUiState(isLoading = false, sortedTransactions = listOf(transaction)),
+                            uiState = MainUiState(isLoading = false, sortedTransactions = transactions),
                             selectedTab = DashboardTab.Transactions,
                             onChartRangeModeSelected = {},
                             onSelectedMonthChange = {},

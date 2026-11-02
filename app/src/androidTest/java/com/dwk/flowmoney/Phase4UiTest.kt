@@ -395,8 +395,35 @@ class Phase4UiTest {
         assertTrue(expenseColor != neutral)
         composeRule.runOnIdle { overridden = true }
         composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
-        composeRule.onNodeWithTag("transaction_day_spent_$date").assertTextContains("Spent \$0.00")
+        composeRule.onNodeWithTag("transaction_day_spent_$date").assertDoesNotExist()
         composeRule.onNodeWithTag("transaction_day_received_$date").assertTextContains("Received \$50.00")
+    }
+
+    @Test
+    fun dayHeadersOmitZeroSidesForExpenseIncomeTransferAndMixed() {
+        val day = java.time.LocalDate.of(2026, 7, 10)
+        fun at(offset: Long) = day.minusDays(offset).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = listOf(
+            Transaction("expense-only", at(0), "Expense", "Food", "", -100),
+            Transaction("income-only", at(1), "Income", "Salary", "", 200),
+            Transaction("transfer-only", at(2), "Transfer", "Other", "", -300, flowKind = FlowKind.TRANSFER),
+            Transaction("mixed-expense", at(3), "Mixed expense", "Food", "", -400),
+            Transaction("mixed-income", at(3), "Mixed income", "Salary", "", 500),
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = rows), selectedTab = DashboardTab.Transactions,
+                    onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+            }
+        }
+        listOf(0L, 1L, 2L, 3L).forEach { offset ->
+            val date = day.minusDays(offset)
+            composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
+            val spent = composeRule.onNodeWithTag("transaction_day_spent_$date")
+            val received = composeRule.onNodeWithTag("transaction_day_received_$date")
+            if (offset == 0L || offset == 3L) spent.assertExists() else spent.assertDoesNotExist()
+            if (offset == 1L || offset == 3L) received.assertExists() else received.assertDoesNotExist()
+        }
     }
 
     @Test

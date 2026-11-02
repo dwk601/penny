@@ -2331,6 +2331,7 @@ private fun OverviewPage(
     onReview: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val amountWidth = rememberTransactionAmountWidth(latestSpendingTransactions)
     Box(modifier = modifier) {
         LazyColumn(
             modifier =
@@ -2384,6 +2385,7 @@ private fun OverviewPage(
                                         onEdit = { onEdit(transaction) },
                                         onDelete = { onDelete(transaction) },
                                         showDate = true,
+                                        amountWidth = amountWidth,
                                     )
                                 }
                                 if (index < latestSpendingTransactions.lastIndex) {
@@ -2460,6 +2462,7 @@ internal fun ReviewPage(
                 .sortedByDescending(Transaction::occurredAtEpochMillis)
         }
     val groups = remember(orderedTransactions) { transactionDayGroups(orderedTransactions) }
+    val amountWidth = rememberTransactionAmountWidth(orderedTransactions)
 
     LaunchedEffect(orderedTransactions) {
         val availableIds = orderedTransactions.mapTo(mutableSetOf(), Transaction::id)
@@ -2546,6 +2549,7 @@ internal fun ReviewPage(
                                     ReviewTransactionCard(
                                         transaction = transaction,
                                         selectionMode = selectionMode,
+                                        amountWidth = amountWidth,
                                         selected = transaction.id in selectedIds,
                                         enabled = !operationBusy,
                                         onSelectionChange = { selected ->
@@ -2644,6 +2648,7 @@ private fun ReviewBulkControls(
 private fun ReviewTransactionCard(
     transaction: Transaction,
     selectionMode: Boolean,
+    amountWidth: Int,
     selected: Boolean,
     enabled: Boolean,
     onSelectionChange: (Boolean) -> Unit,
@@ -2672,8 +2677,6 @@ private fun ReviewTransactionCard(
                 .then(selectionModifier),
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val cardRowWidth = maxWidth
             Row(
                 modifier =
                     Modifier
@@ -2688,16 +2691,15 @@ private fun ReviewTransactionCard(
                         ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (selectionMode) {
-                    Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
-                    Spacer(Modifier.width(8.dp))
+                Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
+                    if (selectionMode) Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
                 }
+                Spacer(Modifier.width(8.dp))
                 TransactionPresentation(
                     transaction,
+                    amountWidth = amountWidth,
                     modifier = Modifier.weight(1f).clearAndSetSemantics { contentDescription = transaction.rowAccessibility() },
-                    rowWidth = cardRowWidth,
                 )
-            }
             }
             if (!selectionMode) {
                 Row(
@@ -2890,6 +2892,7 @@ private fun TransactionsPage(
         if (selectedCountry != null && countryOptions.none { it == selectedCountry }) selectedCountry = null
     }
     val dayGroups = remember(filteredTransactions) { transactionDayGroups(filteredTransactions) }
+    val amountWidth = rememberTransactionAmountWidth(filteredTransactions)
 
     val filteredMetrics = remember(filteredTransactions) { DashboardAnalytics.metrics(filteredTransactions) }
     val clearFilters: () -> Unit = {
@@ -3039,6 +3042,7 @@ private fun TransactionsPage(
                                             transaction = transaction,
                                             onEdit = { onEdit(transaction) },
                                             onDelete = { onDelete(transaction) },
+                                            amountWidth = amountWidth,
                                         )
                                     }
                                     if (index < group.transactions.lastIndex) {
@@ -3082,13 +3086,13 @@ private fun TransactionDayHeader(group: TransactionDayGroup) {
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text(
+                if (group.spentCents != 0L) Text(
                     text = "Spent ${MoneyFormatter.formatUsd(group.spentCents)}",
                     color = LocalFinanceColors.current.expense,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.testTag("transaction_day_spent_${group.date}"),
                 )
-                Text(
+                if (group.receivedCents != 0L) Text(
                     text = "Received ${MoneyFormatter.formatUsd(group.receivedCents)}",
                     color = LocalFinanceColors.current.income,
                     style = MaterialTheme.typography.bodySmall,
@@ -3561,6 +3565,7 @@ private fun InsightsPage(
                 }
             }
         }
+    val amountWidth = rememberTransactionAmountWidth(selectedTransactions)
     val insightTitle =
         selectedCategoryTotal?.let { category ->
             "${category.category} spending" + (selectedBucket?.let { " · ${it.label}" } ?: "")
@@ -3636,6 +3641,7 @@ private fun InsightsPage(
                             onClick = { onEdit(transaction) },
                             modifier = Modifier.testTag("insight_transaction_${transaction.id}"),
                             showDate = true,
+                            amountWidth = amountWidth,
                         )
                     }
                 }
@@ -5506,6 +5512,7 @@ private fun SwipeTransactionRow(
     transaction: Transaction,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    amountWidth: Int,
     showDate: Boolean = false,
 ) {
     val haptic = LocalHapticFeedback.current
@@ -5544,7 +5551,7 @@ private fun SwipeTransactionRow(
                     .fillMaxWidth()
                     .testTag("transaction_row"),
         ) {
-            TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete, showDate = showDate)
+            TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete, showDate = showDate, amountWidth = amountWidth)
         }
     }
 }
@@ -5590,8 +5597,9 @@ private fun SwipeActionBackground(dismissDirection: SwipeToDismissBoxValue) {
 }
 
 @Composable
-private fun TransactionRow(
+internal fun TransactionRow(
     transaction: Transaction,
+    amountWidth: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onDelete: (() -> Unit)? = null,
@@ -5625,28 +5633,73 @@ private fun TransactionRow(
                         }
                 },
     ) {
-        TransactionPresentation(transaction, showDate = showDate, padded = true)
+        TransactionPresentation(transaction, amountWidth = amountWidth, showDate = showDate, padded = true)
+    }
+}
+
+internal fun transactionAmountCandidates(transactions: List<Transaction>): List<Int> {
+    var negative: Int? = null
+    var positive: Int? = null
+    for (transaction in transactions) {
+        val cents = transaction.cents
+        if (cents < 0 && (negative == null || cents.toLong() < negative.toLong())) negative = cents
+        if (cents >= 0 && (positive == null || cents > positive)) positive = cents
+    }
+    return listOfNotNull(negative, positive)
+}
+
+internal fun transactionAmountWidth(transactions: List<Transaction>, measure: (String) -> Int): Int =
+    transactionAmountCandidates(transactions).maxOfOrNull { measure(MoneyFormatter.formatUsd(it)) } ?: 0
+
+@Composable
+internal fun rememberTransactionAmountWidth(transactions: List<Transaction>): Int {
+    val measurer = rememberTextMeasurer()
+    val style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")
+    val density = LocalDensity.current
+    val resolver = androidx.compose.ui.platform.LocalFontFamilyResolver.current
+    return remember(transactions, measurer, style, density, resolver) {
+        transactionAmountWidth(transactions) { text ->
+            measurer.measure(text, style = style, softWrap = false).size.width
+        }
+    }
+}
+
+@Composable
+private fun TransactionMetadata(transaction: Transaction, showDate: Boolean) {
+    val (flexible, temporal) = transaction.rowMetadata(showDate)
+    val style = MaterialTheme.typography.bodyMedium
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val temporalWidth = remember(temporal, style, density, measurer) {
+        if (temporal.isEmpty()) 0 else measurer.measure(temporal, style = style, softWrap = false).size.width
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val together = temporal.isEmpty() || with(density) { maxWidth.toPx() } >= temporalWidth + with(density) { 74.dp.toPx() }
+        Column {
+            Row(Modifier.fillMaxWidth()) {
+                Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (together && temporal.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(temporal, modifier = Modifier.width(with(density) { temporalWidth.toDp() } + 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, softWrap = false)
+                }
+            }
+            if (!together) Text(temporal, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style)
+        }
     }
 }
 
 @Composable
 private fun TransactionPresentation(
     transaction: Transaction,
+    amountWidth: Int,
     modifier: Modifier = Modifier,
     showDate: Boolean = false,
     padded: Boolean = false,
-    rowWidth: androidx.compose.ui.unit.Dp? = null,
 ) {
     val density = LocalDensity.current
-    val measurer = rememberTextMeasurer()
-    val amountStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")
-    val merchantStyle = androidx.compose.material3.LocalTextStyle.current.copy(fontWeight = FontWeight.SemiBold)
-    val amountWidth = measurer.measure(MoneyFormatter.formatUsd(transaction.cents), style = amountStyle, softWrap = false).size.width
-    val merchantWidth = measurer.measure(transaction.merchant.ifBlank { "Untitled" }, style = merchantStyle, softWrap = false).size.width
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val available = with(density) { ((rowWidth ?: maxWidth) - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
         val actualAvailable = with(density) { (maxWidth - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
-        val stack = merchantWidth + amountWidth + with(density) { 8.dp.toPx() } > available
+        val stack = density.fontScale >= 1.3f || amountWidth + with(density) { 104.dp.toPx() } > actualAvailable
         Column(modifier = Modifier.fillMaxWidth().then(if (padded) Modifier.padding(horizontal = 14.dp, vertical = 10.dp) else Modifier)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -5658,16 +5711,10 @@ private fun TransactionPresentation(
                 )
                 if (!stack) {
                     Spacer(Modifier.width(8.dp))
-                    TransactionAmount(transaction, availablePx = actualAvailable, measuredWidth = amountWidth)
+                    TransactionAmount(transaction, Modifier.width(with(density) { amountWidth.toDp() }), availablePx = actualAvailable, measuredWidth = amountWidth)
                 }
             }
-            Text(
-                text = transaction.rowSubtitle(showDate),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = if (density.fontScale >= 1.3f) 2 else 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            TransactionMetadata(transaction, showDate)
             if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), availablePx = actualAvailable, measuredWidth = amountWidth)
         }
     }
@@ -5688,11 +5735,14 @@ private fun TransactionAmount(
     val baseStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum", color = color, textAlign = TextAlign.End)
     val text = MoneyFormatter.formatUsd(transaction.cents)
     val measurer = rememberTextMeasurer()
-    var fontSize = baseStyle.fontSize
-    if (measuredWidth > availablePx) {
-        while (fontSize.value > 8f && measurer.measure(text, style = baseStyle.copy(fontSize = fontSize), softWrap = false).size.width > availablePx) {
-            fontSize = (fontSize.value - 0.5f).coerceAtLeast(8f).sp
+    val fontSize = remember(text, baseStyle, availablePx, measuredWidth, measurer) {
+        var size = baseStyle.fontSize
+        if (measuredWidth > availablePx) {
+            while (size.value > 8f && measurer.measure(text, style = baseStyle.copy(fontSize = size), softWrap = false).size.width > availablePx) {
+                size = (size.value - 0.5f).coerceAtLeast(8f).sp
+            }
         }
+        size
     }
     BasicText(
         text = text,
@@ -6818,7 +6868,7 @@ private fun EditorDraft.occurredAtDateTime(): LocalDateTime =
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
 
-private fun Transaction.rowSubtitle(showDate: Boolean): String {
+private fun Transaction.rowMetadata(showDate: Boolean): Pair<String, String> {
     val categoryLabel = if (effectiveFlowKind == FlowKind.TRANSFER) "Transfer" else category.trim().ifBlank { "Other" }
     val location = listOfNotNull(locationCity?.trim()?.takeIf { it.isNotEmpty() }, locationState?.trim()?.takeIf { it.isNotEmpty() })
         .joinToString(", ").ifBlank { accountName?.trim().orEmpty() }
@@ -6836,7 +6886,7 @@ private fun Transaction.rowSubtitle(showDate: Boolean): String {
             }
         }.orEmpty()
     }
-    return listOf(categoryLabel, location, whenLabel).filter { it.isNotBlank() }.joinToString(" · ")
+    return listOf(categoryLabel, location).filter { it.isNotBlank() }.joinToString(" · ") to whenLabel
 }
 
 private fun Transaction.rowAccessibility(): String {
