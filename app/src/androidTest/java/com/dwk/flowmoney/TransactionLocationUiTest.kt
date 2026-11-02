@@ -415,7 +415,7 @@ class TransactionLocationUiTest {
                         MainUiState(
                             isLoading = false,
                             sortedTransactions = transactions,
-                            recentTransactions = transactions,
+                            latestSpendingTransactions = transactions,
                             rangeTransactions = transactions,
                             metrics = DashboardMetrics(0, 0, transactions.size),
                             dateRange =

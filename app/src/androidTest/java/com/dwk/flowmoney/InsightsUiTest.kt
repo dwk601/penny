@@ -240,7 +240,7 @@ class InsightsUiTest {
         return MainUiState(
             isLoading = false,
             sortedTransactions = listOf(transaction),
-            recentTransactions = listOf(transaction),
+            latestSpendingTransactions = listOf(transaction),
             rangeTransactions = listOf(transaction),
             metrics = DashboardMetrics(spentCents = 1_250, incomeCents = 0, transactionCount = 1),
             dateRange = RANGE,
@@ -289,7 +289,7 @@ class InsightsUiTest {
         return MainUiState(
             isLoading = false,
             sortedTransactions = transactions,
-            recentTransactions = transactions,
+            latestSpendingTransactions = transactions,
             rangeTransactions = transactions,
             metrics = DashboardAnalytics.metrics(transactions),
             dateRange = RANGE,
@@ -317,7 +317,7 @@ class InsightsUiTest {
         return MainUiState(
             isLoading = false,
             sortedTransactions = transactions,
-            recentTransactions = transactions.take(5),
+            latestSpendingTransactions = transactions.take(3),
             rangeTransactions = transactions,
             metrics = DashboardMetrics(spentCents = 3_000, incomeCents = 0, transactionCount = transactions.size),
             dateRange = RANGE,

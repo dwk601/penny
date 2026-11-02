@@ -30,7 +30,7 @@ class Phase5FinancialLegibilityUiTest {
             state = MainUiState(
                 isLoading = false,
                 sortedTransactions = listOf(transaction),
-                recentTransactions = listOf(transaction),
+                latestSpendingTransactions = listOf(transaction),
                 rangeTransactions = listOf(transaction),
                 metrics = DashboardMetrics(
                     spentCents = 123_456_789,

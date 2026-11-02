@@ -419,7 +419,7 @@ class Phase4UiTest {
         return MainUiState(
             isLoading = false,
             sortedTransactions = listOf(transaction),
-            recentTransactions = listOf(transaction),
+            latestSpendingTransactions = listOf(transaction),
             rangeTransactions = listOf(transaction),
             metrics = DashboardMetrics(spentCents = 450, incomeCents = 0, transactionCount = 1),
         )

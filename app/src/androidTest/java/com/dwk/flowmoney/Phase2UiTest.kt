@@ -105,7 +105,7 @@ class Phase2UiTest {
         val state = MainUiState(
             isLoading = false,
             sortedTransactions = listOf(transaction),
-            recentTransactions = listOf(transaction),
+            latestSpendingTransactions = listOf(transaction),
             rangeTransactions = listOf(transaction),
             metrics = DashboardMetrics(500, 0, 1),
             dateRange = DashboardDateRange(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 8, 1), "July 2026"),

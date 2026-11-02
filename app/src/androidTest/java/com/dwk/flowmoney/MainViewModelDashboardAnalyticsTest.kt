@@ -90,6 +90,7 @@ class MainViewModelDashboardAnalyticsTest {
                         DashboardMetrics(spentCents = 1_000, incomeCents = 500, transactionCount = 3),
                         initial.metrics,
                     )
+                    assertEquals(listOf("pending-expense", "reviewed-expense"), initial.latestSpendingTransactions.map { it.id })
                     assertEquals(
                         listOf(
                             CategoryTotal(category = "Other", cents = 900),
@@ -118,6 +119,7 @@ class MainViewModelDashboardAnalyticsTest {
                         }
 
                     assertEquals(initial.metrics, updated.metrics)
+                    assertEquals(initial.latestSpendingTransactions.map { it.id }, updated.latestSpendingTransactions.map { it.id })
                     assertEquals(
                         listOf(
                             CategoryTotal(category = "Travel", cents = 900),

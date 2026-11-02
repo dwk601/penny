@@ -2270,7 +2270,7 @@ internal fun FlowMoneyScreen(
             DashboardTab.Overview -> {
                 OverviewPage(
                     sortedTransactions = uiState.sortedTransactions,
-                    recentTransactions = uiState.recentTransactions,
+                    latestSpendingTransactions = uiState.latestSpendingTransactions,
                     rangeTransactions = uiState.rangeTransactions,
                     metrics = uiState.metrics,
                     dateRange = uiState.dateRange,
@@ -2364,7 +2364,7 @@ private fun LoadingState(modifier: Modifier = Modifier) {
 @Composable
 private fun OverviewPage(
     sortedTransactions: List<Transaction>,
-    recentTransactions: List<Transaction>,
+    latestSpendingTransactions: List<Transaction>,
     rangeTransactions: List<Transaction>,
     metrics: DashboardMetrics,
     dateRange: DashboardDateRange,
@@ -2457,7 +2457,7 @@ private fun OverviewPage(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column {
-                            recentTransactions.forEachIndexed { index, transaction ->
+                            latestSpendingTransactions.forEachIndexed { index, transaction ->
                                 key(transaction.id) {
                                     SwipeTransactionRow(
                                         transaction = transaction,
@@ -2465,7 +2465,7 @@ private fun OverviewPage(
                                         onDelete = { onDelete(transaction) },
                                     )
                                 }
-                                if (index < recentTransactions.lastIndex) {
+                                if (index < latestSpendingTransactions.lastIndex) {
                                     HorizontalDivider(
                                         modifier = Modifier.padding(start = 68.dp),
                                         thickness = 1.dp,
@@ -2556,11 +2556,12 @@ internal fun transactionDayGroups(transactions: List<Transaction>): List<Transac
     transactions
         .groupBy { it.occurredAtDateTime().toLocalDate() }
         .map { (date, dayTransactions) ->
+            val metrics = DashboardAnalytics.metrics(dayTransactions)
             TransactionDayGroup(
                 date = date,
                 transactions = dayTransactions,
-                spentCents = dayTransactions.filter { it.cents < 0 }.sumOf { it.cents.toLong().absoluteValue },
-                receivedCents = dayTransactions.filter { it.cents > 0 }.sumOf { it.cents.toLong() },
+                spentCents = metrics.spentCents,
+                receivedCents = metrics.incomeCents,
             )
         }
 
@@ -5981,7 +5982,11 @@ private fun TransactionAmount(
 ) {
     Text(
         text = MoneyFormatter.formatUsd(transaction.cents),
-        color = if (transaction.cents < 0) LocalFinanceColors.current.expense else LocalFinanceColors.current.income,
+        color = when {
+            transaction.effectiveFlowKind == FlowKind.TRANSFER -> MaterialTheme.colorScheme.onSurfaceVariant
+            transaction.cents < 0 -> LocalFinanceColors.current.expense
+            else -> LocalFinanceColors.current.income
+        },
         style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
         textAlign = TextAlign.End,
         modifier = modifier,
