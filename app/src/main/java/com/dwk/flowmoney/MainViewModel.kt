@@ -137,7 +137,7 @@ class MainViewModel(
                 selectedMonth = month,
                 availableMonths = availableMonths,
                 dailySpending = DashboardAnalytics.dailySpending(ranged, range),
-                categoryTotals = DashboardAnalytics.categoryTotals(ranged),
+                categoryTotals = DashboardAnalytics.categoryTotals(ranged, limit = Int.MAX_VALUE),
                 pendingReviewSummary = DashboardAnalytics.unreviewedSpendingSummary(ranged),
                 suggestionHistory = snapshot.suggestionHistory,
             )

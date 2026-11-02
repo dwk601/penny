@@ -2,6 +2,13 @@ package com.dwk.flowmoney
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -85,16 +92,76 @@ class InsightsUiTest {
             onReview = { reviewClicks++ },
         )
 
-        composeRule.onNodeWithText("2 optional corrections · ").assertIsDisplayed()
-        composeRule.onNodeWithTag("insights_pending_review_count").assertIsDisplayed()
-        composeRule.onNodeWithText(" · included under Other").assertIsDisplayed()
-        composeRule.onNodeWithTag("insights_pending_review_amount").assertIsDisplayed()
-        composeRule.onNodeWithText("$12.50").assertIsDisplayed()
-        composeRule
-            .onNodeWithText(" · included under Other")
-            .assertIsDisplayed()
+        composeRule.onAllNodesWithText("2 optional corrections · \$12.50 · included under Other").assertCountEquals(1)
+        composeRule.onNodeWithTag("insights_pending_review_note").assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_action").performClick()
         composeRule.runOnIdle { assertEquals(1, reviewClicks) }
+    }
+
+    @Test fun singularOptionalCorrectionIsOneCompleteNote() {
+        setScreen(uiState = MainUiState(isLoading = false, pendingReviewSummary = UnreviewedSpendingSummary(1_250, 1), dateRange = RANGE))
+        composeRule.onAllNodesWithText("1 optional correction · \$12.50 · included under Other").assertCountEquals(1)
+    }
+
+    @Test fun categoryAndBucketOnlyHeadingsAreExact() {
+        setScreen(uiState = populatedState())
+        composeRule.onNodeWithTag("insight_category_food").performClick()
+        composeRule.onNodeWithText("Food spending").assertIsDisplayed()
+        composeRule.onNodeWithTag("insight_category_food").performClick()
+        composeRule.onNodeWithTag(SELECTED_BUCKET).performClick()
+        composeRule.onNodeWithText("Jul 8–14").assertIsDisplayed()
+    }
+
+    @Test fun allCategoriesReconcileExpandDrillDownAndReset() {
+        val time = DAY.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val categories = listOf("Food", "Housing", "Travel", "Other", "Bills", "Coffee")
+        val rows = categories.mapIndexed { index, category -> Transaction("cat-$index", time, "Merchant $index", category, "", -(600 - index * 100), source = if (index == 3) "simplefin" else "manual") } +
+            Transaction("transfer", time, "Transfer", "Food", "", -9000, flowKind = FlowKind.TRANSFER)
+        val totals = DashboardAnalytics.categoryTotals(rows, limit = Int.MAX_VALUE)
+        assertEquals(2100L, totals.sumOf { it.cents })
+        var state by mutableStateOf(populatedState().copy(sortedTransactions = rows, rangeTransactions = rows, categoryTotals = totals, dailySpending = monthDailySpending(DAY to 2100L)))
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                Surface(color = MaterialTheme.colorScheme.background) {
+                    FlowMoneyScreen(uiState = state, selectedTab = DashboardTab.Insights, onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                }
+            }
+        }
+        val list = composeRule.onNodeWithTag("insights_list")
+        list.performScrollToNode(hasTestTag("insight_categories_expand"))
+        composeRule.onNodeWithText("2 more categories · \$3.00").assertIsDisplayed()
+        composeRule.onNodeWithTag("insight_category_bills").assertDoesNotExist()
+        composeRule.onNodeWithTag("insight_categories_expand").performClick()
+        composeRule.onNodeWithTag("insight_category_food").performClick()
+        list.performScrollToNode(hasTestTag("insight_categories_expand"))
+        composeRule.onNodeWithText("Show less").performClick()
+        list.performScrollToNode(hasTestTag("insight_category_food"))
+        composeRule.onNodeWithTag("insight_category_food").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
+        list.performScrollToNode(hasTestTag("insight_categories_expand"))
+        composeRule.onNodeWithTag("insight_categories_expand").performClick()
+        list.performScrollToNode(hasTestTag("insight_category_coffee"))
+        composeRule.onNodeWithTag("insight_category_coffee").performClick()
+        list.performScrollToNode(hasTestTag("insight_transaction_cat-5"))
+        composeRule.onNodeWithText("Coffee spending").assertIsDisplayed()
+        composeRule.onNodeWithTag("insight_transaction_cat-5").assertIsDisplayed()
+        composeRule.onNodeWithTag("insight_transaction_transfer").assertDoesNotExist()
+        list.performScrollToNode(hasTestTag("insight_categories_expand"))
+        composeRule.onNodeWithText("Show less").performClick()
+        composeRule.onNodeWithTag("insight_transaction_cat-5").assertDoesNotExist()
+        composeRule.onNodeWithTag("insight_categories_expand").performClick()
+        list.performScrollToNode(hasTestTag(SELECTED_BUCKET))
+        composeRule.onNodeWithTag(SELECTED_BUCKET).performClick()
+        list.performScrollToNode(hasTestTag("insight_categories_expand"))
+        composeRule.onNodeWithText("2 more categories · \$3.00").assertIsDisplayed()
+        composeRule.onNodeWithTag("insight_categories_expand").performClick()
+        composeRule.runOnIdle { state = state.copy(dateRange = RANGE.copy(label = "Changed range")) }
+        list.performScrollToNode(hasTestTag("insight_categories_expand"))
+        composeRule.onNodeWithText("2 more categories · \$3.00").assertIsDisplayed()
+        composeRule.runOnIdle { state = state.copy(categoryTotals = totals.take(5), rangeTransactions = rows.filterNot { it.id == "cat-5" }, dailySpending = monthDailySpending(DAY to 2000L)) }
+        list.performScrollToNode(hasTestTag(SELECTED_BUCKET))
+        composeRule.onNodeWithTag(SELECTED_BUCKET).performClick()
+        list.performScrollToNode(hasTestTag("insight_categories_expand"))
+        composeRule.onNodeWithText("1 more category · \$2.00").assertIsDisplayed()
     }
 
     @Test
@@ -116,7 +183,43 @@ class InsightsUiTest {
             .onNodeWithTag("insight_category_food")
             .performClick()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
-        composeRule.onNodeWithText("Food spending · ", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Food spending · Jul 8–14").assertIsDisplayed()
+    }
+
+    @Test fun chartBarContrastAgainstLightBackground() = assertChartContrast(false)
+    @Test fun chartBarContrastAgainstDarkBackground() = assertChartContrast(true)
+
+    private fun assertChartContrast(dark: Boolean) {
+        var background = Color.Unspecified
+        var outline = Color.Unspecified
+        var expense = Color.Unspecified
+        val state = populatedState().copy(dailySpending = monthDailySpending(DAY to 1250L, LocalDate.of(2026, 7, 20) to 700L))
+        composeRule.setContent {
+            FlowMoneyTheme(darkTheme = dark, dynamicColor = false) {
+                background = MaterialTheme.colorScheme.background
+                outline = MaterialTheme.colorScheme.outline
+                expense = LocalFinanceColors.current.expense
+                Surface(color = background) {
+                    FlowMoneyScreen(uiState = state, selectedTab = DashboardTab.Insights, onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                }
+            }
+        }
+        assertTrue("outline token contrast", financeContrastRatio(outline, background) >= 3f)
+        assertTrue("expense token contrast", financeContrastRatio(expense, background) >= 3f)
+        composeRule.onNodeWithTag(SELECTED_BUCKET).performClick()
+        val chart = composeRule.onNodeWithTag("spending_timeline_chart")
+        val chartBounds = chart.fetchSemanticsNode().boundsInRoot
+        val selected = composeRule.onNodeWithTag(SELECTED_BUCKET).fetchSemanticsNode().boundsInRoot
+        val unselected = composeRule.onNodeWithTag(OTHER_BUCKET).fetchSemanticsNode().boundsInRoot
+        val pixels = chart.captureToImage().toPixelMap()
+        val selectedX = ((selected.left + selected.right) / 2 - chartBounds.left).toInt()
+        val unselectedX = ((unselected.left + unselected.right) / 2 - chartBounds.left).toInt()
+        val bottomY = (pixels.height * 0.85f).toInt()
+        val actualBackground = pixels[unselectedX, (pixels.height * 0.1f).toInt()]
+        val selectedPixel = pixels[selectedX, bottomY]
+        val unselectedPixel = pixels[unselectedX, bottomY]
+        assertTrue("selected pixels dark=$dark $selectedPixel / $actualBackground", financeContrastRatio(selectedPixel, actualBackground) >= 3f)
+        assertTrue("unselected pixels dark=$dark $unselectedPixel / $actualBackground", financeContrastRatio(unselectedPixel, actualBackground) >= 3f)
     }
 
     @Test
@@ -195,7 +298,7 @@ class InsightsUiTest {
             .onNodeWithTag("insights_list")
             .performScrollToNode(hasTestTag("insight_category_other"))
         composeRule.onNodeWithTag("insight_category_other").performClick()
-        composeRule.onNodeWithText("Other spending · ", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Other spending · Jul 8–14").assertIsDisplayed()
         composeRule
             .onNodeWithTag("insights_list")
             .performScrollToNode(hasTestTag("insight_transaction_tx-unreviewed"))
@@ -238,7 +341,8 @@ class InsightsUiTest {
         onReview: () -> Unit = {},
     ) {
         composeRule.setContent {
-            MaterialTheme {
+            FlowMoneyTheme(dynamicColor = false) {
+              Surface(color = MaterialTheme.colorScheme.background) {
                 FlowMoneyScreen(
                     uiState = uiState,
                     selectedTab = selectedTab,
@@ -252,6 +356,7 @@ class InsightsUiTest {
                     modifier = Modifier.fillMaxSize(),
                     onReview = onReview,
                 )
+              }
             }
         }
     }

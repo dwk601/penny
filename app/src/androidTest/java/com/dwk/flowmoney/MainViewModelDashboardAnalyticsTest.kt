@@ -178,6 +178,35 @@ class MainViewModelDashboardAnalyticsTest {
         }
     }
 
+    @Test fun allSpendingCategoriesReachStateAndReconcileAfterReview() = runBlocking {
+        val time = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = MutableStateFlow(
+            listOf("Food", "Housing", "Travel", "Bills", "Coffee").mapIndexed { index, category ->
+                transaction("reviewed-$index", time + index, -(index + 1) * 100, category, reviewedAtEpochMillis = 1)
+            } + transaction("pending", time + 10, -600, "Groceries") +
+                transaction("transfer", time + 11, -9000, "Food", reviewedAtEpochMillis = 1).copy(flowKind = FlowKind.TRANSFER),
+        )
+        withContext(Dispatchers.Main) {
+            val store = ViewModelStore()
+            val vm = ViewModelProvider(store, MainViewModel.Factory(FakeGateway(rows), SimpleFinSyncRepository(context), MutableStateFlow(emptyList())))[MainViewModel::class.java]
+            try {
+                vm.reportInitializationComplete()
+                val initial = vm.uiState.first { !it.isLoading && it.categoryTotals.size == 6 }
+                assertEquals(2100L, initial.metrics.spentCents)
+                assertEquals(initial.metrics.spentCents, initial.categoryTotals.sumOf { it.cents })
+                assertTrue(initial.categoryTotals.any { it.category == "Other" && it.cents == 600L })
+                rows.value = rows.value.map { if (it.id == "pending") it.copy(reviewedAtEpochMillis = 2) else it }
+                val corrected = vm.uiState.first { it.categoryTotals.any { total -> total.category == "Groceries" } }
+                assertEquals(6, corrected.categoryTotals.size)
+                assertEquals(corrected.metrics.spentCents, corrected.categoryTotals.sumOf { it.cents })
+                assertEquals(2100L, corrected.metrics.spentCents)
+                assertEquals(0, corrected.pendingReviewSummary.transactionCount)
+            } finally {
+                store.clear()
+            }
+        }
+    }
+
     private class FakeGateway(
         override val transactions: Flow<List<Transaction>>,
     ) : TransactionGateway {

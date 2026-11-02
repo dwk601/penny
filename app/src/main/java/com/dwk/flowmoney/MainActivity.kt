@@ -3500,6 +3500,7 @@ private fun InsightsPage(
 ) {
     var selectedBucketKey by remember { mutableStateOf<String?>(null) }
     var selectedCategory by remember { mutableStateOf<String?>(null) }
+    var categoriesExpanded by remember(dateRange, chartRangeMode, selectedBucketKey) { mutableStateOf(false) }
     val buckets =
         remember(dailySpending, chartRangeMode, dateRange) {
             DashboardAnalytics.spendBuckets(dailySpending, chartRangeMode, dateRange)
@@ -3524,14 +3525,15 @@ private fun InsightsPage(
             if (selectedBucket == null) {
                 categoryTotals
             } else {
-                DashboardAnalytics.categoryTotals(bucketTransactions)
+                DashboardAnalytics.categoryTotals(bucketTransactions, limit = Int.MAX_VALUE)
             }
         }
     val visibleTotalSpentCents = selectedBucket?.cents ?: totalSpentCents
 
-    LaunchedEffect(buckets, visibleCategoryTotals) {
+    LaunchedEffect(buckets, visibleCategoryTotals, categoriesExpanded) {
         if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
-        if (selectedCategory != null && visibleCategoryTotals.none { it.category == selectedCategory }) {
+        val available = if (categoriesExpanded) visibleCategoryTotals else visibleCategoryTotals.take(4)
+        if (selectedCategory != null && available.none { it.category == selectedCategory }) {
             selectedCategory = null
         }
     }
@@ -3619,6 +3621,8 @@ private fun InsightsPage(
                         totals = visibleCategoryTotals,
                         totalSpentCents = visibleTotalSpentCents,
                         selectedCategory = selectedCategory,
+                        expanded = categoriesExpanded,
+                        onExpandedChange = { categoriesExpanded = it },
                         onSelect = { category ->
                             selectedCategory = if (selectedCategory == category) null else category
                         },
@@ -3650,18 +3654,14 @@ private fun InsightsPage(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PendingReviewInsightsCard(
     summary: UnreviewedSpendingSummary,
     onReview: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().testTag("insights_pending_review_card")) {
-        FlowRow {
-            Text("${summary.transactionCount} optional corrections · ", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("insights_pending_review_count"))
-            Text(MoneyFormatter.formatUsd(summary.spentCents), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("insights_pending_review_amount"))
-            Text(" · included under Other", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-        }
+        val noun = if (summary.transactionCount == 1) "correction" else "corrections"
+        Text("${summary.transactionCount} optional $noun · ${MoneyFormatter.formatUsd(summary.spentCents)} · included under Other", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("insights_pending_review_note"))
         TextButton(onClick = onReview, modifier = Modifier.heightIn(min = 48.dp).testTag("insights_pending_review_action")) { Text("Check & correct") }
     }
 }
@@ -5156,7 +5156,7 @@ private fun SpendingBucketsChart(
     val total = remember(buckets) { buckets.sumOf { it.cents } }
     val peak = remember(buckets) { buckets.maxOfOrNull { it.cents } ?: 0L }
     val selectionColor = LocalFinanceColors.current.expense
-    val unselectedColor = MaterialTheme.colorScheme.surfaceContainerHigh
+    val unselectedColor = MaterialTheme.colorScheme.outline
     val chartSummary =
         buildString {
             append("Spending timeline for ${range.label}. Total ${MoneyFormatter.formatUsd(total)}. ")
@@ -5266,8 +5266,13 @@ private fun CategoryRankList(
     totals: List<CategoryTotal>,
     totalSpentCents: Long,
     selectedCategory: String?,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
     onSelect: (String) -> Unit,
 ) {
+    val amountStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
     val chartColors =
         listOf(
             MaterialTheme.colorScheme.primary,
@@ -5294,9 +5299,12 @@ private fun CategoryRankList(
             modifier = Modifier.fillMaxWidth().selectableGroup(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            totals.forEachIndexed { index, entry ->
+            (if (expanded) totals else totals.take(4)).forEachIndexed { index, entry ->
                 val selected = selectedCategory == entry.category
                 val amount = MoneyFormatter.formatUsd(entry.cents)
+                val amountWidth = remember(amount, amountStyle, measurer, density) {
+                    measurer.measure(amount, style = amountStyle, softWrap = false).size.width
+                }
                 val fraction =
                     if (totalSpentCents <= 0L) {
                         0f
@@ -5345,7 +5353,8 @@ private fun CategoryRankList(
                         )
                         Text(
                             text = amount,
-                            style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                            style = amountStyle,
+                            modifier = Modifier.width(with(density) { amountWidth.toDp() } + 2.dp),
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
@@ -5366,6 +5375,14 @@ private fun CategoryRankList(
                     }
                 }
             }
+        }
+        if (totals.size > 4) {
+            val remaining = totals.drop(4)
+            val label = if (expanded) "Show less" else {
+                val noun = if (remaining.size == 1) "category" else "categories"
+                "${remaining.size} more $noun · ${MoneyFormatter.formatUsd(remaining.sumOf { it.cents })}"
+            }
+            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.testTag("insight_categories_expand")) { Text(label) }
         }
     }
 }
