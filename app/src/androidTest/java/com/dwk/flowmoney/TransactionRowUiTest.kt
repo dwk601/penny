@@ -6,6 +6,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyAncestor
@@ -82,6 +83,10 @@ class TransactionRowUiTest {
         )
         setTransactionScreen(transaction)
         scrollToTransaction(transaction.id)
+        composeRule.onNodeWithTag("transaction_content_place").assertContentDescriptionEquals(
+            "Starbucks, -\$7.83, Coffee, New York, NY, Checking, Posted " +
+                java.time.Instant.ofEpochMilli(1L).atZone(ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy")),
+        )
         val merchant = composeRule.onNodeWithText("Starbucks", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         val amount = composeRule.onNodeWithText("-\$7.83", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         assertTrue("amount should share the merchant line", amount.top < merchant.bottom && merchant.top < amount.bottom)
@@ -97,7 +102,7 @@ class TransactionRowUiTest {
         )
         setTransactionScreen(transaction)
         scrollToTransaction(transaction.id)
-        composeRule.onNodeWithText("Other · Checking · 2:15 PM", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Other · Checking · Jul 10, 2:15 PM", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test fun localRowWithoutPurchaseTimeUsesOccurrenceTime() {
@@ -118,8 +123,11 @@ class TransactionRowUiTest {
         val transaction = transaction("threshold", -783).copy(merchant = "Shop")
         setTransactionScreen(transaction, width = screenWidth, fontScale = fontScale)
         scrollToTransaction(transaction.id)
+        val row = composeRule.onNodeWithTag("transaction_content_threshold").fetchSemanticsNode()
+        val rowWidthDp = row.boundsInRoot.width / row.layoutInfo.density.density
         val merchant = composeRule.onNodeWithText("Shop", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         val amount = composeRule.onNodeWithText("-\$7.83", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertTrue("unexpected row width $rowWidthDp", kotlin.math.abs(rowWidthDp - (screenWidth - 40)) < 1f)
         assertEquals(stacked, amount.top >= merchant.bottom)
     }
 

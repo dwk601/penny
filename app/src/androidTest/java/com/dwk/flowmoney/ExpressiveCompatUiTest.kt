@@ -44,7 +44,7 @@ class ExpressiveCompatUiTest {
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(320.dp, 360.dp))) {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(1.5f)) {
                     FlowMoneyTheme(dynamicColor = false) {
-                        PennyOverviewTopAppBar(
+                        PennyTopAppBar(
                             status = { Text("Disconnected") },
                             onData = { dataClicks++ },
                             onAddTransaction = {},
@@ -66,6 +66,7 @@ class ExpressiveCompatUiTest {
             FlowMoneyTheme(dynamicColor = false) {
                 FlowMoneyTopAppBar(
                     onData = {},
+                    onAddTransaction = {},
                 )
             }
         }

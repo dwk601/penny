@@ -252,6 +252,7 @@ class SyncFirstWorkflowUiTest {
             MaterialTheme {
                 FlowMoneyTopAppBar(
                     onData = { dataClicks++ },
+                    onAddTransaction = {},
                     simpleFin = simpleFin,
                     syncHealthNowEpochMillis = now,
                     onManualSync = { syncClicks++ },

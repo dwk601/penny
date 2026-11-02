@@ -45,7 +45,7 @@ import androidx.compose.ui.unit.dp
 import java.time.Clock
 
 @Composable
-internal fun PennyOverviewTopAppBar(
+internal fun PennyTopAppBar(
     status: @Composable () -> Unit,
     onData: () -> Unit,
     onAddTransaction: () -> Unit,

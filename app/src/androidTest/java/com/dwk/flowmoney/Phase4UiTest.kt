@@ -11,6 +11,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
@@ -330,6 +334,40 @@ class Phase4UiTest {
         composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("note_field"))
         composeRule.onNodeWithTag("note_field").assertIsDisplayed()
         composeRule.onNodeWithTag("recurring_chip_monthly").assertIsSelected()
+    }
+
+    @Test
+    fun dayTotalsExcludeTransfersAndReactToOverride() {
+        val date = java.time.LocalDate.of(2026, 7, 10)
+        val timestamp = date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val expense = Transaction("normal", timestamp, "Cafe", "Food", "", -1_250)
+        val income = Transaction("income", timestamp + 1, "Client", "Salary", "", 5_000)
+        val transfer = Transaction("transfer", timestamp + 2, "Payment", "Food", "", -2_000, flowKind = FlowKind.TRANSFER)
+        var overridden by mutableStateOf(false)
+        var neutral = Color.Unspecified
+        composeRule.setContent {
+            MaterialTheme {
+                neutral = MaterialTheme.colorScheme.onSurfaceVariant
+                FlowMoneyScreen(
+                    uiState = MainUiState(isLoading = false, sortedTransactions = listOf(transfer, income, expense.copy(flowKindOverride = if (overridden) FlowKind.TRANSFER else null))),
+                    selectedTab = DashboardTab.Transactions,
+                    onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {},
+                    onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {},
+                )
+            }
+        }
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
+        composeRule.onNodeWithTag("transaction_day_spent_$date").assertTextContains("Spent \$12.50")
+        composeRule.onNodeWithTag("transaction_day_received_$date").assertTextContains("Received \$50.00")
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_transfer"))
+        composeRule.onNodeWithTag("transaction_content_transfer").assertContentDescriptionEquals("Payment, -\$20.00, Transfer, Occurred Jul 10, 2026, 12:00 AM")
+        val layouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("-\$20.00", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertEquals(neutral, layouts.single().layoutInput.style.color)
+        composeRule.runOnIdle { overridden = true }
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
+        composeRule.onNodeWithTag("transaction_day_spent_$date").assertTextContains("Spent \$0.00")
+        composeRule.onNodeWithTag("transaction_day_received_$date").assertTextContains("Received \$50.00")
     }
 
     @Test
