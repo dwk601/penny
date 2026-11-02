@@ -11,6 +11,8 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.FontScale
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.assert
@@ -29,6 +31,8 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -293,6 +297,61 @@ class SyncFirstWorkflowUiTest {
             )
         composeRule.onNodeWithTag("transaction_unreviewed_filter").performClick().assertIsSelected()
         composeRule.onNodeWithTag("transaction_category_filter_category15").assertExists()
+    }
+
+    @Test fun filterSummaryWrapsAndClearsCorrectlyAtOneX() = assertFilterSummary(1f)
+    @Test fun filterSummaryWrapsAndClearsCorrectlyAtTwoX() = assertFilterSummary(2f)
+
+    private fun assertFilterSummary(fontScale: Float) {
+        val transaction = syncedTransaction("brooklyn", LocalDate.of(2026, 7, 10), "Brooklyn Cafe").copy(accountKey = "account-a", accountName = "Checking", locationCity = "Brooklyn", locationState = "NY", locationCountry = "US")
+        val accounts = listOf(account("account-a", "Checking", "Bank A"), account("account-b", "Checking", "Bank B"))
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(fontScale)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(transaction), simpleFin = SimpleFinUiState(accounts = accounts)),
+                            selectedTab = DashboardTab.Transactions, onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                    }
+                }
+            }
+        }
+        fun scroll(tag: String) = composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag(tag))
+        composeRule.onNodeWithTag("transaction_filter_toggle").performClick()
+        scroll("transaction_time_filter_group")
+        composeRule.onNodeWithText("Range").assertIsDisplayed()
+        composeRule.onNodeWithTag("transaction_filter_week").performClick()
+        scroll("transaction_source_filter_synced")
+        composeRule.onNodeWithTag("transaction_source_filter_synced").performClick()
+        scroll("transaction_account_filter_action")
+        composeRule.onNodeWithTag("transaction_account_filter_action").performClick()
+        composeRule.onNodeWithText("Checking (Bank A)").performClick()
+        scroll("transaction_unreviewed_filter")
+        composeRule.onNodeWithTag("transaction_unreviewed_filter").performClick()
+        scroll("transaction_category_filter_other")
+        composeRule.onNodeWithTag("transaction_category_filter_other").performClick()
+        scroll("transaction_city_filter_brooklyn")
+        composeRule.onNodeWithTag("transaction_city_filter_brooklyn").performClick()
+        scroll("transaction_country_filter_us")
+        composeRule.onNodeWithTag("transaction_country_filter_us").performClick()
+        scroll("transaction_where_filter")
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Brooklyn")
+        val expected = "Last 7 days · Other · Synced · Checking (Bank A) · Needs review · Brooklyn · US · “Brooklyn”"
+        scroll("transaction_filter_toggle")
+        val summary = composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected)
+        val layouts = mutableListOf<TextLayoutResult>()
+        summary.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertFalse(layouts.single().hasVisualOverflow)
+        assertTrue(layouts.single().lineCount > 1)
+        repeat(layouts.single().lineCount) { assertFalse(layouts.single().isLineEllipsized(it)) }
+        scroll("transaction_search_clear")
+        composeRule.onNodeWithTag("transaction_search_clear").assertContentDescriptionEquals("Clear search").performClick()
+        scroll("transaction_filter_toggle")
+        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected.substringBeforeLast(" · “Brooklyn”"))
+        scroll("transaction_filter_clear_compact")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertContentDescriptionEquals("Clear all filters").performClick()
+        scroll("transaction_filter_toggle")
+        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals("All time")
+        composeRule.onNodeWithTag("transaction_time_filter_group").assertDoesNotExist()
     }
 
     @Test

@@ -18,6 +18,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextClearance
 import androidx.test.core.app.ApplicationProvider
@@ -404,13 +405,17 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithTag("transaction_city_filter_seattle").performClick()
         composeRule.waitForIdle()
 
+        scrollTo("transaction_view_map")
         composeRule.onNodeWithTag("transaction_view_map").performClick()
         composeRule.waitForIdle()
 
+        composeRule.onNodeWithTag("transaction_view_map").assertIsSelected()
+        composeRule.onNodeWithTag("transactions_list").performScrollToIndex(2)
         composeRule.onNodeWithTag("transactions_map").assertExists()
-        composeRule.onNodeWithTag("transaction_city_filter_seattle").assertIsSelected()
         // Everything on the map now has a place, so there is nothing to report as unmappable.
         composeRule.onNodeWithTag("transactions_unmappable").assertDoesNotExist()
+        scrollTo("transaction_city_filter_seattle")
+        composeRule.onNodeWithTag("transaction_city_filter_seattle").assertIsSelected()
     }
 
     @Test fun optionsThatDisappearFromTheDataClearTheSelectionInsteadOfEmptyingTheList() {
@@ -449,6 +454,19 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithTag("transaction_filter_clear").assertDoesNotExist()
         composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
         // Clear collapses the panel, so the filter groups are gone with it.
+        composeRule.onNodeWithTag("transaction_city_filter_group").assertDoesNotExist()
+    }
+
+    @Test fun compactClearAllResetsLocationFiltersAndCollapses() {
+        setTransactionsTab()
+        expandFilters()
+        scrollTo("transaction_city_filter_group")
+        composeRule.onNodeWithTag("transaction_city_filter_portlandorus").performClick()
+        assertVisible("tx-portland-or")
+        scrollTo("transaction_filter_clear_compact")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
+        assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
         composeRule.onNodeWithTag("transaction_city_filter_group").assertDoesNotExist()
     }
 

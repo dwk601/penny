@@ -3198,7 +3198,6 @@ private fun TransactionFilterBar(
                     .fillMaxWidth()
                     .testTag("transaction_where_filter"),
         )
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         FlowRow(
             modifier = Modifier.selectableGroup().testTag("transaction_view_mode_group"),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -3213,10 +3212,10 @@ private fun TransactionFilterBar(
                 )
             }
         }
-        Row(
+        Column(
             modifier =
                 Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
                     .heightIn(min = 48.dp)
                     .clip(MaterialTheme.shapes.large)
                     .background(MaterialTheme.colorScheme.surfaceContainer)
@@ -3224,23 +3223,20 @@ private fun TransactionFilterBar(
                     .semantics { stateDescription = if (isExpanded) "Expanded" else "Collapsed" }
                     .padding(horizontal = 14.dp, vertical = 10.dp)
                     .testTag("transaction_filter_toggle"),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Filters", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    summary,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Filters", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics { })
             }
-            Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics { })
+            Text(
+                summary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary"),
+            )
         }
         if (hasActiveFilter) {
-            IconButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("×") }
-        }
+            TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all") }
         }
 
         AnimatedVisibility(
@@ -3277,6 +3273,7 @@ private fun TransactionFilterBar(
                     ),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionLabel("Range")
                 FlowRow(
                     modifier =
                         Modifier
@@ -6306,11 +6303,7 @@ internal fun TransactionEditor(
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(10.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 if (onDelete != null) {
                     TextButton(
                         onClick = onDelete,
@@ -6320,7 +6313,6 @@ internal fun TransactionEditor(
                         Text("Delete", color = LocalFinanceColors.current.expense)
                     }
                 }
-                Spacer(Modifier.weight(1f))
                 Button(
                     onClick = {
                         if (MoneyFormatter.parseAmountToCents(draft.amount).absoluteValue == 0) {
@@ -6339,12 +6331,20 @@ internal fun TransactionEditor(
                     shape = MaterialTheme.shapes.large,
                     modifier =
                         Modifier
-                            .weight(1f)
-                            .height(56.dp)
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
                             .testTag("save_transaction_button"),
                 ) {
                     Text(
-                        text = if (draft.isExpense) "Save expense" else "Save income",
+                        text = when {
+                            draft.effectiveFlowKind == FlowKind.TRANSFER -> "Save transfer"
+                            draft.isExpense -> "Save expense"
+                            else -> "Save income"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        softWrap = false,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }

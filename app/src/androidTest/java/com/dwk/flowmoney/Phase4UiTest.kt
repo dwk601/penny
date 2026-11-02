@@ -33,6 +33,7 @@ import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -220,6 +221,43 @@ class Phase4UiTest {
         assertTrue(date.bottom <= time.top || date.right <= time.left)
         composeRule.onNodeWithTag("date_picker_button").assertIsDisplayed()
         composeRule.onNodeWithTag("time_picker_button").assertIsDisplayed()
+    }
+
+    @Test
+    fun editorSaveLabelsStayContainedForExpenseIncomeAndEffectiveTransfers() {
+        var width by mutableStateOf(360)
+        var scale by mutableStateOf(1f)
+        var draft by mutableStateOf(newEditorDraft().copy(amount = "12.50", isExpense = true))
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                    MaterialTheme {
+                        TransactionEditor(transaction = null, draft = draft, suggestionHistory = TransactionSuggestionHistory.Empty,
+                            onDraftChange = { draft = it }, onSave = {}, onDelete = {}, onCancel = {}, persistenceBusy = false)
+                    }
+                }
+            }
+        }
+        val examples = listOf(
+            newEditorDraft().copy(amount = "12.50", isExpense = true) to "Save expense",
+            newEditorDraft().copy(amount = "12.50", isExpense = false) to "Save income",
+            newEditorDraft().copy(amount = "12.50", isExpense = true, source = "simplefin", flowKind = FlowKind.TRANSFER) to "Save transfer",
+            newEditorDraft().copy(amount = "12.50", isExpense = false, flowKind = FlowKind.NORMAL, flowKindOverride = FlowKind.TRANSFER) to "Save transfer",
+            newEditorDraft().copy(amount = "12.50", isExpense = true, flowKind = FlowKind.TRANSFER, flowKindOverride = FlowKind.NORMAL) to "Save expense",
+        )
+        for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1f, 2f)) for ((example, label) in examples) {
+            composeRule.runOnIdle { width = screenWidth; scale = fontScale; draft = example }
+            val save = composeRule.onNodeWithTag("save_transaction_button").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            composeRule.onNodeWithTag("delete_transaction_button").assertIsDisplayed()
+            val text = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+            val bounds = text.fetchSemanticsNode().boundsInRoot
+            val layouts = mutableListOf<TextLayoutResult>()
+            text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertEquals(1, layouts.single().lineCount)
+            assertFalse(layouts.single().isLineEllipsized(0))
+            assertFalse("$screenWidth/$fontScale $label overflow", layouts.single().hasVisualOverflow)
+            assertTrue("$screenWidth/$fontScale $label $bounds not within $save", bounds.left >= save.left && bounds.right <= save.right && bounds.top >= save.top && bounds.bottom <= save.bottom)
+        }
     }
 
     @Test
