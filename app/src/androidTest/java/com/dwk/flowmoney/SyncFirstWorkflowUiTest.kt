@@ -11,6 +11,8 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
@@ -611,14 +613,27 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed()
         composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
 
+        fun assertNoOverviewSyncActions() {
+            composeRule.onAllNodesWithContentDescription("Bank sync status").assertCountEquals(1)
+            composeRule.onNodeWithText("Connect bank").assertDoesNotExist()
+            composeRule.onNodeWithText("Open Data").assertDoesNotExist()
+            composeRule.onNodeWithText("Adjust sync cadence", substring = true).assertDoesNotExist()
+        }
         runBlocking { dao.upsertProfile(healthy.copy(isPaused = true, lastError = "SimpleFIN reconnect required")) }
         composeRule.waitUntil(5_000) {
             runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Bank reconnect required; open Data")) }.isSuccess
         }
+        assertNoOverviewSyncActions()
         runBlocking { dao.clearProfile() }
         composeRule.waitUntil(5_000) {
             runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Bank sync disconnected; open Data to connect")) }.isSuccess
         }
+        assertNoOverviewSyncActions()
+        runBlocking { dao.upsertProfile(healthy.copy(automaticSyncsPerDay = 1, lastSuccessfulSyncAtEpochMillis = 1, lastSyncAttemptAtEpochMillis = 1)) }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Connected and idle; automatic sync is once daily; open Data to change cadence")) }.isSuccess
+        }
+        assertNoOverviewSyncActions()
         composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2")
         composeRule.runOnIdle {
             gateway.rows.value = gateway.rows.value.map { it.copy(reviewedAtEpochMillis = 1L) }

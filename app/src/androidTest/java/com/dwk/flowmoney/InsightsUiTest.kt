@@ -85,13 +85,13 @@ class InsightsUiTest {
             onReview = { reviewClicks++ },
         )
 
-        composeRule.onNodeWithText("Optional corrections").assertIsDisplayed()
+        composeRule.onNodeWithText("2 optional corrections · ").assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_count").assertIsDisplayed()
-        composeRule.onNodeWithText("2 transactions").assertIsDisplayed()
+        composeRule.onNodeWithText(" · included under Other").assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_amount").assertIsDisplayed()
         composeRule.onNodeWithText("$12.50").assertIsDisplayed()
         composeRule
-            .onNodeWithText("Already included in spending and grouped under Other; review only to correct details.")
+            .onNodeWithText(" · included under Other")
             .assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_action").performClick()
         composeRule.runOnIdle { assertEquals(1, reviewClicks) }
@@ -116,7 +116,7 @@ class InsightsUiTest {
             .onNodeWithTag("insight_category_food")
             .performClick()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
-        composeRule.onNodeWithText("Food spending").assertIsDisplayed()
+        composeRule.onNodeWithText("Food spending · ", substring = true).assertIsDisplayed()
     }
 
     @Test
@@ -195,7 +195,7 @@ class InsightsUiTest {
             .onNodeWithTag("insights_list")
             .performScrollToNode(hasTestTag("insight_category_other"))
         composeRule.onNodeWithTag("insight_category_other").performClick()
-        composeRule.onNodeWithText("Other spending").assertIsDisplayed()
+        composeRule.onNodeWithText("Other spending · ", substring = true).assertIsDisplayed()
         composeRule
             .onNodeWithTag("insights_list")
             .performScrollToNode(hasTestTag("insight_transaction_tx-unreviewed"))

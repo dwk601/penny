@@ -35,7 +35,7 @@ class TransactionRowUiTest {
     @Test
     fun compactWidthAtTwoXFontKeepsFullAmountVisibleAndRowAccessible() {
         val transaction = transaction(id = "compact", cents = Int.MIN_VALUE)
-        setTransactionScreen(transaction = transaction, width = 280, fontScale = 2f)
+        setTransactionScreen(transaction = transaction, width = 240, fontScale = 2f)
         scrollToTransaction(transaction.id)
 
         val rowTag = "transaction_content_${transaction.id}"
@@ -66,6 +66,8 @@ class TransactionRowUiTest {
             "Amount was clipped at compact width and 2x font scale: $textLayout",
             textLayout.hasVisualOverflow,
         )
+        assertEquals(1, textLayout.lineCount)
+        assertTrue("Expected reduced font for row width ${rowNode.boundsInRoot.width}: $textLayout", textLayout.layoutInput.style.fontSize.value < 16f)
         val minimumLayoutWidth =
             rowNode.boundsInRoot.width - with(composeRule.density) { 30.dp.toPx() }
         assertTrue(
@@ -115,17 +117,17 @@ class TransactionRowUiTest {
 
     @Test fun rowAbove280DpDoesNotStack() = assertAmountPlacement(screenWidth = 324, stacked = false)
 
-    @Test fun rowBelow280DpStacks() = assertAmountPlacement(screenWidth = 316, stacked = true)
+    @Test fun narrowRowStacksWhenMerchantAndAmountDoNotFit() = assertAmountPlacement(screenWidth = 316, stacked = true, merchantName = "A very long merchant name")
 
-    @Test fun rowAtLargeFontScaleStacks() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = true)
+    @Test fun largeFontDoesNotStackWhenContentFits() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = false)
 
-    private fun assertAmountPlacement(screenWidth: Int, fontScale: Float = 1f, stacked: Boolean) {
-        val transaction = transaction("threshold", -783).copy(merchant = "Shop")
+    private fun assertAmountPlacement(screenWidth: Int, fontScale: Float = 1f, stacked: Boolean, merchantName: String = "Shop") {
+        val transaction = transaction("threshold", -783).copy(merchant = merchantName)
         setTransactionScreen(transaction, width = screenWidth, fontScale = fontScale)
         scrollToTransaction(transaction.id)
         val row = composeRule.onNodeWithTag("transaction_content_threshold").fetchSemanticsNode()
         val rowWidthDp = row.boundsInRoot.width / row.layoutInfo.density.density
-        val merchant = composeRule.onNodeWithText("Shop", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val merchant = composeRule.onNodeWithText(merchantName, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         val amount = composeRule.onNodeWithText("-\$7.83", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         assertTrue("unexpected row width $rowWidthDp", kotlin.math.abs(rowWidthDp - (screenWidth - 40)) < 1f)
         assertEquals(stacked, amount.top >= merchant.bottom)

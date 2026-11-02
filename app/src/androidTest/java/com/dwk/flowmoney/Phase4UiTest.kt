@@ -354,7 +354,8 @@ class Phase4UiTest {
         val layouts = mutableListOf<TextLayoutResult>()
         composeRule.onNodeWithText("Transactions").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
         assertEquals(1, layouts.single().lineCount)
-        composeRule.onNodeWithText("Spent \$0.00 · 0 total · All time").assertIsDisplayed()
+        assertTrue(!layouts.single().isLineEllipsized(0))
+        composeRule.onNodeWithText("Spent \$0.00 · 0 total").assertIsDisplayed()
     }
 
     @Test

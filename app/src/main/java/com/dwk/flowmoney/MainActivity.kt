@@ -69,7 +69,7 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.text.TextAutoSize
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -84,6 +84,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -133,7 +134,6 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -2073,8 +2073,24 @@ internal fun FlowMoneyTopAppBar(
     val syncActionEnabled = operation == null
     PennyTopAppBar(
         status = {
+            Box(
+                modifier = Modifier.heightIn(min = 48.dp).clip(MaterialTheme.shapes.small)
+                    .clickable(enabled = syncActionEnabled, role = Role.Button) {
+                        if (syncHealth.manualSync) onManualSync() else onData()
+                    }.semantics {
+                        contentDescription = "Bank sync status"
+                        stateDescription = syncHealth.stateDescription
+                    }.padding(horizontal = 4.dp).testTag("sync_health_action"),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    text = syncHealth.label,
+                    text = if (LocalDensity.current.fontScale >= 1.5f) when (syncHealth.kind) {
+                        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
+                        SyncHealthKind.Syncing -> "Syncing"
+                        SyncHealthKind.Error -> "Error"
+                        SyncHealthKind.ReconnectRequired -> "Fix"
+                        SyncHealthKind.Disconnected, SyncHealthKind.Pending -> "Off"
+                    } else syncHealth.label,
                     color =
                         if (syncHealth.kind == SyncHealthKind.Error || syncHealth.kind == SyncHealthKind.ReconnectRequired) {
                             MaterialTheme.colorScheme.error
@@ -2084,18 +2100,8 @@ internal fun FlowMoneyTopAppBar(
                     style = MaterialTheme.typography.labelSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier =
-                        Modifier
-                            .heightIn(min = 48.dp)
-                            .clip(MaterialTheme.shapes.small)
-                            .clickable(enabled = syncActionEnabled, role = Role.Button) {
-                                if (syncHealth.manualSync) onManualSync() else onData()
-                            }.semantics {
-                                contentDescription = "Bank sync status"
-                                stateDescription = syncHealth.stateDescription
-                            }.padding(horizontal = 4.dp, vertical = 14.dp)
-                            .testTag("sync_health_action"),
                 )
+            }
         },
         onData = onData,
         onAddTransaction = onAddTransaction,
@@ -2666,6 +2672,8 @@ private fun ReviewTransactionCard(
                 .then(selectionModifier),
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val cardRowWidth = maxWidth
             Row(
                 modifier =
                     Modifier
@@ -2687,7 +2695,9 @@ private fun ReviewTransactionCard(
                 TransactionPresentation(
                     transaction,
                     modifier = Modifier.weight(1f).clearAndSetSemantics { contentDescription = transaction.rowAccessibility() },
+                    rowWidth = cardRowWidth,
                 )
+            }
             }
             if (!selectionMode) {
                 Row(
@@ -2881,11 +2891,6 @@ private fun TransactionsPage(
     }
     val dayGroups = remember(filteredTransactions) { transactionDayGroups(filteredTransactions) }
 
-    val headerDetail = when (timeFilter) {
-        TransactionTimeFilter.All -> "All time"
-        TransactionTimeFilter.Week -> "Last 7 days"
-        TransactionTimeFilter.Month -> "This month"
-    }
     val filteredMetrics = remember(filteredTransactions) { DashboardAnalytics.metrics(filteredTransactions) }
     val clearFilters: () -> Unit = {
         timeFilterName = TransactionTimeFilter.All.name
@@ -2970,7 +2975,6 @@ private fun TransactionsPage(
             item {
                 TransactionsHeader(
                     count = filteredTransactions.size,
-                    detail = headerDetail,
                     metrics = filteredMetrics,
                 )
             }
@@ -3148,7 +3152,11 @@ private fun TransactionFilterBar(
             selectedCountry != null
     val summary =
         buildList {
-            if (timeFilter != TransactionTimeFilter.All) add(timeFilter.label)
+            add(when (timeFilter) {
+                TransactionTimeFilter.All -> "All time"
+                TransactionTimeFilter.Week -> "Last 7 days"
+                TransactionTimeFilter.Month -> "This month"
+            })
             selectedCategory?.let { add(it) }
             if (sourceFilter != TransactionSourceFilter.All) add(sourceFilter.label)
             selectedAccountLabel?.let { add(it) }
@@ -3157,7 +3165,7 @@ private fun TransactionFilterBar(
             if (selectedState != null && selectedCityLabel?.contains(selectedState) != true) add(selectedState)
             selectedCountry?.let { add(it) }
             if (whereFilter.isNotBlank()) add("“${whereFilter.trim()}”")
-        }.joinToString(" · ").ifBlank { "All transactions" }
+        }.joinToString(" · ")
 
     Column(
         modifier =
@@ -3173,7 +3181,10 @@ private fun TransactionFilterBar(
         OutlinedTextField(
             value = whereFilter,
             onValueChange = onWhereFilterChange,
-            placeholder = { Text("Merchant, place, note, or account") },
+            placeholder = { Text("Merchant, place, note, or account", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            trailingIcon = if (whereFilter.isNotEmpty()) {
+                { IconButton(onClick = { onWhereFilterChange("") }, modifier = Modifier.testTag("transaction_search_clear").semantics { contentDescription = "Clear search" }) { Text("×") } }
+            } else null,
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             colors = flowTextFieldColors(),
@@ -3221,14 +3232,11 @@ private fun TransactionFilterBar(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium)
-        }
+            Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics { })
         }
         if (hasActiveFilter) {
-            TextButton(
-                onClick = onClear,
-                modifier = Modifier.align(Alignment.End).heightIn(min = 48.dp).testTag("transaction_filter_clear_compact"),
-            ) { Text("Clear") }
+            IconButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("×") }
+        }
         }
 
         AnimatedVisibility(
@@ -3554,8 +3562,9 @@ private fun InsightsPage(
             }
         }
     val insightTitle =
-        selectedCategoryTotal?.let { "${it.category} spending" }
-            ?: selectedBucket?.label
+        selectedCategoryTotal?.let { category ->
+            "${category.category} spending" + (selectedBucket?.let { " · ${it.label}" } ?: "")
+        } ?: selectedBucket?.label
     val insightAmount =
         selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
             ?: selectedBucket?.let { MoneyFormatter.formatUsd(it.cents) }
@@ -3638,41 +3647,19 @@ private fun InsightsPage(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PendingReviewInsightsCard(
     summary: UnreviewedSpendingSummary,
     onReview: () -> Unit,
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier.fillMaxWidth().testTag("insights_pending_review_card"),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text("Optional corrections", fontWeight = FontWeight.SemiBold)
-            Text(
-                "${summary.transactionCount} ${if (summary.transactionCount == 1) "transaction" else "transactions"}",
-                modifier = Modifier.testTag("insights_pending_review_count"),
-            )
-            Text(
-                MoneyFormatter.formatUsd(summary.spentCents),
-                color = LocalFinanceColors.current.expense,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.testTag("insights_pending_review_amount"),
-            )
-            Text(
-                "Already included in spending and grouped under Other; review only to correct details.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            TextButton(
-                onClick = onReview,
-                modifier = Modifier.heightIn(min = 48.dp).testTag("insights_pending_review_action"),
-            ) { Text("Check & correct") }
+    Column(modifier = Modifier.fillMaxWidth().testTag("insights_pending_review_card")) {
+        FlowRow {
+            Text("${summary.transactionCount} optional corrections · ", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("insights_pending_review_count"))
+            Text(MoneyFormatter.formatUsd(summary.spentCents), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("insights_pending_review_amount"))
+            Text(" · included under Other", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
+        TextButton(onClick = onReview, modifier = Modifier.heightIn(min = 48.dp).testTag("insights_pending_review_action")) { Text("Check & correct") }
     }
 }
 
@@ -5238,7 +5225,12 @@ private fun SpendingBucketsChart(
                 }
             }
         }
-        if (buckets.isNotEmpty()) {
+        if (buckets.isNotEmpty() && LocalDensity.current.fontScale >= 1.3f) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(buckets.first().startInclusive.format(ShortDateFormatter), style = MaterialTheme.typography.labelSmall)
+                Text(buckets.last().endExclusive.minusDays(1).format(ShortDateFormatter), style = MaterialTheme.typography.labelSmall)
+            }
+        } else if (buckets.isNotEmpty()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -5406,7 +5398,6 @@ private fun InsightsSelectionHeader(
 @Composable
 private fun TransactionsHeader(
     count: Int,
-    detail: String,
     metrics: DashboardMetrics,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -5417,7 +5408,7 @@ private fun TransactionsHeader(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · $count total · $detail" +
+            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · $count total" +
                 if (metrics.transferCents > 0) " · Transfers excluded" else "",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -5612,10 +5603,9 @@ private fun TransactionRow(
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .testTag("transaction_content_${transaction.id}")
-                .clickable(onClick = onClick)
+                .clickable(onClickLabel = "Edit", onClick = onClick)
                 .clearAndSetSemantics {
                     contentDescription = transaction.rowAccessibility()
-                    onClick(label = "Edit") { onClick(); true }
                     customActions =
                         buildList {
                             add(
@@ -5645,10 +5635,18 @@ private fun TransactionPresentation(
     modifier: Modifier = Modifier,
     showDate: Boolean = false,
     padded: Boolean = false,
+    rowWidth: androidx.compose.ui.unit.Dp? = null,
 ) {
     val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val amountStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")
+    val merchantStyle = androidx.compose.material3.LocalTextStyle.current.copy(fontWeight = FontWeight.SemiBold)
+    val amountWidth = measurer.measure(MoneyFormatter.formatUsd(transaction.cents), style = amountStyle, softWrap = false).size.width
+    val merchantWidth = measurer.measure(transaction.merchant.ifBlank { "Untitled" }, style = merchantStyle, softWrap = false).size.width
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val stack = density.fontScale >= 1.3f || maxWidth < 280.dp
+        val available = with(density) { ((rowWidth ?: maxWidth) - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
+        val actualAvailable = with(density) { (maxWidth - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
+        val stack = merchantWidth + amountWidth + with(density) { 8.dp.toPx() } > available
         Column(modifier = Modifier.fillMaxWidth().then(if (padded) Modifier.padding(horizontal = 14.dp, vertical = 10.dp) else Modifier)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -5660,17 +5658,17 @@ private fun TransactionPresentation(
                 )
                 if (!stack) {
                     Spacer(Modifier.width(8.dp))
-                    TransactionAmount(transaction)
+                    TransactionAmount(transaction, availablePx = actualAvailable, measuredWidth = amountWidth)
                 }
             }
             Text(
                 text = transaction.rowSubtitle(showDate),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
+                maxLines = if (density.fontScale >= 1.3f) 2 else 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth())
+            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), availablePx = actualAvailable, measuredWidth = amountWidth)
         }
     }
 }
@@ -5679,17 +5677,26 @@ private fun TransactionPresentation(
 private fun TransactionAmount(
     transaction: Transaction,
     modifier: Modifier = Modifier,
+    availablePx: Float,
+    measuredWidth: Int,
 ) {
     val color = when {
         transaction.effectiveFlowKind == FlowKind.TRANSFER -> MaterialTheme.colorScheme.onSurfaceVariant
         transaction.cents < 0 -> LocalFinanceColors.current.expense
         else -> LocalFinanceColors.current.income
     }
-    val style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum", color = color, textAlign = TextAlign.End)
+    val baseStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum", color = color, textAlign = TextAlign.End)
+    val text = MoneyFormatter.formatUsd(transaction.cents)
+    val measurer = rememberTextMeasurer()
+    var fontSize = baseStyle.fontSize
+    if (measuredWidth > availablePx) {
+        while (fontSize.value > 8f && measurer.measure(text, style = baseStyle.copy(fontSize = fontSize), softWrap = false).size.width > availablePx) {
+            fontSize = (fontSize.value - 0.5f).coerceAtLeast(8f).sp
+        }
+    }
     BasicText(
-        text = MoneyFormatter.formatUsd(transaction.cents),
-        style = style,
-        autoSize = TextAutoSize.StepBased(minFontSize = 1.sp, maxFontSize = style.fontSize, stepSize = 0.1.sp),
+        text = text,
+        style = baseStyle.copy(fontSize = fontSize),
         softWrap = false,
         maxLines = 1,
         modifier = modifier,
