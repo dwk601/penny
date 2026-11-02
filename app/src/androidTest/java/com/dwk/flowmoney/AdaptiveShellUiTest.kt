@@ -6,12 +6,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.test.performSemanticsAction
+import org.junit.Assert.assertFalse
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
@@ -148,6 +155,42 @@ class AdaptiveShellUiTest {
         composeRule.onNodeWithTag("tab_overview").assertIsNotSelected()
         composeRule.onNodeWithTag("tab_transactions").assertIsNotSelected()
         composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
+    }
+
+    @Test fun bottomNavigationLabelsFitAtTwoX() {
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    FlowMoneyTheme(dynamicColor = false) { TestShell(DashboardTab.Overview, {}) }
+                }
+            }
+        }
+        listOf("Overview", "Transactions", "Insights").forEach { label ->
+            val text = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+            val results = mutableListOf<TextLayoutResult>()
+            text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(results) }
+            assertTrue("$label must be one line", results.single().lineCount == 1)
+            assertFalse("$label overflows: ${results.single()}", results.single().hasVisualOverflow)
+            assertFalse(results.single().isLineEllipsized(0))
+        }
+    }
+
+    @Test fun snackbarDoesNotCoverScrollableContentEnd() {
+        var show: () -> Unit = {}
+        composeRule.setContent {
+            val host = remember { SnackbarHostState() }
+            val scope = rememberCoroutineScope()
+            show = { scope.launch { host.showSnackbar("Deleted transaction", actionLabel = "Undo", duration = SnackbarDuration.Long) } }
+            FlowMoneyTheme(dynamicColor = false) {
+                AdaptiveFlowMoneyShell(selectedTab = DashboardTab.Insights, snackbarHostState = host, onTabSelected = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize()) { padding ->
+                    Box(Modifier.padding(padding).fillMaxSize().testTag("snackbar_safe_content"))
+                }
+            }
+        }
+        composeRule.runOnIdle { show() }
+        val content = bounds("snackbar_safe_content")
+        val snackbar = bounds("app_snackbar_host")
+        assertTrue("content=$content snackbar=$snackbar", content.bottom <= snackbar.top + 1f)
     }
 
     @Test

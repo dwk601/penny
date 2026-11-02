@@ -449,8 +449,8 @@ class TransactionLocationUiTest {
         assertVisible("tx-portland-or")
         assertHidden("tx-nowhere")
 
-        scrollTo("transaction_filter_clear")
-        composeRule.onNodeWithTag("transaction_filter_clear").performClick()
+        scrollTo("transaction_filter_clear_compact")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
         composeRule.waitForIdle()
 
         assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")

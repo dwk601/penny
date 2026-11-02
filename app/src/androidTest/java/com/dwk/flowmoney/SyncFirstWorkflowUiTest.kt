@@ -1,6 +1,9 @@
 package com.dwk.flowmoney
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.remember
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +22,7 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsEnabled
@@ -162,6 +166,31 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed()
         composeRule.onNodeWithTag("review_row_sticky-12").performClick()
         composeRule.onNodeWithTag("review_bulk_category_food").assertIsDisplayed().assertIsEnabled()
+    }
+
+    @Test fun stickyBulkControlsLeaveReviewRowsSelectableAt300DpTwoX() {
+        val rows = (0..5).map { syncedTransaction("compact-$it", LocalDate.of(2026, 7, 10).minusDays(it.toLong()), "Merchant $it") }
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 533.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        AdaptiveFlowMoneyShell(selectedTab = DashboardTab.Review, snackbarHostState = remember { SnackbarHostState() }, onTabSelected = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize()) { padding ->
+                            ReviewPage(rows, onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false, modifier = Modifier.fillMaxSize().padding(padding))
+                        }
+                    }
+                }
+            }
+        }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        listOf("0 selected", "Accept as Other").forEach { label ->
+            val layouts = mutableListOf<TextLayoutResult>()
+            composeRule.onNodeWithText(label, useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertFalse("$label overflow: ${layouts.single()}", layouts.single().hasVisualOverflow)
+        }
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_compact-5"))
+        composeRule.onNodeWithTag("review_row_compact-5").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("review_selected_count").assertTextEquals("1 selected")
+        composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed()
     }
 
     @Test
@@ -360,6 +389,12 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Brooklyn")
         val expected = "Last 7 days · Other · Synced · Checking (Bank A) · Needs review · Brooklyn · US · “Brooklyn”"
         scroll("transaction_filter_toggle")
+        val searchBounds = composeRule.onNodeWithTag("transaction_where_filter").fetchSemanticsNode().boundsInRoot
+        val toggleBounds = composeRule.onNodeWithTag("transaction_filter_toggle").fetchSemanticsNode().boundsInRoot
+        val viewBounds = composeRule.onNodeWithTag("transaction_view_mode_group").fetchSemanticsNode().boundsInRoot
+        assertTrue(searchBounds.bottom <= toggleBounds.top && viewBounds.top == toggleBounds.top)
+        composeRule.onNodeWithText("Filters · 8", useUnmergedTree = true).assertExists()
+        composeRule.onAllNodesWithTag("transaction_filter_clear_compact").assertCountEquals(1)
         val summary = composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected)
         val layouts = mutableListOf<TextLayoutResult>()
         summary.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
@@ -373,7 +408,8 @@ class SyncFirstWorkflowUiTest {
         scroll("transaction_filter_clear_compact")
         composeRule.onNodeWithTag("transaction_filter_clear_compact").assertContentDescriptionEquals("Clear all filters").performClick()
         scroll("transaction_filter_toggle")
-        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals("All time")
+        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithText("Filters", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_time_filter_group").assertDoesNotExist()
     }
 

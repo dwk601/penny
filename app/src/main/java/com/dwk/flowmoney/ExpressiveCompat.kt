@@ -86,7 +86,7 @@ internal fun PennyTopAppBar(
             if (fits) {
                 statusPlaceable.placeRelative(width - add.width - data.width - statusPlaceable.width, (firstHeight - statusPlaceable.height) / 2)
             } else {
-                statusPlaceable.placeRelative(width - statusPlaceable.width, firstHeight)
+                statusPlaceable.placeRelative((width - statusPlaceable.width - 16.dp.roundToPx()).coerceAtLeast(0), firstHeight)
             }
         }
     }

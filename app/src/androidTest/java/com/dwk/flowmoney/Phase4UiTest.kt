@@ -231,7 +231,7 @@ class Phase4UiTest {
         composeRule.setContent {
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
-                    MaterialTheme {
+                    FlowMoneyTheme(dynamicColor = false) {
                         TransactionEditor(transaction = null, draft = draft, suggestionHistory = TransactionSuggestionHistory.Empty,
                             onDraftChange = { draft = it }, onSave = {}, onDelete = {}, onCancel = {}, persistenceBusy = false)
                     }
@@ -248,7 +248,7 @@ class Phase4UiTest {
         for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1f, 2f)) for ((example, label) in examples) {
             composeRule.runOnIdle { width = screenWidth; scale = fontScale; draft = example }
             val save = composeRule.onNodeWithTag("save_transaction_button").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            composeRule.onNodeWithTag("delete_transaction_button").assertIsDisplayed()
+            composeRule.onNodeWithTag("delete_transaction_button").assertIsDisplayed().assertContentDescriptionEquals("Delete transaction")
             val text = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
             val bounds = text.fetchSemanticsNode().boundsInRoot
             val layouts = mutableListOf<TextLayoutResult>()

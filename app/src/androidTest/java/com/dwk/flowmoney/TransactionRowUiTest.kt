@@ -1,6 +1,8 @@
 package com.dwk.flowmoney
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.DeviceConfigurationOverride
@@ -153,7 +155,12 @@ class TransactionRowUiTest {
 
     @Test fun wideAmountStacksAllRowsAcrossDaysAtOneX() {
         val rows = listOf(transaction("wide", Int.MIN_VALUE).copy(merchant = "Wide", occurredAtEpochMillis = 172_800_000L), transaction("short", -100).copy(merchant = "Short", occurredAtEpochMillis = 86_400_000L))
-        setTransactionScreen(rows, width = 300)
+        var reservedPx = 0
+        var density = 0f
+        setTransactionScreen(rows, width = 300, onReservation = { width, scale -> reservedPx = width; density = scale })
+        scrollToTransaction("wide")
+        val rowWidth = composeRule.onNodeWithTag("transaction_content_wide").fetchSemanticsNode().boundsInRoot.width - 28f * density
+        assertTrue("fixture must exceed inline capacity: $reservedPx + 104dp > $rowWidth", reservedPx + 104f * density > rowWidth)
         rows.forEach { row ->
             scrollToTransaction(row.id)
             val merchant = composeRule.onNodeWithText(row.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
@@ -270,6 +277,7 @@ class TransactionRowUiTest {
         transactions: List<Transaction>,
         width: Int = 360,
         fontScale: Float = 1f,
+        onReservation: (Int, Float) -> Unit = { _, _ -> },
     ) {
         composeRule.setContent {
             DeviceConfigurationOverride(
@@ -277,6 +285,9 @@ class TransactionRowUiTest {
             ) {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(fontScale)) {
                     FlowMoneyTheme(dynamicColor = false) {
+                        val reservation = rememberTransactionAmountWidth(transactions)
+                        val density = LocalDensity.current.density
+                        SideEffect { onReservation(reservation, density) }
                         FlowMoneyScreen(
                             uiState = MainUiState(isLoading = false, sortedTransactions = transactions),
                             selectedTab = DashboardTab.Transactions,

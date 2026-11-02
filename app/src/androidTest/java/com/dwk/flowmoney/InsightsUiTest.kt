@@ -1,6 +1,12 @@
 package com.dwk.flowmoney
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.mutableStateOf
@@ -16,6 +22,8 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
@@ -96,6 +104,26 @@ class InsightsUiTest {
         composeRule.onNodeWithTag("insights_pending_review_note").assertIsDisplayed()
         composeRule.onNodeWithTag("insights_pending_review_action").performClick()
         composeRule.runOnIdle { assertEquals(1, reviewClicks) }
+    }
+
+    @Test fun undoSnackbarDoesNotCoverLastInsightsReviewAction() {
+        var show: () -> Unit = {}
+        val state = populatedState().copy(pendingReviewSummary = UnreviewedSpendingSummary(1250, 1))
+        composeRule.setContent {
+            val host = remember { SnackbarHostState() }
+            val scope = rememberCoroutineScope()
+            show = { scope.launch { host.showSnackbar("Deleted", actionLabel = "Undo", duration = SnackbarDuration.Long) } }
+            FlowMoneyTheme(dynamicColor = false) {
+                AdaptiveFlowMoneyShell(selectedTab = DashboardTab.Insights, snackbarHostState = host, onTabSelected = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize()) { padding ->
+                    FlowMoneyScreen(uiState = state, selectedTab = DashboardTab.Insights, onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize().padding(padding))
+                }
+            }
+        }
+        composeRule.runOnIdle { show() }
+        composeRule.onNodeWithTag("insights_list").performScrollToNode(hasTestTag("insights_pending_review_action"))
+        val action = composeRule.onNodeWithTag("insights_pending_review_action").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val snack = composeRule.onNodeWithTag("app_snackbar_host").fetchSemanticsNode().boundsInRoot
+        assertTrue("last action $action covered by snackbar $snack", action.bottom <= snack.top + 1f)
     }
 
     @Test fun singularOptionalCorrectionIsOneCompleteNote() {
@@ -184,6 +212,21 @@ class InsightsUiTest {
             .performClick()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
         composeRule.onNodeWithText("Food spending · Jul 8–14").assertIsDisplayed()
+    }
+
+    @Test fun collapsedCategoriesKeepOtherAndAlignAmountsWithSubOnePercent() {
+        val totals = listOf(CategoryTotal("Food", 50000), CategoryTotal("Housing", 30000), CategoryTotal("Travel", 15000), CategoryTotal("Bills", 4000), CategoryTotal("Other", 600), CategoryTotal("Coffee", 500))
+        setScreen(populatedState().copy(categoryTotals = totals, dailySpending = monthDailySpending(DAY to 100100L), pendingReviewSummary = UnreviewedSpendingSummary(600, 1)))
+        composeRule.onNodeWithTag("insights_list").performScrollToNode(hasTestTag("insight_category_other"))
+        composeRule.onNodeWithTag("insight_category_other").assertExists()
+        composeRule.onNodeWithTag("insight_category_bills").assertDoesNotExist()
+        composeRule.onNodeWithText("<1%", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("2 more categories · \$45.00").assertExists()
+        val summary = composeRule.onNodeWithTag("category_breakdown_chart").fetchSemanticsNode().config[SemanticsProperties.ContentDescription].single()
+        assertTrue(summary.contains("Other \$6.00") && summary.contains("2 more") && !summary.contains("Bills"))
+        val food = composeRule.onNode(hasText("\$500.00") and hasAnyAncestor(hasTestTag("insight_category_food")), useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val other = composeRule.onNode(hasText("\$6.00") and hasAnyAncestor(hasTestTag("insight_category_other")), useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertTrue("amount columns must align", kotlin.math.abs(food.right - other.right) <= 1f)
     }
 
     @Test fun chartBarContrastAgainstLightBackground() = assertChartContrast(false)

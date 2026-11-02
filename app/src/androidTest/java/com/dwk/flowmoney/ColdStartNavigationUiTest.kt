@@ -220,12 +220,9 @@ class ColdStartNavigationUiTest {
         composeRule.onNodeWithTag("editor_sheet").assertExists()
         composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("merchant_field"))
         composeRule.onNodeWithTag("merchant_field").performTextInput("Dirty")
+        pressBack() // Dismiss the IME before testing the editor's Back behavior.
+        composeRule.onNodeWithTag("editor_sheet").assertExists()
         pressBack()
-        if (runCatching { composeRule.onNodeWithText("Discard changes?").assertIsDisplayed() }.isFailure) {
-            // The IME may consume the first Back before the dirty editor sees it.
-            composeRule.onNodeWithTag("editor_sheet").assertExists()
-            pressBack()
-        }
         composeRule.waitUntil(5_000) { runCatching { composeRule.onNodeWithText("Discard changes?").assertIsDisplayed() }.isSuccess }
         composeRule.onNodeWithText("Discard changes?").assertIsDisplayed()
         pressBack()

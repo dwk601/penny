@@ -118,7 +118,11 @@ class ExpressiveCompatUiTest {
             assertTrue(status.left >= bar.left && status.right <= bar.right && status.top >= bar.top && status.bottom <= bar.bottom)
             val fits = title.width + status.width + data.width + add.width + 20f * density <= bar.width + 1f
             if (fits) { sawSingle = true; assertTrue("should fit in one row", status.top < title.bottom) }
-            else { sawSecond = true; assertTrue("should move to second row", status.top >= data.bottom) }
+            else {
+                sawSecond = true
+                assertTrue("should move to second row", status.top >= data.bottom)
+                assertTrue("second-row status needs end inset", bar.right - status.right >= 15f * density)
+            }
         }
         assertTrue("expected a fitting configuration", sawSingle)
         assertTrue("expected a non-fitting configuration", sawSecond)
