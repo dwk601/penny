@@ -29,7 +29,6 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -81,7 +80,6 @@ import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -102,13 +100,10 @@ import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -120,14 +115,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -2011,10 +2004,6 @@ internal fun AdaptiveFlowMoneyShell(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-internal val LocalTopAppBarScrollBehavior =
-    staticCompositionLocalOf<TopAppBarScrollBehavior?> { null }
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FlowMoneyScaffold(
     selectedTab: DashboardTab,
@@ -2030,19 +2019,16 @@ private fun FlowMoneyScaffold(
     modifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
-    CompositionLocalProvider(LocalTopAppBarScrollBehavior provides scrollBehavior) {
     Scaffold(
-        modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        modifier = modifier,
         topBar = {
             FlowMoneyTopAppBar(
-                selectedTab = selectedTab,
                 simpleFin = simpleFin,
                 operation = operation,
                 syncHealthNowEpochMillis = syncHealthNowEpochMillis,
                 onManualSync = onManualSync,
                 onData = onData,
-                scrollBehavior = scrollBehavior,
+                onAddTransaction = onAddTransaction,
             )
         },
         snackbarHost = {
@@ -2059,31 +2045,6 @@ private fun FlowMoneyScaffold(
                 )
             }
         },
-        floatingActionButton = {
-            Box(
-                modifier =
-                    if (isWide) {
-                        Modifier.windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
-                    } else {
-                        Modifier
-                    },
-            ) {
-                FloatingActionButton(
-                    onClick = onAddTransaction,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier =
-                        Modifier
-                            .testTag("add_transaction_fab")
-                            .semantics { contentDescription = "Add transaction" },
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_add),
-                        contentDescription = null,
-                    )
-                }
-            }
-        },
         contentWindowInsets =
             if (isWide) {
                 WindowInsets.navigationBars.only(WindowInsetsSides.Bottom)
@@ -2092,15 +2053,12 @@ private fun FlowMoneyScaffold(
             },
         content = content,
     )
-    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FlowMoneyTopAppBar(
-    selectedTab: DashboardTab,
     onData: () -> Unit,
-    scrollBehavior: TopAppBarScrollBehavior? = null,
+    onAddTransaction: () -> Unit = {},
     simpleFin: SimpleFinUiState = SimpleFinUiState(),
     operation: DataOperation? = null,
     syncHealthNowEpochMillis: Long = System.currentTimeMillis(),
@@ -2109,28 +2067,15 @@ internal fun FlowMoneyTopAppBar(
     val syncHealth = syncHealthUiState(simpleFin, operation, syncHealthNowEpochMillis)
     val syncActionEnabled = operation == null
     PennyOverviewTopAppBar(
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Image(
-                    painter = painterResource(R.drawable.penny_logo),
-                    contentDescription = "Penny logo",
-                    modifier = Modifier.size(32.dp),
-                )
-                Spacer(Modifier.width(10.dp))
-                Text("Penny", style = MaterialTheme.typography.titleLarge)
-            }
-        },
-        subtitle = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        status = {
                 Text(
-                    text = selectedTab.label,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = " · ${syncHealth.label}",
+                    text = when (syncHealth.kind) {
+                        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
+                        SyncHealthKind.Syncing -> "Syncing"
+                        SyncHealthKind.Error -> "Error"
+                        SyncHealthKind.ReconnectRequired -> "Reconnect"
+                        SyncHealthKind.Disconnected, SyncHealthKind.Pending -> "Disconnected"
+                    },
                     color =
                         if (syncHealth.kind == SyncHealthKind.Error || syncHealth.kind == SyncHealthKind.ReconnectRequired) {
                             MaterialTheme.colorScheme.error
@@ -2152,10 +2097,9 @@ internal fun FlowMoneyTopAppBar(
                             }.padding(horizontal = 4.dp, vertical = 14.dp)
                             .testTag("sync_health_action"),
                 )
-            }
         },
         onData = onData,
-        scrollBehavior = scrollBehavior,
+        onAddTransaction = onAddTransaction,
     )
 }
 
@@ -2174,7 +2118,10 @@ private fun FlowMoneyNavigationBar(
                 selected = selectedTab == tab,
                 onClick = { onTabSelected(tab) },
                 icon = { NavigationTabIcon(tab) },
-                label = { Text(tab.label, maxLines = 1) },
+                label = {
+                    val fontScale = LocalDensity.current.fontScale
+                    Text(tab.label, maxLines = 1, fontSize = 12.sp / (fontScale / 1.3f).coerceAtLeast(1f))
+                },
                 modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
             )
         }
@@ -2272,7 +2219,6 @@ internal fun FlowMoneyScreen(
                 OverviewPage(
                     sortedTransactions = uiState.sortedTransactions,
                     latestSpendingTransactions = uiState.latestSpendingTransactions,
-                    rangeTransactions = uiState.rangeTransactions,
                     metrics = uiState.metrics,
                     dateRange = uiState.dateRange,
                     chartRangeMode = uiState.chartRangeMode,
@@ -2366,7 +2312,6 @@ private fun LoadingState(modifier: Modifier = Modifier) {
 private fun OverviewPage(
     sortedTransactions: List<Transaction>,
     latestSpendingTransactions: List<Transaction>,
-    rangeTransactions: List<Transaction>,
     metrics: DashboardMetrics,
     dateRange: DashboardDateRange,
     chartRangeMode: ChartRangeMode,
@@ -2396,61 +2341,30 @@ private fun OverviewPage(
             contentPadding = PagePadding,
         ) {
             item {
-                OverviewSyncReviewBanner(
-                    simpleFin = simpleFin,
-                    pendingReviewCount = pendingReviewCount,
-                    onReview = onReview,
-                    onData = onData,
+                DateRangeControls(
+                    mode = chartRangeMode,
+                    selectedMonth = selectedMonth,
+                    dateRange = dateRange,
+                    availableMonths = availableMonths,
+                    onModeSelected = onChartRangeModeSelected,
+                    onSelectedMonthChange = onSelectedMonthChange,
                 )
+            }
+            item { SummaryBand(metrics = metrics) }
+            if (pendingReviewCount > 0) {
+                item { OverviewReviewStrip(pendingReviewCount, onReview) }
             }
             if (sortedTransactions.isEmpty()) {
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DateRangeControls(
-                            mode = chartRangeMode,
-                            selectedMonth = selectedMonth,
-                            dateRange = dateRange,
-                            availableMonths = availableMonths,
-                            onModeSelected = onChartRangeModeSelected,
-                            onSelectedMonthChange = onSelectedMonthChange,
-                        )
-                        EmptyState(
-                            onAddTransaction = onAddTransaction,
-                            onData = onData,
-                            disconnected = simpleFin.profile == null && !simpleFin.isConnectionPending,
-                            modifier =
-                                Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 260.dp),
-                        )
-                    }
+                    EmptyState(
+                        onAddTransaction = onAddTransaction,
+                        onData = onData,
+                        disconnected = simpleFin.profile == null && !simpleFin.isConnectionPending,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
+                    )
                 }
             } else {
-                item {
-                    DateRangeControls(
-                        mode = chartRangeMode,
-                        selectedMonth = selectedMonth,
-                        dateRange = dateRange,
-                        availableMonths = availableMonths,
-                        onModeSelected = onChartRangeModeSelected,
-                        onSelectedMonthChange = onSelectedMonthChange,
-                    )
-                }
-                item {
-                    SummaryBand(
-                        rangeLabel = dateRange.label,
-                        metrics = metrics,
-                    )
-                }
-                item {
-                    RecentTransactionsHeader(
-                        title = "Recent",
-                        count = sortedTransactions.size,
-                        detail = "${metrics.transactionCount} in range",
-                        actionText = "View all",
-                        onAction = onViewAllTransactions,
-                    )
-                }
+                item { Text("Latest spending", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
                 item {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -2478,72 +2392,24 @@ private fun OverviewPage(
                         }
                     }
                 }
+                item {
+                    TextButton(onClick = onViewAllTransactions, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text("All transactions")
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun OverviewSyncReviewBanner(
-    simpleFin: SimpleFinUiState,
-    pendingReviewCount: Int,
-    onReview: () -> Unit,
-    onData: () -> Unit,
-) {
-    val profile = simpleFin.profile
-    val syncText =
-        when {
-            simpleFin.isConnectionPending -> "Connection pending"
-            profile == null -> "Bank not connected"
-            profile.isPaused -> "Reconnect required"
-            else -> null
-        }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier =
-            Modifier
-                .fillMaxWidth()
-                .testTag("overview_sync_review_banner"),
+private fun OverviewReviewStrip(pendingReviewCount: Int, onReview: () -> Unit) {
+    TextButton(
+        onClick = onReview,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("overview_review_action"),
+        contentPadding = PaddingValues(horizontal = 12.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            syncText?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-            }
-            Text(
-                if (pendingReviewCount == 0) {
-                    "No synced transactions to check"
-                } else {
-                    "$pendingReviewCount synced ${if (pendingReviewCount == 1) "transaction" else "transactions"} " +
-                        "available for optional corrections"
-                },
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.testTag("overview_pending_review_count"),
-            )
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (pendingReviewCount > 0) {
-                    TextButton(
-                        onClick = onReview,
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_review_action"),
-                    ) { Text("Check & correct") }
-                }
-                if (simpleFin.isConnectionPending || profile?.isPaused == true || profile == null) {
-                    TextButton(
-                        onClick = onData,
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_sync_data_action"),
-                    ) { Text(if (profile == null && !simpleFin.isConnectionPending) "Connect bank" else "Open Data") }
-                } else if (profile.automaticSyncsPerDay == 1) {
-                    TextButton(
-                        onClick = onData,
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_sync_cadence_action"),
-                    ) { Text("Adjust sync cadence (1–12/day)") }
-                }
-            }
-        }
+        Text("Review $pendingReviewCount", modifier = Modifier.testTag("overview_pending_review_count"))
     }
 }
 
@@ -3012,12 +2878,12 @@ private fun TransactionsPage(
     }
     val dayGroups = remember(filteredTransactions) { transactionDayGroups(filteredTransactions) }
 
-    val headerDetail =
-        if (filteredTransactions.size == sortedTransactions.size) {
-            "All time"
-        } else {
-            "${sortedTransactions.size} total"
-        }
+    val headerDetail = when (timeFilter) {
+        TransactionTimeFilter.All -> "All time"
+        TransactionTimeFilter.Week -> "Last 7 days"
+        TransactionTimeFilter.Month -> "This month"
+    }
+    val filteredMetrics = remember(filteredTransactions) { DashboardAnalytics.metrics(filteredTransactions) }
     val clearFilters: () -> Unit = {
         timeFilterName = TransactionTimeFilter.All.name
         selectedCategory = null
@@ -3081,14 +2947,6 @@ private fun TransactionsPage(
         )
     }
 
-    val topBar = LocalTopAppBarScrollBehavior.current
-    LaunchedEffect(viewMode) {
-        if (viewMode == TransactionViewMode.Map) {
-            topBar?.state?.heightOffset = 0f
-            topBar?.state?.contentOffset = 0f
-        }
-    }
-
     Box(modifier = modifier) {
         LazyColumn(
             modifier =
@@ -3103,7 +2961,7 @@ private fun TransactionsPage(
                     start = 20.dp,
                     top = 16.dp,
                     end = 20.dp,
-                    bottom = 16.dp + 88.dp,
+                    bottom = 16.dp,
                 ),
         ) {
             item {
@@ -3111,6 +2969,12 @@ private fun TransactionsPage(
                     title = "Transactions",
                     count = filteredTransactions.size,
                     detail = headerDetail,
+                )
+                Text(
+                    "Spent ${MoneyFormatter.formatUsd(filteredMetrics.spentCents)}" +
+                        if (filteredMetrics.transferCents > 0) " · Transfers excluded" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             item {
@@ -3309,23 +3173,6 @@ private fun TransactionFilterBar(
             ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        FlowRow(
-            modifier =
-                Modifier
-                    .selectableGroup()
-                    .testTag("transaction_view_mode_group"),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TransactionViewMode.entries.forEach { mode ->
-                SuggestionChip(
-                    label = mode.label,
-                    selected = viewMode == mode,
-                    testTag = "transaction_view_${mode.name.lowercase(Locale.US)}",
-                    onClick = { onViewModeChange(mode) },
-                )
-            }
-        }
         OutlinedTextField(
             value = whereFilter,
             onValueChange = onWhereFilterChange,
@@ -3339,6 +3186,20 @@ private fun TransactionFilterBar(
                     .fillMaxWidth()
                     .testTag("transaction_where_filter"),
         )
+        FlowRow(
+            modifier = Modifier.selectableGroup().testTag("transaction_view_mode_group"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TransactionViewMode.entries.forEach { mode ->
+                SuggestionChip(
+                    label = mode.label,
+                    selected = viewMode == mode,
+                    testTag = "transaction_view_${mode.name.lowercase(Locale.US)}",
+                    onClick = { onViewModeChange(mode) },
+                )
+            }
+        }
         Row(
             modifier =
                 Modifier
@@ -3718,6 +3579,7 @@ private fun InsightsPage(
                     totalCents = totalSpentCents,
                     range = dateRange,
                     dayCount = dailySpending.size,
+                    hasTransfers = remember(rangeTransactions) { DashboardAnalytics.metrics(rangeTransactions).transferCents > 0 },
                 )
             }
             item {
@@ -3728,15 +3590,8 @@ private fun InsightsPage(
                     availableMonths = availableMonths,
                     onModeSelected = onChartRangeModeSelected,
                     onSelectedMonthChange = onSelectedMonthChange,
+                    showRangeLabel = false,
                 )
-            }
-            if (pendingReviewSummary.transactionCount > 0) {
-                item {
-                    PendingReviewInsightsCard(
-                        summary = pendingReviewSummary,
-                        onReview = onReview,
-                    )
-                }
             }
             if (categoryTotals.isEmpty()) {
                 item { InsightsEmptyState(onAddTransaction = onAddTransaction) }
@@ -3779,6 +3634,9 @@ private fun InsightsPage(
                     }
                 }
             }
+            if (pendingReviewSummary.transactionCount > 0) {
+                item { PendingReviewInsightsCard(summary = pendingReviewSummary, onReview = onReview) }
+            }
         }
     }
 }
@@ -3789,7 +3647,7 @@ private fun PendingReviewInsightsCard(
     onReview: () -> Unit,
 ) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = Modifier.fillMaxWidth().testTag("insights_pending_review_card"),
     ) {
@@ -3810,7 +3668,7 @@ private fun PendingReviewInsightsCard(
             )
             Text(
                 "Already included in spending and grouped under Other; review only to correct details.",
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
             TextButton(
@@ -5018,6 +4876,7 @@ private fun DateRangeControls(
     availableMonths: List<YearMonth>,
     onModeSelected: (ChartRangeMode) -> Unit,
     onSelectedMonthChange: (YearMonth) -> Unit,
+    showRangeLabel: Boolean = true,
 ) {
     var monthPickerExpanded by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(mode) {
@@ -5030,13 +4889,10 @@ private fun DateRangeControls(
         modifier =
             Modifier
                 .fillMaxWidth()
-                .clip(MaterialTheme.shapes.medium)
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-                .padding(14.dp)
                 .testTag("date_range_controls"),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        BoxWithConstraints(
+        Box(
             modifier = Modifier.fillMaxWidth(),
         ) {
             val rangeButtons: @Composable () -> Unit = {
@@ -5058,20 +4914,11 @@ private fun DateRangeControls(
                     modifier = Modifier.testTag("range_mode_group"),
                 )
             }
-            if (maxWidth < 420.dp) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Date range", fontWeight = FontWeight.SemiBold)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (showRangeLabel) {
                     Text(dateRange.label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                    rangeButtons()
                 }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Date range", fontWeight = FontWeight.SemiBold)
-                        Text(dateRange.label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                    }
-                    rangeButtons()
-                }
+                rangeButtons()
             }
         }
         AnimatedVisibility(
@@ -5259,114 +5106,26 @@ private fun PickerNavButton(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SummaryBand(
-    rangeLabel: String,
-    metrics: DashboardMetrics,
-) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.inverseSurface),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Text(
-                text = "Spending in $rangeLabel",
-                color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.72f),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            AnimatedContent(
-                targetState = MoneyFormatter.formatUsd(metrics.spentCents),
-                transitionSpec = {
-                    fadeIn(
-                        tween(
-                            durationMillis = PennyMotion.DurationMedium,
-                            easing = PennyMotion.StandardDecelerateEasing,
-                        ),
-                    ).togetherWith(
-                        fadeOut(
-                            tween(
-                                durationMillis = PennyMotion.DurationShort,
-                                easing = PennyMotion.StandardAccelerateEasing,
-                            ),
-                        ),
-                    )
-                },
-                contentAlignment = Alignment.CenterEnd,
-                modifier = Modifier.fillMaxWidth(),
-                label = "summary_spending_amount",
-            ) { amount ->
-                Text(
-                    text = amount,
-                    color = MaterialTheme.colorScheme.inverseOnSurface,
-                    style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
-                    letterSpacing = 0.sp,
-                    textAlign = TextAlign.End,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+private fun SummaryBand(metrics: DashboardMetrics) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("Spent", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(MoneyFormatter.formatUsd(metrics.spentCents), style = MaterialTheme.typography.headlineMedium.copy(fontFeatureSettings = "tnum"))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Income", style = MaterialTheme.typography.bodySmall)
+                Text(MoneyFormatter.formatUsd(metrics.incomeCents), style = MaterialTheme.typography.bodySmall)
             }
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                SummaryPill("Transactions", metrics.transactionCount.toString(), Modifier.widthIn(min = 132.dp).weight(1f))
-                SummaryPill("Income", MoneyFormatter.formatUsd(metrics.incomeCents), Modifier.widthIn(min = 132.dp).weight(1f))
-                SummaryPill("Net", MoneyFormatter.formatUsd(metrics.netCents), Modifier.widthIn(min = 132.dp).weight(1f))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Net", style = MaterialTheme.typography.bodySmall)
+                Text(MoneyFormatter.formatUsd(metrics.netCents), style = MaterialTheme.typography.bodySmall)
             }
         }
-    }
-}
-
-@Composable
-private fun SummaryPill(
-    label: String,
-    value: String,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier =
-            modifier
-                .clip(MaterialTheme.shapes.large)
-                .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.06f))
-                .padding(horizontal = 10.dp, vertical = 7.dp),
-    ) {
         Text(
-            label,
-            color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.64f),
-            style = MaterialTheme.typography.labelSmall,
+            "${metrics.transactionCount} ${if (metrics.transactionCount == 1) "transaction" else "transactions"}" +
+                if (metrics.transferCents > 0) " · Transfers excluded" else "",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        AnimatedContent(
-            targetState = value,
-            transitionSpec = {
-                fadeIn(
-                    tween(
-                        durationMillis = PennyMotion.DurationMedium,
-                        easing = PennyMotion.StandardDecelerateEasing,
-                    ),
-                ).togetherWith(
-                    fadeOut(
-                        tween(
-                            durationMillis = PennyMotion.DurationShort,
-                            easing = PennyMotion.StandardAccelerateEasing,
-                        ),
-                    ),
-                )
-            },
-            contentAlignment = Alignment.CenterEnd,
-            modifier = Modifier.fillMaxWidth(),
-            label = "summary_$label",
-        ) { animatedValue ->
-            Text(
-                animatedValue,
-                color = MaterialTheme.colorScheme.inverseOnSurface,
-                style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                textAlign = TextAlign.End,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
     }
 }
 
@@ -5375,26 +5134,22 @@ private fun InsightsHeroSummary(
     totalCents: Long,
     range: DashboardDateRange,
     dayCount: Int,
+    hasTransfers: Boolean,
 ) {
     val averageCents = if (dayCount <= 0) 0L else totalCents / dayCount
-    val heading =
-        if (!range.startInclusive.plusDays(7).isBefore(range.endExclusive)) {
-            "Spent this week"
-        } else {
-            "Spent this month"
-        }
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(text = heading, style = MaterialTheme.typography.titleMedium)
+        Text(text = "Spent", style = MaterialTheme.typography.titleMedium)
         Text(
             text = MoneyFormatter.formatUsd(totalCents),
             style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
             modifier = Modifier.testTag("insights_total_amount"),
         )
         Text(
-            text = "${range.label} · avg ${MoneyFormatter.formatUsd(averageCents)}/day",
+            text = "${range.label} · avg ${MoneyFormatter.formatUsd(averageCents)}/day" +
+                if (hasTransfers) " · Transfers excluded" else "",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.testTag("insights_total_caption"),
@@ -5405,7 +5160,7 @@ private fun InsightsHeroSummary(
 /**
  * Hit targets, stated honestly: at the 360 dp reference width, [PagePadding]
  * (`horizontal = 20.dp`) leaves 320 dp, so a 7-bucket week row gives cells of
- * ≈44 × 140 dp — 4 dp under the 48 dp width guidance. This is a deliberate
+ * ≈44 × 112 dp — 4 dp under the 48 dp width guidance. This is a deliberate
  * deviation: the cell is full chart height, the whole cell (not just the drawn
  * bar) is the target, [Arrangement.spacedBy] is kept at 2.dp to maximise it,
  * and every cell carries `selectable` semantics so TalkBack and keyboard focus
@@ -5440,7 +5195,7 @@ private fun SpendingBucketsChart(
             modifier =
                 Modifier
                     .fillMaxWidth()
-                    .height(140.dp)
+                    .height(112.dp)
                     .semantics { contentDescription = chartSummary }
                     .testTag("spending_timeline_chart"),
         ) {
@@ -5549,7 +5304,7 @@ private fun CategoryRankList(
                 .testTag("category_breakdown_chart"),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("Where it went", fontWeight = FontWeight.SemiBold)
+        Text("Top categories", fontWeight = FontWeight.SemiBold)
         Column(
             modifier = Modifier.fillMaxWidth().selectableGroup(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -5915,8 +5670,27 @@ private fun TransactionPresentation(
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val stack = density.fontScale >= 1.3f || maxWidth + widthAdjustment < 280.dp
         val availablePx = with(density) { (if (stack) maxWidth else (maxWidth - 8.dp).coerceAtLeast(0.dp)).toPx() }
-        val scale = if (measuredWidth > availablePx && availablePx > 0) availablePx / measuredWidth else 1f
-        val amountWidth = with(density) { minOf(measuredWidth.toFloat(), availablePx).toDp() }
+        var scale = 1f
+        if (measuredWidth > availablePx && availablePx > 0) {
+            var low = 0f
+            var high = 1f
+            repeat(16) {
+                val candidate = (low + high) / 2f
+                val width = measurer.measure(
+                    amountText,
+                    style = amountStyle.copy(fontSize = amountStyle.fontSize * candidate),
+                    softWrap = false,
+                ).size.width
+                if (width <= availablePx - 1f) low = candidate else high = candidate
+            }
+            scale = low
+        }
+        val fittedWidth = measurer.measure(
+            amountText,
+            style = amountStyle.copy(fontSize = amountStyle.fontSize * scale),
+            softWrap = false,
+        ).size.width
+        val amountWidth = with(density) { minOf(fittedWidth.toFloat() + 1f, availablePx).toDp() }
         val accessibility = transaction.rowAccessibility()
         Column(modifier = Modifier.fillMaxWidth().semantics { contentDescription = accessibility }) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -7099,9 +6873,9 @@ private fun Transaction.rowSubtitle(showDate: Boolean): String {
 private fun Transaction.rowAccessibility(): String {
     val timestamp = transactedAtEpochMillis
     val date = when {
-        timestamp != null -> "Purchase ${Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).format(ListDateFormatter)}"
-        source == "simplefin" -> "Posted ${occurredAtDateTime().format(ShortDateFormatter)}"
-        else -> "Occurred ${occurredAtDateTime().format(ListDateFormatter)}"
+        timestamp != null -> "Purchase ${Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).format(AccessibilityDateTimeFormatter)}"
+        source == "simplefin" -> "Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}"
+        else -> "Occurred ${occurredAtDateTime().format(AccessibilityDateTimeFormatter)}"
     }
     return listOfNotNull(accountName?.trim()?.takeIf { it.isNotEmpty() }, date, recurringInterval?.let { "Recurring ${it.label}" }).joinToString(", ")
 }
@@ -7173,6 +6947,8 @@ private val TimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val ListDateFormatter = DateTimeFormatter.ofPattern("MMM d, h:mm a")
 private val ShortDateFormatter = DateTimeFormatter.ofPattern("MMM d")
 private val RowTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
+private val AccessibilityDateFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy")
+private val AccessibilityDateTimeFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm a")
 private val DayHeaderFormatter = DateTimeFormatter.ofPattern("EEEE, MMM d")
 private val MonthLabelFormatter = DateTimeFormatter.ofPattern("MMM", Locale.US)
 private const val SimpleFinCreateUrl = "https://bridge.simplefin.org/simplefin/create"

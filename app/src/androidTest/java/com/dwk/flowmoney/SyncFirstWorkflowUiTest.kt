@@ -251,7 +251,6 @@ class SyncFirstWorkflowUiTest {
         composeRule.setContent {
             MaterialTheme {
                 FlowMoneyTopAppBar(
-                    selectedTab = DashboardTab.Overview,
                     onData = { dataClicks++ },
                     simpleFin = simpleFin,
                     syncHealthNowEpochMillis = now,
@@ -547,13 +546,8 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithText("as of ${listDateText(balanceDateSeconds * 1000L)}").assertIsDisplayed()
     }
 
-    /**
-     * The Overview banner is a review prompt, not a sync log: a healthy connection must say nothing
-     * about its last successful sync. Only the states the user has to act on keep a status line, and
-     * the pending-review count stays regardless.
-     */
     @Test
-    fun overviewBannerDropsHealthySyncTimestampsButKeepsReviewAndActionableStates() {
+    fun overviewReviewStaysSeparateFromTopBarConnectionStatus() {
         FlowMoneyDatabase.resetForTest()
         context.deleteDatabase("flow_money.db")
         val dao = FlowMoneyDatabase.get(context).simpleFinDao()
@@ -590,58 +584,28 @@ class SyncFirstWorkflowUiTest {
         }
 
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithTag("overview_sync_review_banner").assertExists() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2") }.isSuccess
         }
-        composeRule.waitUntil(5_000) {
-            runCatching {
-                composeRule
-                    .onNodeWithTag("overview_pending_review_count")
-                    .assertTextEquals("2 synced transactions available for optional corrections")
-            }.isSuccess
-        }
-        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
-        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
         composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed()
-        composeRule.onNodeWithTag("overview_sync_data_action").assertDoesNotExist()
-
-        // A never-synced but healthy connection is still silent about sync history.
-        runBlocking { dao.upsertProfile(healthy.copy(lastSuccessfulSyncAtEpochMillis = null)) }
-        composeRule.waitForIdle()
-        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
+        composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed()
         composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
-        composeRule
-            .onNodeWithTag("overview_pending_review_count")
-            .assertTextEquals("2 synced transactions available for optional corrections")
 
-        // States the user must act on keep their status line.
         runBlocking { dao.upsertProfile(healthy.copy(isPaused = true, lastError = "SimpleFIN reconnect required")) }
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithText("Reconnect required").assertIsDisplayed() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Bank reconnect required; open Data")) }.isSuccess
         }
-        composeRule.onNodeWithTag("overview_sync_data_action").assertIsDisplayed()
-
         runBlocking { dao.clearProfile() }
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithText("Bank not connected").assertIsDisplayed() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Bank sync disconnected; open Data to connect")) }.isSuccess
         }
-        composeRule.onNodeWithText("Connect bank").assertIsDisplayed()
-        composeRule
-            .onNodeWithTag("overview_pending_review_count")
-            .assertTextEquals("2 synced transactions available for optional corrections")
-
-        // With nothing to review the banner falls back to its empty line, still without sync history.
+        composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2")
         composeRule.runOnIdle {
             gateway.rows.value = gateway.rows.value.map { it.copy(reviewedAtEpochMillis = 1L) }
             gateway.pending.value = emptyList()
         }
         composeRule.waitUntil(5_000) {
-            runCatching {
-                composeRule
-                    .onNodeWithTag("overview_pending_review_count")
-                    .assertTextEquals("No synced transactions to check")
-            }.isSuccess
+            runCatching { composeRule.onNodeWithTag("overview_review_action").assertDoesNotExist() }.isSuccess
         }
-        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
     }
 
     private class BannerGateway(

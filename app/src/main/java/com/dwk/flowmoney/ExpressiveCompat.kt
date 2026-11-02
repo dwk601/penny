@@ -2,6 +2,10 @@ package com.dwk.flowmoney
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.heightIn
@@ -10,21 +14,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ButtonGroup
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumFlexibleTopAppBar
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.RichTimePickerDialog
 import androidx.compose.material3.SelectableDates
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TimePickerDefaults
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
@@ -33,47 +35,37 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import java.time.Clock
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun PennyOverviewTopAppBar(
-    title: @Composable () -> Unit,
-    subtitle: @Composable () -> Unit,
+    status: @Composable () -> Unit,
     onData: () -> Unit,
+    onAddTransaction: () -> Unit,
     modifier: Modifier = Modifier,
-    scrollBehavior: TopAppBarScrollBehavior? = null,
 ) {
-    MediumFlexibleTopAppBar(
-        title = subtitle,
-        navigationIcon = {
-            Box(
-                modifier = Modifier.padding(start = 16.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                title()
-            }
-        },
-        actions = {
-            TextButton(
-                onClick = onData,
-                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
-            ) { Text("Data") }
-        },
-        modifier = modifier,
-        windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top),
-        colors =
-            TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-                titleContentColor = MaterialTheme.colorScheme.onSurface,
-                actionIconContentColor = MaterialTheme.colorScheme.onSurface,
-            ),
-        scrollBehavior = scrollBehavior,
-    )
+    Row(
+        modifier = modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+            .heightIn(min = 64.dp).padding(start = 16.dp).testTag("penny_top_bar"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Penny", style = MaterialTheme.typography.titleLarge, maxLines = 1)
+        Box(modifier = Modifier.weight(1f).padding(start = 4.dp), contentAlignment = Alignment.CenterEnd) { status() }
+        TextButton(onClick = onData, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)) { Text("Data") }
+        IconButton(
+            onClick = onAddTransaction,
+            modifier = Modifier.width(48.dp).heightIn(min = 48.dp).testTag("add_transaction_fab")
+                .semantics { contentDescription = "Add transaction" },
+        ) { Icon(painter = painterResource(R.drawable.ic_add), contentDescription = null) }
+    }
 }
 
 @Composable

@@ -7,9 +7,11 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -36,6 +38,17 @@ class InsightsUiTest {
         composeRule.onNodeWithText("Loading your spending").assertIsDisplayed()
         composeRule.onNodeWithText("No spending in this range").assertDoesNotExist()
         composeRule.onNodeWithTag("spending_timeline_chart").assertDoesNotExist()
+    }
+
+    @Test
+    fun historicalRangeIsShownOnceWithoutClaimingThisMonth() {
+        setScreen(uiState = reportingState())
+
+        composeRule.onNodeWithText("Spent").assertIsDisplayed()
+        composeRule.onNodeWithText("Spent this month").assertDoesNotExist()
+        composeRule.onNodeWithText("Spent this week").assertDoesNotExist()
+        composeRule.onAllNodesWithText("July 2026", substring = true).assertCountEquals(1)
+        composeRule.onNodeWithTag("insights_total_caption").assertIsDisplayed()
     }
 
     @Test
@@ -198,7 +211,7 @@ class InsightsUiTest {
             selectedTab = DashboardTab.Overview,
         )
 
-        composeRule.onNodeWithText("3 total · 2 in range").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("2 transactions · Transfers excluded").performScrollTo().assertIsDisplayed()
     }
 
     private fun setScreen(
@@ -289,7 +302,7 @@ class InsightsUiTest {
         return MainUiState(
             isLoading = false,
             sortedTransactions = transactions,
-            latestSpendingTransactions = transactions,
+            latestSpendingTransactions = transactions.filter { it.effectiveFlowKind == FlowKind.NORMAL && it.cents < 0 }.take(3),
             rangeTransactions = transactions,
             metrics = DashboardAnalytics.metrics(transactions),
             dateRange = RANGE,

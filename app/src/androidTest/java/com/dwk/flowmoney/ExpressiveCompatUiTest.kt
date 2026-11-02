@@ -45,9 +45,9 @@ class ExpressiveCompatUiTest {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(1.5f)) {
                     FlowMoneyTheme(dynamicColor = false) {
                         PennyOverviewTopAppBar(
-                            title = { Text("Penny") },
-                            subtitle = { Text("Overview") },
+                            status = { Text("Disconnected") },
                             onData = { dataClicks++ },
+                            onAddTransaction = {},
                         )
                     }
                 }
@@ -55,7 +55,7 @@ class ExpressiveCompatUiTest {
         }
 
         composeRule.onNodeWithText("Penny").assertIsDisplayed()
-        composeRule.onNodeWithText("Overview").assertIsDisplayed()
+        composeRule.onNodeWithText("Disconnected").assertIsDisplayed()
         composeRule.onNodeWithText("Data").assertIsDisplayed().performClick()
         composeRule.runOnIdle { assertEquals(1, dataClicks) }
     }
@@ -65,7 +65,6 @@ class ExpressiveCompatUiTest {
         composeRule.setContent {
             FlowMoneyTheme(dynamicColor = false) {
                 FlowMoneyTopAppBar(
-                    selectedTab = DashboardTab.Overview,
                     onData = {},
                 )
             }
@@ -77,7 +76,7 @@ class ExpressiveCompatUiTest {
             "Penny and Data should share one row: ${pennyBounds.center.y} vs ${dataBounds.center.y}",
             kotlin.math.abs(pennyBounds.center.y - dataBounds.center.y) <= 8f,
         )
-        composeRule.onNodeWithText("Overview").assertIsDisplayed()
+        composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed()
     }
 
     @Test

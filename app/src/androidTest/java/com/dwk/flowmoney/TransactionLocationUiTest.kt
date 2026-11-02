@@ -15,6 +15,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextClearance
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -194,6 +196,21 @@ class TransactionLocationUiTest {
         scrollTo("transaction_country_filter_group")
         composeRule.onNodeWithTag("transaction_country_filter_us").assertExists()
         composeRule.onNodeWithTag("transaction_country_filter_ca").assertDoesNotExist()
+    }
+
+    @Test fun freeTextSearchMatchesCityAndStateAndClearRestoresHistory() {
+        setTransactionsTab()
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Seattle")
+        assertVisible("tx-seattle")
+        assertHidden("tx-portland-or", "tx-portland-me", "tx-nowhere")
+        scrollTo("transaction_where_filter")
+        composeRule.onNodeWithTag("transaction_where_filter").performTextClearance()
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("WA")
+        assertVisible("tx-seattle")
+        assertHidden("tx-portland-or", "tx-portland-me", "tx-nowhere")
+        scrollTo("transaction_filter_clear_compact")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
+        assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")
     }
 
     @Test fun selectingADuplicatedCityNarrowsToExactlyThatPlace() {

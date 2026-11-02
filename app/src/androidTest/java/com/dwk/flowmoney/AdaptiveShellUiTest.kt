@@ -102,7 +102,13 @@ class AdaptiveShellUiTest {
         val bottomNavigation = bounds("compact_navigation")
         assertTrue("content=$compactContent navigation=$bottomNavigation", compactContent.bottom <= bottomNavigation.top)
         val fab = bounds("add_transaction_fab")
-        assertTrue("fab=$fab navigation=$bottomNavigation", fab.bottom <= bottomNavigation.top)
+        val bar = bounds("penny_top_bar")
+        assertTrue("add=$fab bar=$bar", fab.top >= bar.top && fab.bottom <= bar.bottom && fab.right <= bar.right)
+        assertTrue("add=$fab content=$compactContent", fab.bottom <= compactContent.top)
+        assertTrue("add=$fab navigation=$bottomNavigation", fab.bottom <= bottomNavigation.top)
+        composeRule.onAllNodesWithTag("add_transaction_fab").assertCountEquals(1)
+        val compactDensity = composeRule.onNodeWithTag("add_transaction_fab").fetchSemanticsNode().layoutInfo.density.density
+        assertTrue(fab.width / compactDensity >= 48f && fab.height / compactDensity >= 48f)
 
         composeRule.runOnIdle { resize(600.dp) }
         val wideContent = bounds("destination_content")
@@ -110,8 +116,13 @@ class AdaptiveShellUiTest {
         assertTrue("rail=$rail content=$wideContent", rail.right <= wideContent.left)
         val root = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
         val wideFab = bounds("add_transaction_fab")
-        assertTrue("content=$wideContent root=$root", wideContent.bottom < root.bottom)
-        assertTrue("fab=$wideFab content=$wideContent", wideFab.bottom <= wideContent.bottom)
+        assertTrue("content=$wideContent root=$root", wideContent.bottom <= root.bottom)
+        val wideBar = bounds("penny_top_bar")
+        assertTrue("add=$wideFab bar=$wideBar", wideFab.top >= wideBar.top && wideFab.bottom <= wideBar.bottom && wideFab.right <= wideBar.right)
+        assertTrue("add=$wideFab content=$wideContent", wideFab.bottom <= wideContent.top)
+        val wideDensity = composeRule.onNodeWithTag("add_transaction_fab").fetchSemanticsNode().layoutInfo.density.density
+        assertTrue(wideFab.width / wideDensity >= 48f && wideFab.height / wideDensity >= 48f)
+        composeRule.onAllNodesWithTag("add_transaction_fab").assertCountEquals(1)
     }
 
     @Test

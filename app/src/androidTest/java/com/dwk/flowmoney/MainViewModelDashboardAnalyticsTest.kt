@@ -137,6 +137,47 @@ class MainViewModelDashboardAnalyticsTest {
             }
         }
 
+    @Test fun latestSpendingTracksRangeAndEffectiveTransferOverrides() = runBlocking {
+        val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val older = LocalDate.now().minusDays(9).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = MutableStateFlow(listOf(
+            transaction("expense-a", start + 8, -100, "Food"),
+            transaction("income", start + 7, 500, "Salary"),
+            transaction("transfer", start + 6, -200, "Food").copy(flowKind = FlowKind.TRANSFER),
+            transaction("expense-b", start + 5, -300, "Food"),
+            transaction("expense-c", start + 4, -400, "Food"),
+            transaction("expense-d", start + 3, -500, "Food"),
+            transaction("out-of-range", older, -600, "Food"),
+        ))
+        withContext(Dispatchers.Main) {
+            val store = ViewModelStore()
+            val viewModel = ViewModelProvider(
+                store,
+                MainViewModel.Factory(FakeGateway(rows), SimpleFinSyncRepository(context), MutableStateFlow(emptyList())),
+            )[MainViewModel::class.java]
+            try {
+                viewModel.reportInitializationComplete()
+                val initial = viewModel.uiState.first { !it.isLoading }
+                assertEquals(listOf("expense-a", "expense-b", "expense-c"), initial.latestSpendingTransactions.map { it.id })
+                rows.value = rows.value.map {
+                    when (it.id) {
+                        "expense-a" -> it.copy(flowKindOverride = FlowKind.TRANSFER)
+                        "transfer" -> it.copy(flowKindOverride = FlowKind.NORMAL)
+                        else -> it
+                    }
+                }
+                val updated = viewModel.uiState.first { state ->
+                    state.latestSpendingTransactions.firstOrNull()?.id == "transfer"
+                }
+                assertEquals(listOf("transfer", "expense-b", "expense-c"), updated.latestSpendingTransactions.map { it.id })
+                assertEquals(FlowKind.TRANSFER, updated.sortedTransactions.first { it.id == "transfer" }.flowKind)
+                assertEquals(FlowKind.NORMAL, updated.sortedTransactions.first { it.id == "expense-a" }.flowKind)
+            } finally {
+                store.clear()
+            }
+        }
+    }
+
     private class FakeGateway(
         override val transactions: Flow<List<Transaction>>,
     ) : TransactionGateway {

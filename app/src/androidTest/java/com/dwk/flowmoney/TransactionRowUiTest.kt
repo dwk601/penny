@@ -25,6 +25,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.time.LocalDateTime
+import java.time.ZoneId
 
 class TransactionRowUiTest {
     @get:Rule val composeRule = createComposeRule()
@@ -84,6 +86,26 @@ class TransactionRowUiTest {
         val amount = composeRule.onNodeWithText("-\$7.83", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         assertTrue("amount should share the merchant line", amount.top < merchant.bottom && merchant.top < amount.bottom)
         composeRule.onNodeWithText("Coffee · New York, NY", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test fun bankRowUsesPurchaseTimeRatherThanPostingTime() {
+        val posted = LocalDateTime.of(2026, 7, 11, 2, 30).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val purchased = LocalDateTime.of(2026, 7, 10, 14, 15).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val transaction = transaction("purchase-time", -100).copy(
+            source = "simplefin", accountName = "Checking", occurredAtEpochMillis = posted,
+            transactedAtEpochMillis = purchased,
+        )
+        setTransactionScreen(transaction)
+        scrollToTransaction(transaction.id)
+        composeRule.onNodeWithText("Other · Checking · 2:15 PM", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test fun localRowWithoutPurchaseTimeUsesOccurrenceTime() {
+        val occurred = LocalDateTime.of(2026, 7, 10, 9, 45).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val transaction = transaction("local-time", -100).copy(occurredAtEpochMillis = occurred)
+        setTransactionScreen(transaction)
+        scrollToTransaction(transaction.id)
+        composeRule.onNodeWithText("Other · 9:45 AM", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test fun rowAt280DpDoesNotStack() = assertAmountPlacement(screenWidth = 320, stacked = false)
