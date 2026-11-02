@@ -2969,15 +2969,9 @@ private fun TransactionsPage(
         ) {
             item {
                 TransactionsHeader(
-                    title = "Transactions",
                     count = filteredTransactions.size,
                     detail = headerDetail,
-                )
-                Text(
-                    "Spent ${MoneyFormatter.formatUsd(filteredMetrics.spentCents)}" +
-                        if (filteredMetrics.transferCents > 0) " · Transfers excluded" else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    metrics = filteredMetrics,
                 )
             }
             item {
@@ -5411,20 +5405,23 @@ private fun InsightsSelectionHeader(
 
 @Composable
 private fun TransactionsHeader(
-    title: String,
     count: Int,
     detail: String,
+    metrics: DashboardMetrics,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = title,
+            text = "Transactions",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
-        Text("$count total · $detail", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · $count total · $detail" +
+                if (metrics.transferCents > 0) " · Transfers excluded" else "",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

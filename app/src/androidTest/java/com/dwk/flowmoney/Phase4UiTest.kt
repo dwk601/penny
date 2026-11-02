@@ -337,6 +337,27 @@ class Phase4UiTest {
     }
 
     @Test
+    fun transactionsHeadingStaysSingleLineAtTwoXFont() {
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(360.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    MaterialTheme {
+                        FlowMoneyScreen(
+                            uiState = MainUiState(isLoading = false), selectedTab = DashboardTab.Transactions,
+                            onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {},
+                            onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {},
+                        )
+                    }
+                }
+            }
+        }
+        val layouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("Transactions").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertEquals(1, layouts.single().lineCount)
+        composeRule.onNodeWithText("Spent \$0.00 · 0 total · All time").assertIsDisplayed()
+    }
+
+    @Test
     fun dayTotalsExcludeTransfersAndReactToOverride() {
         val date = java.time.LocalDate.of(2026, 7, 10)
         val timestamp = date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
