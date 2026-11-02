@@ -20,6 +20,7 @@ import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyDescendant
@@ -352,6 +353,29 @@ class SyncFirstWorkflowUiTest {
         scroll("transaction_filter_toggle")
         composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals("All time")
         composeRule.onNodeWithTag("transaction_time_filter_group").assertDoesNotExist()
+    }
+
+    @Test fun disconnectedAndPendingLabelsAndRoutesRemainDistinctAtAllScales() {
+        var scale by mutableStateOf(1f)
+        var pending by mutableStateOf(false)
+        var busy by mutableStateOf(false)
+        var dataClicks = 0
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                FlowMoneyTheme(dynamicColor = false) {
+                    FlowMoneyTopAppBar(onData = { dataClicks++ }, onAddTransaction = {}, simpleFin = SimpleFinUiState(isConnectionPending = pending), operation = if (busy) DataOperation.Import else null)
+                }
+            }
+        }
+        for (fontScale in listOf(1f, 1.5f, 2f)) for (isPending in listOf(false, true)) {
+            composeRule.runOnIdle { scale = fontScale; pending = isPending; busy = false }
+            val label = if (isPending) "Pending" else if (fontScale >= 1.5f) "No bank" else "Disconnected"
+            composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+            val description = if (isPending) "Connection pending; open Data to retry" else "Bank sync disconnected; open Data to connect"
+            composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, description)).performClick()
+        }
+        composeRule.runOnIdle { assertEquals(6, dataClicks); busy = true }
+        composeRule.onNodeWithTag("sync_health_action").assertIsNotEnabled()
     }
 
     @Test

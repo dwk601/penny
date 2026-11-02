@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -291,9 +292,10 @@ internal data class DashboardNavigationState(
     val restoredNavigation: Boolean = false,
     val userSelectedBeforeLoading: Boolean = false,
     val externalRouteHandled: Boolean = false,
+    val reviewOriginTab: DashboardTab = DashboardTab.Overview,
 )
 
-private val DashboardNavigationStateSaver =
+internal val DashboardNavigationStateSaver =
     Saver<DashboardNavigationState, Any>(
         save = { state ->
             listOf(
@@ -301,6 +303,7 @@ private val DashboardNavigationStateSaver =
                 state.coldStartRoutingHandled,
                 state.userSelectedBeforeLoading,
                 state.externalRouteHandled,
+                state.reviewOriginTab.name,
             )
         },
         restore = { saved ->
@@ -313,6 +316,7 @@ private val DashboardNavigationStateSaver =
                 restoredNavigation = true,
                 userSelectedBeforeLoading = (values?.getOrNull(2) as? Boolean) ?: false,
                 externalRouteHandled = (values?.getOrNull(3) as? Boolean) ?: false,
+                reviewOriginTab = DashboardTab.entries.firstOrNull { it.name == values?.getOrNull(4) && it != DashboardTab.Review } ?: DashboardTab.Overview,
             )
         },
     )
@@ -1194,8 +1198,13 @@ fun FlowMoneyApp(
             }
         }
 
+    BackHandler(enabled = selectedTab == DashboardTab.Review) {
+        navigationState = navigationState.copy(selectedTab = navigationState.reviewOriginTab)
+    }
+
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
+        reviewOriginTab = navigationState.reviewOriginTab,
         snackbarHostState = snackbarHostState,
         onTabSelected = { tab ->
             navigationState =
@@ -1232,6 +1241,7 @@ fun FlowMoneyApp(
                 navigationState =
                     navigationState.copy(
                         selectedTab = DashboardTab.Review,
+                        reviewOriginTab = selectedTab.takeUnless { it == DashboardTab.Review } ?: DashboardTab.Overview,
                         coldStartRoutingHandled = true,
                     )
             },
@@ -1870,7 +1880,8 @@ internal data class SyncHealthUiState(
         SyncHealthKind.Syncing -> "Syncing"
         SyncHealthKind.Error -> "Error"
         SyncHealthKind.ReconnectRequired -> "Reconnect"
-        SyncHealthKind.Disconnected, SyncHealthKind.Pending -> "Disconnected"
+        SyncHealthKind.Disconnected -> "Disconnected"
+        SyncHealthKind.Pending -> "Pending"
     }
 }
 
@@ -1964,18 +1975,20 @@ internal fun AdaptiveFlowMoneyShell(
     syncHealthNowEpochMillis: Long = System.currentTimeMillis(),
     onManualSync: () -> Unit = {},
     modifier: Modifier = Modifier,
+    reviewOriginTab: DashboardTab = DashboardTab.Overview,
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    val navigationTab = if (selectedTab == DashboardTab.Review) reviewOriginTab.takeUnless { it == DashboardTab.Review } ?: DashboardTab.Overview else selectedTab
     BoxWithConstraints(modifier = modifier) {
         val isWide = maxWidth >= NavigationBreakpoint
         if (isWide) {
             Row(modifier = Modifier.fillMaxSize()) {
                 FlowMoneyNavigationRail(
-                    selectedTab = selectedTab,
+                    selectedTab = navigationTab,
                     onTabSelected = onTabSelected,
                 )
                 FlowMoneyScaffold(
-                    selectedTab = selectedTab,
+                    selectedTab = navigationTab,
                     isWide = true,
                     snackbarHostState = snackbarHostState,
                     onTabSelected = onTabSelected,
@@ -1991,7 +2004,7 @@ internal fun AdaptiveFlowMoneyShell(
             }
         } else {
             FlowMoneyScaffold(
-                selectedTab = selectedTab,
+                selectedTab = navigationTab,
                 isWide = false,
                 snackbarHostState = snackbarHostState,
                 onTabSelected = onTabSelected,
@@ -2071,10 +2084,22 @@ internal fun FlowMoneyTopAppBar(
 ) {
     val syncHealth = syncHealthUiState(simpleFin, operation, syncHealthNowEpochMillis)
     val syncActionEnabled = operation == null
+    val density = LocalDensity.current
+    val label = if (density.fontScale >= 1.5f) when (syncHealth.kind) {
+        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
+        SyncHealthKind.Syncing -> "Syncing"
+        SyncHealthKind.Error -> "Error"
+        SyncHealthKind.ReconnectRequired -> "Fix"
+        SyncHealthKind.Disconnected -> "No bank"
+        SyncHealthKind.Pending -> "Pending"
+    } else syncHealth.label
+    val labelStyle = MaterialTheme.typography.labelSmall
+    val measurer = rememberTextMeasurer()
+    val labelWidth = remember(label, labelStyle, density, measurer) { measurer.measure(label, style = labelStyle, softWrap = false).size.width }
     PennyTopAppBar(
         status = {
             Box(
-                modifier = Modifier.heightIn(min = 48.dp).clip(MaterialTheme.shapes.small)
+                modifier = Modifier.widthIn(min = 48.dp).heightIn(min = 48.dp).clip(MaterialTheme.shapes.small)
                     .clickable(enabled = syncActionEnabled, role = Role.Button) {
                         if (syncHealth.manualSync) onManualSync() else onData()
                     }.semantics {
@@ -2084,20 +2109,15 @@ internal fun FlowMoneyTopAppBar(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = if (LocalDensity.current.fontScale >= 1.5f) when (syncHealth.kind) {
-                        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
-                        SyncHealthKind.Syncing -> "Syncing"
-                        SyncHealthKind.Error -> "Error"
-                        SyncHealthKind.ReconnectRequired -> "Fix"
-                        SyncHealthKind.Disconnected, SyncHealthKind.Pending -> "Off"
-                    } else syncHealth.label,
+                    text = label,
+                    modifier = Modifier.width(with(density) { labelWidth.toDp() } + 2.dp),
                     color =
                         if (syncHealth.kind == SyncHealthKind.Error || syncHealth.kind == SyncHealthKind.ReconnectRequired) {
                             MaterialTheme.colorScheme.error
                         } else {
                             MaterialTheme.colorScheme.primary
                         },
-                    style = MaterialTheme.typography.labelSmall,
+                    style = labelStyle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -2284,6 +2304,7 @@ internal fun FlowMoneyScreen(
                     onBulkCategorize = onBulkCategorizeReview,
                     onBulkAcceptOther = onBulkAcceptOther,
                     operationBusy = reviewOperationBusy,
+                    isActive = selectedTab == DashboardTab.Review,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -2451,9 +2472,14 @@ internal fun ReviewPage(
     onBulkAcceptOther: (List<String>) -> Unit,
     operationBusy: Boolean,
     modifier: Modifier = Modifier,
+    isActive: Boolean = true,
 ) {
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedIds by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    BackHandler(enabled = isActive && selectionMode) {
+        selectedIds = emptyList()
+        selectionMode = false
+    }
     var confirmAcceptOther by rememberSaveable { mutableStateOf(false) }
     val orderedTransactions =
         remember(unreviewedTransactions) {

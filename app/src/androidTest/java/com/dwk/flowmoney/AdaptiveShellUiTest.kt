@@ -18,6 +18,7 @@ import androidx.compose.ui.test.ForcedSize
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -132,14 +133,20 @@ class AdaptiveShellUiTest {
             var width by remember { mutableStateOf(599.dp) }
             resize = { width = it }
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width, 800.dp))) {
-                MaterialTheme { TestShell(DashboardTab.Review, {}) }
+                MaterialTheme { TestShell(DashboardTab.Review, {}, reviewOriginTab = DashboardTab.Insights) }
             }
         }
 
         composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
+        composeRule.onNodeWithTag("tab_insights").assertIsSelected()
+        composeRule.onNodeWithTag("tab_overview").assertIsNotSelected()
+        composeRule.onNodeWithTag("tab_transactions").assertIsNotSelected()
         composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
         composeRule.runOnIdle { resize(600.dp) }
         composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
+        composeRule.onNodeWithTag("tab_insights").assertIsSelected()
+        composeRule.onNodeWithTag("tab_overview").assertIsNotSelected()
+        composeRule.onNodeWithTag("tab_transactions").assertIsNotSelected()
         composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
     }
 
@@ -187,9 +194,11 @@ class AdaptiveShellUiTest {
 private fun TestShell(
     selectedTab: DashboardTab,
     onTabSelected: (DashboardTab) -> Unit,
+    reviewOriginTab: DashboardTab = DashboardTab.Overview,
 ) {
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
+        reviewOriginTab = reviewOriginTab,
         snackbarHostState = remember { SnackbarHostState() },
         onTabSelected = onTabSelected,
         onAddTransaction = {},

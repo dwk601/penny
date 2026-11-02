@@ -11,6 +11,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
@@ -22,10 +24,12 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -78,6 +82,46 @@ class ExpressiveCompatUiTest {
             kotlin.math.abs(pennyBounds.center.y - dataBounds.center.y) <= 8f,
         )
         composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed()
+    }
+
+    @Test fun statusUsesMeasuredSecondRowWithoutTruncation() {
+        var width by mutableStateOf(300)
+        var scale by mutableStateOf(1.5f)
+        var pending by mutableStateOf(false)
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyTopAppBar(onData = {}, onAddTransaction = {}, simpleFin = SimpleFinUiState(isConnectionPending = pending))
+                    }
+                }
+            }
+        }
+        var sawSingle = false
+        var sawSecond = false
+        for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1.5f, 2f)) for (isPending in listOf(false, true)) {
+            composeRule.runOnIdle { width = screenWidth; scale = fontScale; pending = isPending }
+            val text = composeRule.onNodeWithText(if (isPending) "Pending" else "No bank", useUnmergedTree = true).assertIsDisplayed()
+            val layouts = mutableListOf<TextLayoutResult>()
+            text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertFalse("$screenWidth/$fontScale overflow: ${layouts.single()}", layouts.single().hasVisualOverflow)
+            assertFalse(layouts.single().isLineEllipsized(0))
+            val title = composeRule.onNodeWithText("Penny").fetchSemanticsNode().boundsInRoot
+            val statusNode = composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed().fetchSemanticsNode()
+            val status = statusNode.boundsInRoot
+            val data = composeRule.onNodeWithTag("top_bar_data").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            val add = composeRule.onNodeWithTag("add_transaction_fab").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            val bar = composeRule.onNodeWithTag("penny_top_bar").fetchSemanticsNode().boundsInRoot
+            val density = statusNode.layoutInfo.density.density
+            listOf(status, data, add).forEach { assertTrue("target $it density=$density", it.width / density >= 47.5f && it.height / density >= 47.5f) }
+            assertTrue(kotlin.math.abs(title.center.y - data.center.y) < 8f)
+            assertTrue(status.left >= bar.left && status.right <= bar.right && status.top >= bar.top && status.bottom <= bar.bottom)
+            val fits = title.width + status.width + data.width + add.width + 20f * density <= bar.width + 1f
+            if (fits) { sawSingle = true; assertTrue("should fit in one row", status.top < title.bottom) }
+            else { sawSecond = true; assertTrue("should move to second row", status.top >= data.bottom) }
+        }
+        assertTrue("expected a fitting configuration", sawSingle)
+        assertTrue("expected a non-fitting configuration", sawSecond)
     }
 
     @Test
