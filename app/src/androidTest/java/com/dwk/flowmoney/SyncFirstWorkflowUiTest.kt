@@ -870,7 +870,7 @@ class SyncFirstWorkflowUiTest {
         composeRule.waitUntil(5_000) {
             runCatching { composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2") }.isSuccess
         }
-        composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed()
+        composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed().assertContentDescriptionEquals("Review 2 synced transactions")
         composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed()
         composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
 
@@ -896,6 +896,10 @@ class SyncFirstWorkflowUiTest {
         }
         assertNoOverviewSyncActions()
         composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2")
+        composeRule.runOnIdle { gateway.rows.value = listOf(pending.first()); gateway.pending.value = listOf(pending.first()) }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("overview_review_action").assertContentDescriptionEquals("Review 1 synced transaction") }.isSuccess
+        }
         composeRule.runOnIdle {
             gateway.rows.value = gateway.rows.value.map { it.copy(reviewedAtEpochMillis = 1L) }
             gateway.pending.value = emptyList()

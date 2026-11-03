@@ -185,7 +185,10 @@ class TransactionLocationUiTest {
         val date = LocalDate.of(2026, 7, 10).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val rows = (0..11).map { index ->
             Transaction("sheet-$index", date + 11 - index, "Merchant $index", "Other", "", -12300 - index,
-                accountName = "Checking", locationState = if (index == 0) "NY" else null)
+                accountName = "Checking", locationState = if (index == 0) "NY" else null,
+                source = if (index == 0) "simplefin" else "manual",
+                transactedAtEpochMillis = if (index == 0) date - 2 * 86_400_000L else null,
+                recurringInterval = if (index == 0) RecurrenceInterval.Monthly else null)
         }.reversed()
         var edited: String? = null
         val geocoder = PlaceGeocoder(FlowMoneyDatabase.get(context).placeGeocodeDao())
@@ -198,7 +201,8 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithText("Other · NY", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_map_divider_sheet-0", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_content_sheet-0").assertExists()
-        composeRule.onNode(hasText("Jul 10") and hasAnyAncestor(hasTestTag("transaction_content_sheet-0")), useUnmergedTree = true).assertExists()
+        composeRule.onNode(hasText("Jul 8 · posted Jul 10") and hasAnyAncestor(hasTestTag("transaction_content_sheet-0")), useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_repeat_sheet-0", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithText("-\$123.00", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_map_rows").performScrollToNode(hasTestTag("transaction_content_sheet-11"))
         composeRule.onNodeWithTag("transaction_map_divider_sheet-11", useUnmergedTree = true).assertDoesNotExist()

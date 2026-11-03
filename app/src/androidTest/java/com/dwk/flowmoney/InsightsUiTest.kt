@@ -143,7 +143,12 @@ class InsightsUiTest {
     @Test fun allCategoriesReconcileExpandDrillDownAndReset() {
         val time = DAY.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
         val categories = listOf("Food", "Housing", "Travel", "Other", "Bills", "Coffee")
-        val rows = categories.mapIndexed { index, category -> Transaction("cat-$index", time, "Merchant $index", category, "", -(600 - index * 100), source = if (index == 3) "simplefin" else "manual") } +
+        val rows = categories.mapIndexed { index, category ->
+            Transaction("cat-$index", time, "Merchant $index", category, "", -(600 - index * 100), source = if (index == 3 || index == 5) "simplefin" else "manual",
+                transactedAtEpochMillis = if (index == 5) time - 2 * 86_400_000L else null,
+                reviewedAtEpochMillis = if (index == 5) 1L else null,
+                recurringInterval = if (index == 5) RecurrenceInterval.Monthly else null)
+        } +
             Transaction("transfer", time, "Transfer", "Food", "", -9000, flowKind = FlowKind.TRANSFER)
         val totals = DashboardAnalytics.categoryTotals(rows, limit = Int.MAX_VALUE)
         assertEquals(2100L, totals.sumOf { it.cents })
@@ -159,7 +164,8 @@ class InsightsUiTest {
         list.performScrollToNode(hasTestTag("insight_categories_expand"))
         composeRule.onNodeWithText("2 more categories · \$3.00").assertIsDisplayed()
         composeRule.onNodeWithTag("insight_category_bills").assertDoesNotExist()
-        composeRule.onNodeWithTag("insight_categories_expand").performClick()
+        composeRule.onNodeWithTag("insight_categories_expand").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed")).performClick()
+        composeRule.onNodeWithTag("insight_categories_expand").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Expanded"))
         composeRule.onNodeWithTag("insight_category_food").performClick()
         list.performScrollToNode(hasTestTag("insight_categories_expand"))
         composeRule.onNodeWithText("Show less").performClick()
@@ -172,6 +178,8 @@ class InsightsUiTest {
         list.performScrollToNode(hasTestTag("insight_transaction_cat-5"))
         composeRule.onNodeWithText("Coffee spending").assertIsDisplayed()
         composeRule.onNodeWithTag("insight_transaction_cat-5").assertIsDisplayed()
+        composeRule.onNode(hasText("Jul 8 · posted Jul 10") and hasAnyAncestor(hasTestTag("insight_transaction_cat-5")), useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_repeat_cat-5", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("insight_transaction_transfer").assertDoesNotExist()
         list.performScrollToNode(hasTestTag("insight_categories_expand"))
         composeRule.onNodeWithText("Show less").performClick()

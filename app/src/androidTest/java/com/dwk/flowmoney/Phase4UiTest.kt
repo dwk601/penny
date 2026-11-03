@@ -455,7 +455,7 @@ class Phase4UiTest {
         composeRule.onNodeWithText("Transactions").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
         assertEquals(1, layouts.single().lineCount)
         assertTrue(!layouts.single().isLineEllipsized(0))
-        composeRule.onNodeWithText("Spent \$0.00 · 0 total").assertIsDisplayed()
+        composeRule.onNodeWithText("Spent \$0.00 · 0 transactions").assertIsDisplayed()
     }
 
     @Test

@@ -2517,7 +2517,9 @@ private fun OverviewPage(
 private fun OverviewReviewStrip(pendingReviewCount: Int, onReview: () -> Unit) {
     TextButton(
         onClick = onReview,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("overview_review_action"),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("overview_review_action").semantics {
+            contentDescription = "Review $pendingReviewCount synced ${if (pendingReviewCount == 1) "transaction" else "transactions"}"
+        },
         contentPadding = PaddingValues(horizontal = 12.dp),
     ) {
         Text("Review $pendingReviewCount", modifier = Modifier.testTag("overview_pending_review_count"))
@@ -3094,8 +3096,8 @@ private fun TransactionsPage(
         ) {
             item {
                 TransactionsHeader(
-                    count = filteredTransactions.size,
                     metrics = filteredMetrics,
+                    hasTransfers = filteredTransactions.any { it.effectiveFlowKind == FlowKind.TRANSFER },
                 )
             }
             item {
@@ -5498,7 +5500,7 @@ private fun CategoryRankList(
                 val noun = if (omitted.size == 1) "category" else "categories"
                 "${omitted.size} more $noun · ${MoneyFormatter.formatUsd(omitted.sumOf { it.cents })}"
             }
-            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.testTag("insight_categories_expand")) { Text(label) }
+            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.testTag("insight_categories_expand").semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }) { Text(label) }
         }
     }
 }
@@ -5533,8 +5535,8 @@ private fun InsightsSelectionHeader(
 
 @Composable
 private fun TransactionsHeader(
-    count: Int,
     metrics: DashboardMetrics,
+    hasTransfers: Boolean,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -5544,8 +5546,8 @@ private fun TransactionsHeader(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · $count total" +
-                if (metrics.transferCents > 0) " · Transfers excluded" else "",
+            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · ${metrics.transactionCount} ${if (metrics.transactionCount == 1) "transaction" else "transactions"}" +
+                if (hasTransfers) " · Transfers excluded" else "",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -5803,15 +5805,21 @@ private fun TransactionMetadata(transaction: Transaction, showDate: Boolean, ava
     val temporalWidth = remember(temporal, style, density, measurer) {
         if (temporal.isEmpty()) 0 else measurer.measure(temporal, style = style, softWrap = false).size.width
     }
-    val together = temporal.isEmpty() || availablePx >= temporalWidth + with(density) { 74.dp.toPx() }
-    val flexibleWidth = if (together && temporal.isNotEmpty()) availablePx - temporalWidth - with(density) { 10.dp.toPx() } else availablePx
+    val hasRepeat = transaction.recurringInterval != null
+    val metadataPx = (availablePx - if (hasRepeat) with(density) { 18.dp.toPx() } else 0f).coerceAtLeast(0f)
+    val together = temporal.isEmpty() || metadataPx >= temporalWidth + with(density) { 74.dp.toPx() }
+    val flexibleWidth = if (together && temporal.isNotEmpty()) metadataPx - temporalWidth - with(density) { 10.dp.toPx() } else metadataPx
     val minimumPlaceWidth = remember(category, place, style, density, measurer) {
         if (place.isEmpty()) 0 else measurer.measure("$category · ${place.take(1)}…", style = style, softWrap = false).size.width
     }
     val showPlace = place.isNotEmpty() && flexibleWidth >= with(density) { 64.dp.toPx() } && flexibleWidth >= minimumPlaceWidth
     val flexible = if (showPlace) "$category · $place" else category
     Column {
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (hasRepeat) {
+                Icon(painterResource(R.drawable.ic_repeat), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp).testTag("transaction_repeat_${transaction.id}"))
+                Spacer(Modifier.width(4.dp))
+            }
             Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (together && temporal.isNotEmpty()) {
                 Spacer(Modifier.width(8.dp))
@@ -5840,7 +5848,8 @@ private fun TransactionPresentation(
     }
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val actualAvailable = with(density) { (maxWidth - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
-        val stack = amountWidth + with(density) { (104.dp + decisionWidthInset).toPx() } > actualAvailable
+        val merchantReservation = 96.dp * density.fontScale.coerceAtMost(2f) + 8.dp + decisionWidthInset
+        val stack = amountWidth + with(density) { merchantReservation.toPx() } > actualAvailable
         Column(modifier = Modifier.fillMaxWidth().then(if (padded) Modifier.padding(horizontal = 14.dp, vertical = 10.dp) else Modifier)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -7033,7 +7042,9 @@ private fun Transaction.rowMetadata(showDate: Boolean): Triple<String, String, S
         .joinToString(", ").ifBlank { accountName?.trim().orEmpty() }
     val timestamp = transactedAtEpochMillis ?: occurredAtEpochMillis.takeIf { source != "simplefin" }
     val whenLabel = if (showDate) {
-        Instant.ofEpochMilli(timestamp ?: occurredAtEpochMillis).atZone(ZoneId.systemDefault()).format(ShortDateFormatter)
+        val posted = occurredAtDateTime().toLocalDate()
+        val purchase = transactedAtEpochMillis?.takeIf { source == "simplefin" }?.let { Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalDate() }
+        if (purchase != null && purchase != posted) "${purchase.format(ShortDateFormatter)} · posted ${posted.format(ShortDateFormatter)}" else posted.format(ShortDateFormatter)
     } else {
         timestamp?.let {
             val dateTime = Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
@@ -7051,7 +7062,11 @@ private fun Transaction.rowMetadata(showDate: Boolean): Triple<String, String, S
 private fun Transaction.rowAccessibility(): String {
     val timestamp = transactedAtEpochMillis
     val date = when {
-        timestamp != null -> "Purchase ${Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).format(AccessibilityDateTimeFormatter)}"
+        timestamp != null -> {
+            val purchase = Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault())
+            "Purchase ${purchase.format(AccessibilityDateTimeFormatter)}" +
+                if (source == "simplefin" && purchase.toLocalDate() != occurredAtDateTime().toLocalDate()) ", Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}" else ""
+        }
         source == "simplefin" -> "Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}"
         else -> "Occurred ${occurredAtDateTime().format(AccessibilityDateTimeFormatter)}"
     }
