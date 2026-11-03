@@ -130,7 +130,7 @@ class TransactionRowUiTest {
             transaction("different", -100).copy(merchant = "Different", source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchase, recurringInterval = RecurrenceInterval.Monthly),
             transaction("same", -200).copy(merchant = "Same", source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = posted - 60_000),
             transaction("missing", -300).copy(merchant = "Missing", source = "simplefin", occurredAtEpochMillis = posted),
-            transaction("local", -400).copy(merchant = "Local", occurredAtEpochMillis = posted),
+            transaction("local", -400).copy(merchant = "Local", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchase),
         )
         composeRule.setContent {
             FlowMoneyTheme(dynamicColor = false) {
@@ -148,6 +148,7 @@ class TransactionRowUiTest {
             repeat(layouts.single().lineCount) { assertFalse(layouts.single().isLineEllipsized(it)) }
         }
         composeRule.onNodeWithTag("transaction_content_different").assertContentDescriptionEquals("Different, -\$1.00, Other, Purchase Jul 8, 2026, 8:00 AM, Posted Jul 10, 2026, Recurring Monthly")
+        composeRule.onNodeWithTag("transaction_content_local").assertContentDescriptionEquals("Local, -\$4.00, Other, Purchase Jul 8, 2026, 8:00 AM, Posted Jul 10, 2026")
         composeRule.onNodeWithTag("transaction_repeat_different", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_repeat_same", useUnmergedTree = true).assertDoesNotExist()
     }
@@ -301,13 +302,16 @@ class TransactionRowUiTest {
 
     @Test fun metadataKeepsTimeCompleteAndEllipsizesPlaceAtOneX() = assertMetadata(1f)
     @Test fun metadataKeepsTimeCompleteAndEllipsizesPlaceAtTwoX() = assertMetadata(2f)
+    @Test fun recurringMetadataKeepsTimeCompleteAndFlexibleWidthAtOneX() = assertMetadata(1f, recurring = true)
+    @Test fun recurringMetadataKeepsTimeCompleteAndFlexibleWidthAtTwoX() = assertMetadata(2f, recurring = true)
 
-    private fun assertMetadata(fontScale: Float) {
+    private fun assertMetadata(fontScale: Float, recurring: Boolean = false) {
         val posted = LocalDateTime.of(2026, 7, 11, 2, 30).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val purchased = LocalDateTime.of(2026, 7, 10, 14, 15).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        val row = transaction("metadata", -100).copy(source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchased, locationCity = "An exceptionally long municipality name that must yield", locationState = "NY")
+        val row = transaction("metadata", -100).copy(source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchased, locationCity = "An exceptionally long municipality name that must yield", locationState = "NY", recurringInterval = if (recurring) RecurrenceInterval.Monthly else null)
         setTransactionScreen(row, width = 300, fontScale = fontScale)
         scrollToTransaction(row.id)
+        if (recurring) composeRule.onNodeWithTag("transaction_repeat_metadata", useUnmergedTree = true).assertExists()
         val flexible = composeRule.onNodeWithText("Other · An exceptionally long municipality name that must yield, NY", useUnmergedTree = true)
         val temporal = composeRule.onNodeWithText("Jul 10, 2:15 PM", useUnmergedTree = true)
         val flexLayout = mutableListOf<TextLayoutResult>()

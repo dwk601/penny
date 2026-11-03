@@ -112,7 +112,7 @@ class InsightsUiTest {
         composeRule.setContent {
             val host = remember { SnackbarHostState() }
             val scope = rememberCoroutineScope()
-            show = { scope.launch { host.showSnackbar("Deleted", actionLabel = "Undo", duration = SnackbarDuration.Long) } }
+            show = { scope.launch { host.showSnackbar("Deleted", actionLabel = "Undo", duration = SnackbarDuration.Indefinite) } }
             FlowMoneyTheme(dynamicColor = false) {
                 AdaptiveFlowMoneyShell(selectedTab = DashboardTab.Insights, snackbarHostState = host, onTabSelected = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize()) { padding ->
                     FlowMoneyScreen(uiState = state, selectedTab = DashboardTab.Insights, onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize().padding(padding))

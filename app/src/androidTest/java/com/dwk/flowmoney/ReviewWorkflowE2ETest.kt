@@ -191,7 +191,8 @@ class ReviewWorkflowE2ETest {
             }
             composeRule.waitUntil(5_000) { composeRule.onAllNodesWithText("Undo").fetchSemanticsNodes().size == 1 }
             assertEquals(setOf("Food"), listOf(row("bulk-new"), row("bulk-old")).map { it.category }.toSet())
-            composeRule.onNodeWithText("Undo").performClick()
+            composeRule.mainClock.advanceTimeBy(20_000)
+            composeRule.onNodeWithText("Undo").assertIsDisplayed().performClick()
 
             composeRule.waitUntil(5_000) {
                 row("bulk-new").reviewedAtEpochMillis == null && row("bulk-old").reviewedAtEpochMillis == null

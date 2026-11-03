@@ -21,6 +21,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -320,6 +321,39 @@ class Phase4UiTest {
         composeRule.runOnIdle { busy = false }
         composeRule.onNodeWithTag("delete_transaction_button").assertIsEnabled().performTouchInput { click() }
         composeRule.runOnIdle { assertEquals(1, deletes) }
+    }
+
+    @Test
+    fun selectedActionChipUsesPrimaryColorsAndMoreLessKeepsItsShape() {
+        var selected by mutableStateOf(false)
+        var expanded by mutableStateOf(false)
+        var primary = Color.Unspecified
+        var secondary = Color.Unspecified
+        composeRule.setContent {
+            FlowMoneyTheme(darkTheme = false, dynamicColor = false) {
+                val primaryColor = MaterialTheme.colorScheme.primary
+                val secondaryColor = MaterialTheme.colorScheme.secondaryContainer
+                SideEffect { primary = primaryColor; secondary = secondaryColor }
+                androidx.compose.foundation.layout.Column {
+                    SuggestionChip("Near me", selected = selected, isSelection = false, testTag = "near_me_fixture", onClick = { selected = !selected })
+                    SuggestionChip(if (expanded) "Less" else "More", isSelection = false, testTag = "more_less_fixture", onClick = { expanded = !expanded })
+                }
+            }
+        }
+        fun centerTop(tag: String): Color {
+            val node = composeRule.onNodeWithTag(tag).fetchSemanticsNode()
+            val pixels = composeRule.onNodeWithTag(tag).captureToImage().toPixelMap()
+            return pixels[pixels.width / 2, (4 * node.layoutInfo.density.density).toInt()]
+        }
+        assertEquals(secondary.toArgb(), centerTop("near_me_fixture").toArgb())
+        composeRule.onNodeWithTag("near_me_fixture").performClick()
+        composeRule.mainClock.advanceTimeBy(1_000)
+        assertEquals(primary.toArgb(), centerTop("near_me_fixture").toArgb())
+        assertEquals(secondary.toArgb(), centerTop("more_less_fixture").toArgb())
+        composeRule.onNodeWithTag("more_less_fixture").performClick()
+        composeRule.mainClock.advanceTimeBy(1_000)
+        composeRule.onNodeWithText("Less").assertIsDisplayed()
+        assertEquals(secondary.toArgb(), centerTop("more_less_fixture").toArgb())
     }
 
     @Test

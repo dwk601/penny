@@ -1,10 +1,8 @@
 package com.dwk.flowmoney
 
 import android.content.Context
-import android.os.Build
 import android.view.KeyEvent
 import android.view.View
-import android.view.inspector.WindowInspector
 import android.view.inputmethod.InputMethodManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
@@ -236,16 +234,11 @@ class ColdStartNavigationUiTest {
         composeRule.onNodeWithTag("editor_sheet").assertExists()
         composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("merchant_field"))
         composeRule.onNodeWithTag("merchant_field").performTextInput("Dirty")
-        lateinit var editorRoot: View
-        composeRule.runOnUiThread {
-            editorRoot = if (Build.VERSION.SDK_INT >= 29) WindowInspector.getGlobalWindowViews().single { it.hasWindowFocus() } else host
-        }
+        val editorRoot = composeRule.onNodeWithTag("merchant_field").fetchSemanticsNode().root as View
         composeRule.waitUntil(5_000) { ViewCompat.getRootWindowInsets(editorRoot)?.isVisible(WindowInsetsCompat.Type.ime()) == true }
         composeRule.runOnUiThread {
             checkNotNull(keyboard).hide()
-            if (Build.VERSION.SDK_INT >= 29) {
-                (host.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(editorRoot.windowToken, 0)
-            }
+            (host.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(editorRoot.windowToken, 0)
         }
         composeRule.waitUntil(5_000) { ViewCompat.getRootWindowInsets(editorRoot)?.isVisible(WindowInsetsCompat.Type.ime()) == false }
         composeRule.onNodeWithTag("editor_sheet").assertExists()

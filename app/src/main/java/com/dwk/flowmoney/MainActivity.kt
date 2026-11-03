@@ -855,7 +855,7 @@ fun FlowMoneyApp(
                         message = "Deleted $description",
                         actionLabel = "Undo",
                         withDismissAction = true,
-                        duration = SnackbarDuration.Long,
+                        duration = SnackbarDuration.Indefinite,
                     )
                 if (result == SnackbarResult.ActionPerformed) {
                     val restored =
@@ -928,7 +928,7 @@ fun FlowMoneyApp(
                 message = message,
                 actionLabel = "Undo",
                 withDismissAction = true,
-                duration = SnackbarDuration.Long,
+                duration = SnackbarDuration.Indefinite,
             )
         if (result == SnackbarResult.ActionPerformed) {
             try {
@@ -1991,7 +1991,7 @@ internal fun syncHealthUiState(
 @Composable
 internal fun rememberSyncHealthNow(clock: Clock, profile: SimpleFinProfileEntity?): Long {
     var now by remember(clock) { mutableStateOf(clock.millis()) }
-    var resumeGeneration by remember(clock) { mutableStateOf(0) }
+    var resumeGeneration by remember(clock) { mutableIntStateOf(0) }
     LifecycleResumeEffect(clock) {
         now = clock.millis()
         resumeGeneration++
@@ -2002,9 +2002,13 @@ internal fun rememberSyncHealthNow(clock: Clock, profile: SimpleFinProfileEntity
         now = current
         val next = profile?.let(::simpleFinNextEligibleSyncAt)
         if (next != null && next != Long.MAX_VALUE && next > current) {
-            val wait = try { Math.subtractExact(next, current) } catch (_: ArithmeticException) { Long.MAX_VALUE }
-            delay(wait)
-            now = clock.millis()
+            var observed = current
+            while (observed < next) {
+                val wait = try { Math.subtractExact(next, observed) } catch (_: ArithmeticException) { Long.MAX_VALUE }
+                delay(wait)
+                observed = clock.millis()
+            }
+            now = observed
         }
     }
     return now
@@ -2188,13 +2192,15 @@ private fun FlowMoneyNavigationBar(
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val widthPx = with(density) { maxWidth.toPx() }
-        // M3 reserves horizontal label padding; allow for pixel rounding as well.
+        val peerCount = PrimaryDashboardTabs.size - 1
+        // NavigationBar reserves 8dp between items; size weights against the remaining row width.
+        val availablePx = (widthPx - with(density) { (8.dp * peerCount).toPx() }).coerceAtLeast(0f)
         val requiredPx = longestLabelPx + with(density) { 16.dp.toPx() } + 2f
-        val fallback = requiredPx > widthPx / PrimaryDashboardTabs.size
+        val fallback = requiredPx > availablePx / PrimaryDashboardTabs.size
         val minimumPeerPx = with(density) { 48.dp.toPx() }
-        val selectedPx = requiredPx.coerceAtLeast(widthPx / PrimaryDashboardTabs.size)
-            .coerceAtMost((widthPx - 2 * minimumPeerPx).coerceAtLeast(0f))
-        val peerPx = (widthPx - selectedPx) / 2f
+        val selectedPx = requiredPx.coerceAtLeast(availablePx / PrimaryDashboardTabs.size)
+            .coerceAtMost((availablePx - peerCount * minimumPeerPx).coerceAtLeast(0f))
+        val peerPx = (availablePx - selectedPx) / peerCount
         NavigationBar(
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
             windowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
@@ -2601,7 +2607,7 @@ internal fun ReviewPage(
                             modifier = Modifier.testTag("review_pending_count"),
                         )
                     }
-                    if (orderedTransactions.isNotEmpty()) {
+                    if (orderedTransactions.isNotEmpty() && !selectionMode) {
                         TextButton(
                             onClick = {
                                 selectionMode = !selectionMode
@@ -2609,7 +2615,7 @@ internal fun ReviewPage(
                             },
                             enabled = !operationBusy,
                             modifier = Modifier.heightIn(min = 48.dp).testTag("review_select_action"),
-                        ) { Text(if (selectionMode) "Done" else "Select") }
+                        ) { Text("Select") }
                     }
                 }
             }
@@ -2731,7 +2737,6 @@ internal fun ReviewPage(
 }
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
 private fun ReviewBulkControls(
     selectedCount: Int,
     enabled: Boolean,
@@ -2883,7 +2888,7 @@ private fun CategoryChoiceBar(
     LaunchedEffect(enabled) { if (!enabled) moreExpanded = false }
     val visible = categories.take(4)
     val remaining = categories.drop(4)
-    val choices: @Composable () -> Unit = {
+    FlowRow(modifier = Modifier.fillMaxWidth().testTag("${testTagPrefix}_choices"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         visible.forEach { category ->
             SuggestionChip(
                 label = category,
@@ -2927,7 +2932,6 @@ private fun CategoryChoiceBar(
             }
         }
     }
-    FlowRow(modifier = Modifier.fillMaxWidth().testTag("${testTagPrefix}_choices"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { choices() }
 }
 
 @Composable
@@ -6921,7 +6925,7 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun SuggestionChip(
+internal fun SuggestionChip(
     label: String,
     selected: Boolean = false,
     testTag: String? = null,
@@ -6937,8 +6941,8 @@ private fun SuggestionChip(
             enabled = enabled,
             shape = MaterialTheme.shapes.large,
             colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                containerColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer,
             ),
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
             modifier = tagModifier.heightIn(min = 48.dp).widthIn(max = 220.dp).then(
@@ -6947,12 +6951,7 @@ private fun SuggestionChip(
         ) { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         return
     }
-    val interactionModifier =
-        if (isSelection) {
-            Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
-        } else {
-            Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-        }
+    val interactionModifier = Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
     Box(
         modifier =
             tagModifier
@@ -7102,7 +7101,7 @@ private fun Transaction.rowAccessibility(): String {
         timestamp != null -> {
             val purchase = Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault())
             "Purchase ${purchase.format(AccessibilityDateTimeFormatter)}" +
-                if (source == "simplefin" && purchase.toLocalDate() != occurredAtDateTime().toLocalDate()) ", Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}" else ""
+                if (purchase.toLocalDate() != occurredAtDateTime().toLocalDate()) ", Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}" else ""
         }
         source == "simplefin" -> "Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}"
         else -> "Occurred ${occurredAtDateTime().format(AccessibilityDateTimeFormatter)}"

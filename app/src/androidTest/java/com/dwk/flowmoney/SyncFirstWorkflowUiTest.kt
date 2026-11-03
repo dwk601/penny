@@ -175,6 +175,8 @@ class SyncFirstWorkflowUiTest {
             }
         }
         composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_select_action").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_done_selecting").assertContentDescriptionEquals("Done selecting")
         composeRule.onNodeWithTag("review_bulk_actions").assertIsNotEnabled()
         composeRule.onNodeWithTag("review_accept_other_action").assertDoesNotExist()
         composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_sticky-12"))
@@ -508,6 +510,13 @@ class SyncFirstWorkflowUiTest {
         assertFalse(layouts.single().hasVisualOverflow)
         assertTrue(layouts.single().lineCount > 1)
         repeat(layouts.single().lineCount) { assertFalse(layouts.single().isLineEllipsized(it)) }
+        scroll("transaction_search_clear")
+        composeRule.onNodeWithTag("transaction_search_clear").assertContentDescriptionEquals("Clear search").performClick()
+        scroll("transaction_filter_toggle")
+        composeRule.onNodeWithText("Filters · 6", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected.substringBeforeLast(" · “Brooklyn”"))
+        scroll("transaction_where_filter")
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Brooklyn")
         scroll("transaction_filter_clear_compact")
         val summaryRow = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
         val clearBounds = composeRule.onNodeWithTag("transaction_filter_clear_compact").fetchSemanticsNode().boundsInRoot
@@ -727,8 +736,19 @@ class SyncFirstWorkflowUiTest {
         }
         composeRule.mainClock.advanceTimeByFrame()
         composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
-        composeRule.runOnIdle { clock.time += 10_000 }
+        composeRule.runOnIdle { clock.time += 5_000 }
         composeRule.mainClock.advanceTimeBy(10_000)
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { clock.time += 5_000 }
+        composeRule.mainClock.advanceTimeBy(5_000)
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { profile = profile.copy(lastSuccessfulSyncAtEpochMillis = clock.time - interval + 20_000) }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { clock.time += 20_000 }
+        composeRule.mainClock.advanceTimeBy(20_000)
         composeRule.mainClock.advanceTimeByFrame()
         composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertExists()
         composeRule.runOnIdle { profile = profile.copy(lastSuccessfulSyncAtEpochMillis = clock.time - interval + 20_000) }
