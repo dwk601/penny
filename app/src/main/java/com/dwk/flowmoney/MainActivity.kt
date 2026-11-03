@@ -2209,11 +2209,11 @@ private fun FlowMoneyNavigationBar(
                         selected = selected,
                         onClick = { onTabSelected(tab) },
                         alwaysShowLabel = !fallback,
-                        icon = { NavigationTabIcon(tab) },
+                        icon = { NavigationTabIcon(tab, if (fallback && !selected) tab.label else null) },
                         label = {
                             BasicText(
                                 tab.label,
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.fillMaxWidth().then(if (fallback && !selected) Modifier.clearAndSetSemantics { } else Modifier),
                                 style = style.copy(color = LocalContentColor.current, textAlign = TextAlign.Center),
                                 maxLines = 1,
                                 softWrap = false,
@@ -2255,8 +2255,8 @@ private fun FlowMoneyNavigationRail(
 }
 
 @Composable
-private fun NavigationTabIcon(tab: DashboardTab) {
-    Icon(painter = painterResource(tab.iconRes), contentDescription = null)
+private fun NavigationTabIcon(tab: DashboardTab, contentDescription: String? = null) {
+    Icon(painter = painterResource(tab.iconRes), contentDescription = contentDescription)
 }
 
 @Composable

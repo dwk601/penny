@@ -184,6 +184,9 @@ class AdaptiveShellUiTest {
                     val descriptions = node.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty().count { it == destination.label }
                     val texts = node.config.getOrNull(SemanticsProperties.Text).orEmpty().count { it.text == destination.label }
                     assertTrue("duplicate or missing name for ${destination.label}: ${node.config}", descriptions + texts == 1)
+                    if (screenWidth == 300 && fontScale == 2f && destination != selected) {
+                        assertTrue("hidden label must expose an icon name to Android accessibility", descriptions == 1)
+                    }
                     assertTrue("$screenWidth/$fontScale ${destination.label}: ${node.boundsInRoot}", node.boundsInRoot.width / density >= 47.5f && node.boundsInRoot.height / density >= 47.5f)
                 }
                 val item = composeRule.onNodeWithTag("tab_${tab.name.lowercase()}").performClick().assertIsSelected().fetchSemanticsNode().boundsInRoot
