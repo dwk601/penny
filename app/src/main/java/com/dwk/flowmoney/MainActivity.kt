@@ -3398,13 +3398,21 @@ private fun TransactionFilterBar(
             }
         }
         if (hasActiveFilter) {
-            val clearWidth = remember(labelStyle, density, measurer) {
-                with(density) { measurer.measure("Clear all", style = labelStyle, softWrap = false).size.width.toDp() + 26.dp }.coerceAtLeast(80.dp)
+            val clearTextWidth = remember(labelStyle, density, measurer) {
+                with(density) { measurer.measure("Clear all", style = labelStyle, softWrap = false).size.width.toDp() + 2.dp }
             }
-            FlowRow(modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary_row"), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.Center, itemVerticalAlignment = Alignment.CenterVertically) {
-                Text(summary, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("transaction_filter_summary"))
-                Box(Modifier.weight(1f).widthIn(min = clearWidth), contentAlignment = Alignment.CenterEnd) {
-                    TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all", maxLines = 1, softWrap = false) }
+            val clearWidth = (clearTextWidth + 24.dp).coerceAtLeast(80.dp)
+            val summaryStyle = MaterialTheme.typography.bodySmall
+            val summaryWidth = remember(summary, summaryStyle, density, measurer) {
+                with(density) { measurer.measure(summary, style = summaryStyle, softWrap = false).size.width.toDp() }
+            }
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val sharesLine = summaryWidth + 4.dp + clearWidth <= maxWidth
+                FlowRow(modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary_row"), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.Center, itemVerticalAlignment = Alignment.CenterVertically) {
+                    Text(summary, color = MaterialTheme.colorScheme.onSurfaceVariant, style = summaryStyle, modifier = Modifier.testTag("transaction_filter_summary"))
+                    Box(if (sharesLine) Modifier.weight(1f) else Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                        TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all", modifier = Modifier.width(clearTextWidth), maxLines = 1) }
+                    }
                 }
             }
         }

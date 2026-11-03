@@ -523,7 +523,7 @@ class SyncFirstWorkflowUiTest {
         val clearText = mutableListOf<TextLayoutResult>()
         composeRule.onNodeWithText("Clear all", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(clearText) }
         assertEquals(1, clearText.single().lineCount)
-        assertFalse(clearText.single().hasVisualOverflow)
+        assertFalse("width=${clearText.single().didOverflowWidth} height=${clearText.single().didOverflowHeight} exceeded=${clearText.single().multiParagraph.didExceedMaxLines} end=${clearText.single().getLineEnd(0)} bounds=$clearBounds row=$summaryRow", clearText.single().hasVisualOverflow)
         assertTrue("clear=$clearBounds summary row=$summaryRow", kotlin.math.abs(clearBounds.right - summaryRow.right) <= 2f)
         composeRule.onNodeWithTag("transaction_filter_clear_compact").assertContentDescriptionEquals("Clear all filters").performClick()
         scroll("transaction_filter_toggle")
@@ -612,7 +612,7 @@ class SyncFirstWorkflowUiTest {
         val text = mutableListOf<TextLayoutResult>()
         composeRule.onNodeWithText("Clear all", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(text) }
         assertEquals(1, text.single().lineCount)
-        assertFalse(text.single().hasVisualOverflow)
+        assertFalse("width=${text.single().didOverflowWidth} paragraph=${text.single().multiParagraph.width} layout=${text.single().size} right=${text.single().getLineRight(0)} height=${text.single().didOverflowHeight} exceeded=${text.single().multiParagraph.didExceedMaxLines} end=${text.single().getLineEnd(0)} bounds=$clear summary=$summary row=$rowBounds", text.single().hasVisualOverflow)
         assertTrue("summary=$summary clear=$clear", clear.top >= summary.bottom - 1)
         assertTrue(kotlin.math.abs(clear.right - rowBounds.right) <= 2f)
     }

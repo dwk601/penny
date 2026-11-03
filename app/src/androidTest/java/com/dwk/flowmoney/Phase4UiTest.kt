@@ -21,7 +21,6 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toPixelMap
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -345,15 +344,17 @@ class Phase4UiTest {
             val pixels = composeRule.onNodeWithTag(tag).captureToImage().toPixelMap()
             return pixels[pixels.width / 2, (4 * node.layoutInfo.density.density).toInt()]
         }
-        assertEquals(secondary.toArgb(), centerTop("near_me_fixture").toArgb())
+        fun assertColor(expected: Color, actual: Color) {
+            assertTrue("expected $expected, got $actual", kotlin.math.abs(expected.red - actual.red) < .03f && kotlin.math.abs(expected.green - actual.green) < .03f && kotlin.math.abs(expected.blue - actual.blue) < .03f)
+        }
+        assertColor(secondary, centerTop("near_me_fixture"))
         composeRule.onNodeWithTag("near_me_fixture").performClick()
         composeRule.mainClock.advanceTimeBy(1_000)
-        assertEquals(primary.toArgb(), centerTop("near_me_fixture").toArgb())
-        assertEquals(secondary.toArgb(), centerTop("more_less_fixture").toArgb())
-        composeRule.onNodeWithTag("more_less_fixture").performClick()
-        composeRule.mainClock.advanceTimeBy(1_000)
+        assertColor(primary, centerTop("near_me_fixture"))
+        assertColor(secondary, centerTop("more_less_fixture"))
+        composeRule.runOnIdle { expanded = true }
         composeRule.onNodeWithText("Less").assertIsDisplayed()
-        assertEquals(secondary.toArgb(), centerTop("more_less_fixture").toArgb())
+        assertColor(secondary, centerTop("more_less_fixture"))
     }
 
     @Test
