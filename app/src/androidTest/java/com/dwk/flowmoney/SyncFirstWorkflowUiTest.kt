@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,6 +41,10 @@ import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -50,6 +55,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import java.time.Instant
+import java.time.Clock
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -486,7 +492,90 @@ class SyncFirstWorkflowUiTest {
         composeRule.runOnIdle {
             assertEquals(2, dataClicks)
             assertEquals(1, syncClicks)
+            simpleFin = SimpleFinUiState(profile = SimpleFinProfileEntity(automaticSyncsPerDay = 4, lastSyncAttemptAtEpochMillis = now))
         }
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag("sync_health_action").performClick()
+        composeRule.runOnIdle { assertEquals(3, dataClicks); assertEquals(1, syncClicks) }
+    }
+
+    @Test
+    fun syncHealthReportsCompletionInterruptionAndFailuresTruthfully() {
+        val now = 1_800_000_000_000L
+        val base = SimpleFinProfileEntity(automaticSyncsPerDay = 4)
+        fun state(profile: SimpleFinProfileEntity) = syncHealthUiState(SimpleFinUiState(profile = profile), null, now)
+        val never = state(base)
+        assertEquals("Sync now", never.label)
+        assertEquals("Not synced yet; sync now", never.stateDescription)
+        assertTrue(never.manualSync)
+        val completed = base.copy(lastSyncAttemptAtEpochMillis = now - 1_000, lastSuccessfulSyncAtEpochMillis = now - 1_000)
+        assertEquals("Synced", state(completed).label)
+        assertTrue(state(completed).stateDescription.startsWith("Sync completed; cooling down"))
+        assertEquals("Synced", state(completed.copy(lastSuccessfulSyncAtEpochMillis = now)).label)
+        assertEquals("Synced", state(completed.copy(lastSyncAttemptAtEpochMillis = null)).label)
+        val due = completed.copy(lastSyncAttemptAtEpochMillis = now - automaticSyncIntervalMillis(4), lastSuccessfulSyncAtEpochMillis = now - automaticSyncIntervalMillis(4))
+        assertEquals("Sync now", state(due).label)
+        assertTrue(state(due).manualSync)
+        val interrupted = completed.copy(lastSyncAttemptAtEpochMillis = now, lastSuccessfulSyncAtEpochMillis = now - 1_000)
+        assertEquals("Sync now", state(interrupted).label)
+        assertTrue(state(interrupted).stateDescription.startsWith("Last sync didn’t finish; retry after"))
+        assertFalse(state(interrupted).manualSync)
+        val retry = interrupted.copy(lastSyncAttemptAtEpochMillis = now - SIMPLEFIN_RETRY_INTERVAL_MILLIS, lastSuccessfulSyncAtEpochMillis = now - SIMPLEFIN_RETRY_INTERVAL_MILLIS - 1)
+        assertEquals("Last sync didn’t finish; sync now", state(retry).stateDescription)
+        assertTrue(state(retry).manualSync)
+        assertEquals("Error", state(interrupted.copy(lastError = "failed")).label)
+        assertFalse(state(interrupted.copy(lastError = "failed")).manualSync)
+        assertTrue(state(retry.copy(lastError = "failed")).manualSync)
+        assertEquals("Synced", state(completed.copy(lastError = "stale")).label)
+        assertEquals("Reconnect", state(base.copy(isPaused = true)).label)
+        assertEquals("Pending", syncHealthUiState(SimpleFinUiState(isConnectionPending = true), null, now).label)
+        assertEquals("Disconnected", syncHealthUiState(SimpleFinUiState(), null, now).label)
+        assertEquals("Syncing", syncHealthUiState(SimpleFinUiState(), DataOperation.Sync, now).label)
+    }
+
+    @Test
+    fun syncHealthRefreshesAtBoundaryAndOnResumeWithoutPolling() {
+        class MutableClock(var time: Long) : Clock() {
+            var reads = 0
+            override fun getZone(): ZoneId = ZoneId.of("UTC")
+            override fun withZone(zone: ZoneId): Clock = this
+            override fun instant(): Instant = Instant.ofEpochMilli(millis())
+            override fun millis(): Long { reads++; return time }
+        }
+        val clock = MutableClock(1_800_000_000_000L)
+        val interval = automaticSyncIntervalMillis(4)
+        var profile by mutableStateOf(SimpleFinProfileEntity(automaticSyncsPerDay = 4, lastSuccessfulSyncAtEpochMillis = clock.time - interval + 10_000))
+        val owner = object : LifecycleOwner { override val lifecycle = LifecycleRegistry(this) }
+        composeRule.runOnUiThread { owner.lifecycle.currentState = Lifecycle.State.RESUMED }
+        composeRule.mainClock.autoAdvance = false
+        composeRule.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                val now = rememberSyncHealthNow(clock, profile)
+                FlowMoneyTopAppBar(onData = {}, onAddTransaction = {}, simpleFin = SimpleFinUiState(profile = profile), syncHealthNowEpochMillis = now)
+            }
+        }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { clock.time += 10_000 }
+        composeRule.mainClock.advanceTimeBy(10_000)
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { profile = profile.copy(lastSuccessfulSyncAtEpochMillis = clock.time - interval + 20_000) }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnUiThread { owner.lifecycle.currentState = Lifecycle.State.STARTED; clock.time += 20_000; owner.lifecycle.currentState = Lifecycle.State.RESUMED }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Sync due; sync now"))
+        for (p in listOf(profile.copy(lastSuccessfulSyncAtEpochMillis = Long.MAX_VALUE - 1), profile.copy(lastSuccessfulSyncAtEpochMillis = clock.time - interval), profile.copy(lastSuccessfulSyncAtEpochMillis = null))) {
+            composeRule.runOnIdle { profile = p }
+            composeRule.mainClock.advanceTimeByFrame()
+            val reads = clock.reads
+            composeRule.mainClock.advanceTimeBy(30_000)
+            composeRule.mainClock.advanceTimeByFrame()
+            assertEquals(reads, clock.reads)
+        }
+        composeRule.mainClock.autoAdvance = true
     }
 
     @Test
@@ -803,7 +892,7 @@ class SyncFirstWorkflowUiTest {
         assertNoOverviewSyncActions()
         runBlocking { dao.upsertProfile(healthy.copy(automaticSyncsPerDay = 1, lastSuccessfulSyncAtEpochMillis = 1, lastSyncAttemptAtEpochMillis = 1)) }
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Connected and idle; automatic sync is once daily; open Data to change cadence")) }.isSuccess
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Sync due; automatic sync is once daily; open Data to change cadence")) }.isSuccess
         }
         assertNoOverviewSyncActions()
         composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2")

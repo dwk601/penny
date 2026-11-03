@@ -129,6 +129,36 @@ class ExpressiveCompatUiTest {
     }
 
     @Test
+    fun syncNowFitsAndDescribesActionAtEveryFontScale() {
+        var scale by mutableStateOf(1f)
+        val now = 1_800_000_000_000L
+        var profile by mutableStateOf(SimpleFinProfileEntity(automaticSyncsPerDay = 4))
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyTopAppBar(onData = {}, onAddTransaction = {}, simpleFin = SimpleFinUiState(profile = profile), syncHealthNowEpochMillis = now)
+                    }
+                }
+            }
+        }
+        val cases = listOf(
+            SimpleFinProfileEntity(automaticSyncsPerDay = 4) to ("Sync now" to "Not synced yet; sync now"),
+            SimpleFinProfileEntity(automaticSyncsPerDay = 4, lastSuccessfulSyncAtEpochMillis = now) to ("Synced" to "Sync completed; cooling down until ${Instant.ofEpochMilli(now + automaticSyncIntervalMillis(4)).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MMM d, h:mm a"))}; open Data"),
+            SimpleFinProfileEntity(automaticSyncsPerDay = 1, lastSuccessfulSyncAtEpochMillis = now - automaticSyncIntervalMillis(1)) to ("Sync now" to "Sync due; automatic sync is once daily; open Data to change cadence"),
+        )
+        for (fontScale in listOf(1f, 1.5f, 2f)) for ((value, expected) in cases) {
+            composeRule.runOnIdle { scale = fontScale; profile = value }
+            val text = composeRule.onNodeWithText(expected.first, useUnmergedTree = true).assertIsDisplayed()
+            val layouts = mutableListOf<TextLayoutResult>()
+            text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertFalse(layouts.single().hasVisualOverflow)
+            assertFalse(layouts.single().isLineEllipsized(0))
+            composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, expected.second))
+        }
+    }
+
+    @Test
     fun binaryChoicePreservesRadioSemanticsTargetsAndControlledCallbacks() {
         var firstClicks = 0
         var secondClicks = 0

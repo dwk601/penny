@@ -156,9 +156,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -650,6 +652,7 @@ fun FlowMoneyApp(
     var merchantRules by remember(viewModel) { mutableStateOf<List<MerchantRuleEntity>>(emptyList()) }
     val viewModelMutationBusy by viewModel.mutationBusy.collectAsStateWithLifecycle()
     val pendingRangeReset by viewModel.pendingRangeReset.collectAsStateWithLifecycle()
+    val syncHealthNow = rememberSyncHealthNow(syncHealthClock, uiState.simpleFin.profile)
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var editorSessionId by rememberSaveable { mutableStateOf(0) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
@@ -1226,7 +1229,7 @@ fun FlowMoneyApp(
         onData = { showDataSheet = true },
         simpleFin = uiState.simpleFin,
         operation = dataOperation,
-        syncHealthNowEpochMillis = syncHealthClock.millis(),
+        syncHealthNowEpochMillis = syncHealthNow,
         onManualSync = ::requestManualSimpleFinSync,
         modifier =
             Modifier
@@ -1882,9 +1885,10 @@ internal data class SyncHealthUiState(
     val kind: SyncHealthKind,
     val stateDescription: String,
     val manualSync: Boolean = false,
+    val completed: Boolean = false,
 ) {
     val label: String get() = when (kind) {
-        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
+        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> if (completed) "Synced" else "Sync now"
         SyncHealthKind.Syncing -> "Syncing"
         SyncHealthKind.Error -> "Error"
         SyncHealthKind.ReconnectRequired -> "Reconnect"
@@ -1932,6 +1936,9 @@ internal fun syncHealthUiState(
         )
     }
 
+    val attempt = profile.lastSyncAttemptAtEpochMillis
+    val success = profile.lastSuccessfulSyncAtEpochMillis
+    val lastAttemptSucceeded = success != null && (attempt == null || success >= attempt)
     val failedAttempt =
         profile.lastError?.isNotBlank() == true &&
             profile.lastSyncAttemptAtEpochMillis != null &&
@@ -1945,10 +1952,13 @@ internal fun syncHealthUiState(
             kind = if (failedAttempt) SyncHealthKind.Error else SyncHealthKind.CoolingDown,
             stateDescription =
                 if (failedAttempt) {
-                    "Sync error; cooling down until $next"
+                    "Sync error; cooling down until $next; open Data"
+                } else if (lastAttemptSucceeded) {
+                    "Sync completed; cooling down until $next; open Data"
                 } else {
-                    "Connected; cooling down until $next"
+                    "Last sync didn’t finish; retry after $next; open Data"
                 },
+            completed = lastAttemptSucceeded && !failedAttempt,
         )
     }
     if (failedAttempt) {
@@ -1961,14 +1971,44 @@ internal fun syncHealthUiState(
     if (profile.automaticSyncsPerDay == 1) {
         return SyncHealthUiState(
             SyncHealthKind.Connected,
-            "Connected and idle; automatic sync is once daily; open Data to change cadence",
+            when {
+                attempt == null && success == null -> "Not synced yet; automatic sync is once daily; open Data to change cadence"
+                !lastAttemptSucceeded -> "Last sync didn’t finish; automatic sync is once daily; open Data to change cadence"
+                else -> "Sync due; automatic sync is once daily; open Data to change cadence"
+            },
         )
     }
     return SyncHealthUiState(
         kind = SyncHealthKind.Connected,
-        stateDescription = "Connected and idle; sync now",
+        stateDescription = when {
+            attempt == null && success == null -> "Not synced yet; sync now"
+            !lastAttemptSucceeded -> "Last sync didn’t finish; sync now"
+            else -> "Sync due; sync now"
+        },
         manualSync = true,
     )
+}
+
+@Composable
+internal fun rememberSyncHealthNow(clock: Clock, profile: SimpleFinProfileEntity?): Long {
+    var now by remember(clock) { mutableStateOf(clock.millis()) }
+    var resumeGeneration by remember(clock) { mutableStateOf(0) }
+    LifecycleResumeEffect(clock) {
+        now = clock.millis()
+        resumeGeneration++
+        onPauseOrDispose { }
+    }
+    LaunchedEffect(clock, profile, resumeGeneration) {
+        val current = clock.millis()
+        now = current
+        val next = profile?.let(::simpleFinNextEligibleSyncAt)
+        if (next != null && next != Long.MAX_VALUE && next > current) {
+            val wait = try { Math.subtractExact(next, current) } catch (_: ArithmeticException) { Long.MAX_VALUE }
+            delay(wait)
+            now = clock.millis()
+        }
+    }
+    return now
 }
 
 @Composable
@@ -2098,14 +2138,9 @@ internal fun FlowMoneyTopAppBar(
     val syncHealth = syncHealthUiState(simpleFin, operation, syncHealthNowEpochMillis)
     val syncActionEnabled = operation == null
     val density = LocalDensity.current
-    val label = if (density.fontScale >= 1.5f) when (syncHealth.kind) {
-        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
-        SyncHealthKind.Syncing -> "Syncing"
-        SyncHealthKind.Error -> "Error"
-        SyncHealthKind.ReconnectRequired -> "Fix"
-        SyncHealthKind.Disconnected -> "No bank"
-        SyncHealthKind.Pending -> "Pending"
-    } else syncHealth.label
+    val label = if (density.fontScale >= 1.5f && syncHealth.kind == SyncHealthKind.ReconnectRequired) "Fix"
+        else if (density.fontScale >= 1.5f && syncHealth.kind == SyncHealthKind.Disconnected) "No bank"
+        else syncHealth.label
     val labelStyle = MaterialTheme.typography.labelSmall
     val measurer = rememberTextMeasurer()
     val labelWidth = remember(label, labelStyle, density, measurer) { measurer.measure(label, style = labelStyle, softWrap = false).size.width }
