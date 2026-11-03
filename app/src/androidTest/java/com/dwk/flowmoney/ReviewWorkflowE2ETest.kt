@@ -183,9 +183,7 @@ class ReviewWorkflowE2ETest {
                     .performClick()
                     .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
             }
-            composeRule
-                .onNodeWithTag("review_list")
-                .performScrollToNode(hasTestTag("review_bulk_category_food"))
+            composeRule.onNodeWithTag("review_bulk_actions").performClick()
             composeRule.onNodeWithTag("review_bulk_category_food").performClick()
 
             composeRule.waitUntil(5_000) {

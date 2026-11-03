@@ -33,8 +33,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -88,7 +86,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LocalContentColor
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -2621,6 +2618,7 @@ internal fun ReviewPage(
                     ReviewBulkControls(
                         selectedCount = selectedIds.size,
                         enabled = selectedIds.isNotEmpty() && !operationBusy,
+                        onDone = { selectionMode = false; selectedIds = emptyList() },
                         onCategorize = { category ->
                             val ids = selectedIds
                             selectionMode = false
@@ -2628,6 +2626,20 @@ internal fun ReviewPage(
                             onBulkCategorize(ids, category)
                         },
                         onAcceptOther = { confirmAcceptOther = true },
+                    )
+                }
+                item(key = "review_quick_categories") {
+                    CategoryChoiceBar(
+                        categories = (CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories).distinct(),
+                        enabled = selectedIds.isNotEmpty() && !operationBusy,
+                        moreContentDescription = "More quick bulk categories",
+                        testTagPrefix = "review_quick_category",
+                        onCategory = { category ->
+                            val ids = selectedIds
+                            selectionMode = false
+                            selectedIds = emptyList()
+                            onBulkCategorize(ids, category)
+                        },
                     )
                 }
             }
@@ -2723,35 +2735,39 @@ internal fun ReviewPage(
 private fun ReviewBulkControls(
     selectedCount: Int,
     enabled: Boolean,
+    onDone: () -> Unit,
     onCategorize: (String) -> Unit,
     onAcceptOther: () -> Unit,
 ) {
     val categories = remember { (CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories).distinct() }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-        modifier = Modifier.fillMaxWidth().testTag("review_bulk_controls"),
+    var menuExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) menuExpanded = false }
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth().height(56.dp).testTag("review_bulk_controls"),
     ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text("$selectedCount selected", fontWeight = FontWeight.SemiBold, modifier = Modifier.fillMaxWidth().testTag("review_selected_count"), maxLines = 1)
-            CategoryChoiceBar(
-                categories = categories,
-                enabled = enabled,
-                moreContentDescription = "More bulk categories",
-                testTagPrefix = "review_bulk_category",
-                singleLine = true,
-                onCategory = onCategorize,
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onDone, modifier = Modifier.size(48.dp).testTag("review_done_selecting").semantics { contentDescription = "Done selecting" }) {
+                Text("×", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clearAndSetSemantics {})
+            }
+            BasicText(
+                "$selectedCount selected",
+                modifier = Modifier.weight(1f).testTag("review_selected_count"),
+                style = MaterialTheme.typography.labelLarge.copy(color = MaterialTheme.colorScheme.onSecondaryContainer, fontWeight = FontWeight.SemiBold),
+                maxLines = 1, softWrap = false,
+                autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = MaterialTheme.typography.labelLarge.fontSize),
             )
-            Button(
-                onClick = onAcceptOther,
-                enabled = enabled,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary, contentColor = MaterialTheme.colorScheme.onSecondary),
-                contentPadding = PaddingValues(horizontal = 8.dp),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("review_accept_other_action"),
-            ) {
-                BasicText("Accept as Other", modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.labelLarge.copy(color = LocalContentColor.current, textAlign = TextAlign.Center), maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp))
+            Box {
+                IconButton(onClick = { menuExpanded = true }, enabled = enabled, modifier = Modifier.size(48.dp).testTag("review_bulk_actions").semantics { contentDescription = "Bulk actions" }) {
+                    Text("⋮", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clearAndSetSemantics {})
+                }
+                DropdownMenu(expanded = menuExpanded && enabled, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(text = { Text("Accept as Other…") }, onClick = { menuExpanded = false; onAcceptOther() }, modifier = Modifier.testTag("review_accept_other_action"))
+                    categories.forEach { category ->
+                        DropdownMenuItem(text = { Text(category) }, onClick = { menuExpanded = false; onCategorize(category) }, modifier = Modifier.testTag("review_bulk_category_${category.toCategoryChipTagSuffix()}"))
+                    }
+                }
             }
         }
     }
@@ -2861,10 +2877,10 @@ private fun CategoryChoiceBar(
     enabled: Boolean,
     moreContentDescription: String,
     testTagPrefix: String,
-    singleLine: Boolean = false,
     onCategory: (String) -> Unit,
 ) {
     var moreExpanded by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) moreExpanded = false }
     val visible = categories.take(4)
     val remaining = categories.drop(4)
     val choices: @Composable () -> Unit = {
@@ -2888,7 +2904,7 @@ private fun CategoryChoiceBar(
                     onClick = { moreExpanded = true },
                 )
                 DropdownMenu(
-                    expanded = moreExpanded,
+                    expanded = moreExpanded && enabled,
                     onDismissRequest = { moreExpanded = false },
                     modifier = Modifier.testTag("${testTagPrefix}_menu"),
                 ) {
@@ -2911,11 +2927,7 @@ private fun CategoryChoiceBar(
             }
         }
     }
-    if (singleLine) {
-        Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).testTag("${testTagPrefix}_choices"), horizontalArrangement = Arrangement.spacedBy(8.dp)) { choices() }
-    } else {
-        FlowRow(modifier = Modifier.fillMaxWidth().testTag("${testTagPrefix}_choices"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { choices() }
-    }
+    FlowRow(modifier = Modifier.fillMaxWidth().testTag("${testTagPrefix}_choices"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { choices() }
 }
 
 @Composable
@@ -6899,15 +6911,20 @@ private fun SuggestionChip(
     onClick: () -> Unit,
 ) {
     val tagModifier = if (testTag == null) Modifier else Modifier.testTag(testTag)
-    if (!enabled && !isSelection) {
-        AssistChip(
+    if (!isSelection) {
+        Button(
             onClick = onClick,
-            enabled = false,
-            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            enabled = enabled,
+            shape = MaterialTheme.shapes.large,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            ),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
             modifier = tagModifier.heightIn(min = 48.dp).widthIn(max = 220.dp).then(
                 if (accessibilityLabel == null) Modifier else Modifier.semantics { contentDescription = accessibilityLabel },
             ),
-        )
+        ) { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         return
     }
     val interactionModifier =

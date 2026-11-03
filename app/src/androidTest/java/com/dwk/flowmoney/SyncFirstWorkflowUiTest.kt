@@ -2,6 +2,12 @@ package com.dwk.flowmoney
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.CompositionLocalProvider
@@ -151,6 +157,9 @@ class SyncFirstWorkflowUiTest {
         val after = geometry()
         val density = composeRule.onNodeWithTag("review_row_stable").fetchSemanticsNode().layoutInfo.density.density
         assertTrue("normal mode must not have checkbox gutter", kotlin.math.abs(after[0] - before[0] - 56f * density) < 2f)
+        assertEquals("metadata gutter", 56f * density, after[5] - before[5], 2f)
+        assertEquals("merchant top", before[1], after[1], 1f)
+        assertEquals("amount top", before[4], after[4], 1f)
         assertEquals(before[4] >= before[2], after[4] >= after[2])
         assertEquals(before[3], after[3], 1f)
         assertTrue(after[6] < before[6])
@@ -166,11 +175,12 @@ class SyncFirstWorkflowUiTest {
             }
         }
         composeRule.onNodeWithTag("review_select_action").performClick()
-        composeRule.onNodeWithTag("review_bulk_category_food").assertIsNotEnabled()
-        composeRule.onNodeWithTag("review_accept_other_action").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_accept_other_action").assertDoesNotExist()
         composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_sticky-12"))
         composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed()
         composeRule.onNodeWithTag("review_row_sticky-12").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsDisplayed().assertIsEnabled().performClick()
         composeRule.onNodeWithTag("review_bulk_category_food").assertIsDisplayed().assertIsEnabled()
     }
 
@@ -188,15 +198,100 @@ class SyncFirstWorkflowUiTest {
             }
         }
         composeRule.onNodeWithTag("review_select_action").performClick()
-        listOf("0 selected", "Accept as Other").forEach { label ->
-            val layouts = mutableListOf<TextLayoutResult>()
-            composeRule.onNodeWithText(label, useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
-            assertFalse("$label overflow: ${layouts.single()}", layouts.single().hasVisualOverflow)
+        val layouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithTag("review_selected_count", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertFalse(layouts.single().hasVisualOverflow)
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_compact-5"))
+        val bar = composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed().fetchSemanticsNode()
+        val density = bar.layoutInfo.density.density
+        assertTrue("bar height ${bar.boundsInRoot.height / density}", bar.boundsInRoot.height / density in 55.5f..64f)
+        val card = composeRule.onNodeWithTag("review_row_compact-5").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val list = composeRule.onNodeWithTag("review_list").fetchSemanticsNode().boundsInRoot
+        assertTrue("card=$card bar=${bar.boundsInRoot} list=$list", card.top >= bar.boundsInRoot.bottom - 1 && card.bottom <= list.bottom + 1)
+        listOf("review_done_selecting", "review_bulk_actions").forEach { tag ->
+            val bounds = composeRule.onNodeWithTag(tag).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            assertTrue("$tag $bounds", bounds.width / density >= 47.5f && bounds.height / density >= 47.5f)
+        }
+        composeRule.onNodeWithTag("review_quick_category_choices").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_row_compact-5").performClick()
+        composeRule.onNodeWithTag("review_selected_count").assertTextEquals("1 selected")
+        for (tag in listOf("food", "groceries", "restaurants", "coffee", "more")) {
+            composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_quick_category_$tag"))
+            val target = composeRule.onNodeWithTag("review_quick_category_$tag").fetchSemanticsNode().boundsInRoot
+            assertTrue("quick target $tag $target", target.width / density >= 47.5f && target.height / density >= 47.5f)
         }
         composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_compact-5"))
-        composeRule.onNodeWithTag("review_row_compact-5").assertIsDisplayed().performClick()
-        composeRule.onNodeWithTag("review_selected_count").assertTextEquals("1 selected")
-        composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
+        composeRule.onNodeWithTag("review_accept_other_action").assertIsDisplayed()
+        composeRule.onNodeWithTag("review_bulk_category_food").assertIsDisplayed()
+    }
+
+    @Test fun reviewQuickActionsAndCloseClearSelectionAndDismissUnavailableMenu() {
+        val row = syncedTransaction("quick", LocalDate.of(2026, 7, 10))
+        var busy by mutableStateOf(false)
+        var result: Pair<List<String>, String>? = null
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                ReviewPage(listOf(row), onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { ids, category -> result = ids to category }, onBulkAcceptOther = {}, operationBusy = busy)
+            }
+        }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_row_quick").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
+        composeRule.onNodeWithTag("review_accept_other_action").assertIsDisplayed()
+        composeRule.runOnIdle { busy = true }
+        composeRule.onNodeWithTag("review_accept_other_action").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_done_selecting").assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("review_bulk_controls").assertDoesNotExist()
+        composeRule.runOnIdle { busy = false }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_selected_count").assertTextEquals("0 selected")
+        composeRule.onNodeWithTag("review_row_quick").performClick()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_quick_category_food"))
+        composeRule.onNodeWithTag("review_quick_category_food").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertEquals(listOf("quick") to "Food", result) }
+    }
+
+    @Test fun reviewActionChipsKeepShapeAndDisabledColorsInBothThemes() {
+        val row = syncedTransaction("chip", LocalDate.of(2026, 7, 10))
+        var dark by mutableStateOf(false)
+        var busy by mutableStateOf(false)
+        var onSurface = Color.Unspecified
+        composeRule.setContent {
+            FlowMoneyTheme(darkTheme = dark, dynamicColor = false) {
+                val current = MaterialTheme.colorScheme.onSurface
+                SideEffect { onSurface = current }
+                Surface { ReviewPage(listOf(row), onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = busy) }
+            }
+        }
+        fun pixels(tag: String): Pair<Color, Color> {
+            val node = composeRule.onNodeWithTag(tag).fetchSemanticsNode()
+            val image = composeRule.onNodeWithTag(tag).captureToImage().toPixelMap()
+            val inset = (4 * node.layoutInfo.density.density).toInt().coerceAtMost(image.height - 1)
+            return image[0, 0] to image[image.width / 2, inset]
+        }
+        fun check(tag: String) {
+            val enabled = pixels(tag)
+            assertTrue("$tag enabled must contrast with background", enabled.first != enabled.second)
+            composeRule.runOnIdle { busy = true }
+            val disabled = pixels(tag)
+            val expected = onSurface.copy(alpha = 0.12f).compositeOver(disabled.first)
+            val actual = disabled.second
+            assertTrue("$tag disabled $actual expected $expected", kotlin.math.abs(actual.red - expected.red) < .05f && kotlin.math.abs(actual.green - expected.green) < .05f && kotlin.math.abs(actual.blue - expected.blue) < .05f)
+            assertTrue("$tag enabled and disabled differ", enabled.second != disabled.second)
+            assertEquals("$tag corner shape", enabled.first, disabled.first)
+            composeRule.runOnIdle { busy = false }
+        }
+        for (isDark in listOf(false, true)) {
+            composeRule.runOnIdle { dark = isDark }
+            check("review_category_chip_food")
+            composeRule.onNodeWithTag("review_select_action").performClick()
+            composeRule.onNodeWithTag("review_row_chip").performClick()
+            check("review_quick_category_food")
+            composeRule.onNodeWithTag("review_done_selecting").performClick()
+        }
     }
 
     @Test
@@ -254,6 +349,7 @@ class SyncFirstWorkflowUiTest {
         assertEquals(0, edits)
 
         composeRule.onNodeWithTag("review_row_second").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
         composeRule.onNodeWithTag("review_bulk_category_food").performClick()
         composeRule.runOnIdle {
             assertEquals(listOf("first", "second").toSet(), bulk?.first?.toSet())
@@ -282,9 +378,13 @@ class SyncFirstWorkflowUiTest {
 
         composeRule.onNodeWithTag("review_select_action").performClick()
         composeRule.onNodeWithTag("review_row_accept").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
         composeRule.onNodeWithTag("review_accept_other_action").performClick()
         composeRule.onNodeWithText("Accept as Other?").assertIsDisplayed()
+        composeRule.onNodeWithText("Cancel").performClick()
         composeRule.runOnIdle { assertEquals(null, acceptedIds) }
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
+        composeRule.onNodeWithTag("review_accept_other_action").performClick()
         composeRule.onNodeWithTag("review_confirm_accept_other").performClick()
         composeRule.runOnIdle { assertEquals(listOf("accept"), acceptedIds) }
     }
