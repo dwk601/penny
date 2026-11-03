@@ -3277,11 +3277,11 @@ private fun TransactionFilterBar(
                     (selectedCountry == null || option.country == selectedCountry)
             }?.label ?: selectedCity
     val activeCount = listOf(
-        timeFilter != TransactionTimeFilter.All, selectedCategory != null, whereFilter.isNotBlank(),
+        timeFilter != TransactionTimeFilter.All, selectedCategory != null,
         sourceFilter != TransactionSourceFilter.All, selectedAccountKey != null, unreviewedOnly,
-        selectedCity != null, selectedState != null, selectedCountry != null,
+        selectedCity != null || selectedState != null || selectedCountry != null,
     ).count { it }
-    val hasActiveFilter = activeCount > 0
+    val hasActiveFilter = activeCount > 0 || whereFilter.isNotBlank()
     val summary =
         buildList {
             add(when (timeFilter) {
@@ -3326,37 +3326,57 @@ private fun TransactionFilterBar(
                     .fillMaxWidth()
                     .testTag("transaction_where_filter"),
         )
-        Row(Modifier.fillMaxWidth().testTag("transaction_filter_controls"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).selectableGroup().testTag("transaction_view_mode_group")) {
-                TransactionViewMode.entries.forEach { mode ->
-                    val selected = viewMode == mode
-                    Box(
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
-                            .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
-                            .selectable(selected = selected, role = Role.RadioButton) { onViewModeChange(mode) }
-                            .testTag("transaction_view_${mode.name.lowercase(Locale.US)}").padding(horizontal = 4.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        BasicText(mode.label, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.labelLarge.copy(color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer, textAlign = TextAlign.Center), maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp))
+        val filterLabel = if (activeCount > 0) "Filters · $activeCount" else "Filters"
+        val labelStyle = MaterialTheme.typography.labelLarge
+        val caretStyle = MaterialTheme.typography.bodyLarge
+        val density = LocalDensity.current
+        val measurer = rememberTextMeasurer()
+        val caret = if (isExpanded) "▴" else "▾"
+        val desiredWidth = remember(filterLabel, caret, labelStyle, caretStyle, density, measurer) {
+            with(density) {
+                (measurer.measure(filterLabel, style = labelStyle, softWrap = false).size.width +
+                    measurer.measure(caret, style = caretStyle, softWrap = false).size.width).toDp() + 20.dp
+            }
+        }
+        BoxWithConstraints(Modifier.fillMaxWidth().testTag("transaction_filter_controls")) {
+            val filterWidth = desiredWidth.coerceAtLeast(48.dp).coerceAtMost((maxWidth - 104.dp).coerceAtLeast(48.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.weight(1f).selectableGroup().testTag("transaction_view_mode_group")) {
+                    TransactionViewMode.entries.forEach { mode ->
+                        val selected = viewMode == mode
+                        Box(
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
+                                .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+                                .selectable(selected = selected, role = Role.RadioButton) { onViewModeChange(mode) }
+                                .testTag("transaction_view_${mode.name.lowercase(Locale.US)}").padding(horizontal = 4.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            BasicText(mode.label, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.labelLarge.copy(color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer, textAlign = TextAlign.Center), maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp))
+                        }
                     }
                 }
-            }
-            Row(
-                modifier = Modifier.width(120.dp).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .clickable(role = Role.Button) { onExpandedChange(!isExpanded) }
-                    .semantics { stateDescription = if (isExpanded) "Expanded" else "Collapsed" }
-                    .padding(horizontal = 8.dp).testTag("transaction_filter_toggle"),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                BasicText(if (hasActiveFilter) "Filters · $activeCount" else "Filters", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge.copy(color = MaterialTheme.colorScheme.onSurface), maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp))
-                Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, modifier = Modifier.clearAndSetSemantics { })
+                Row(
+                    modifier = Modifier.width(filterWidth).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                        .clickable(role = Role.Button) { onExpandedChange(!isExpanded) }
+                        .semantics {
+                            contentDescription = if (activeCount > 0) "Filters, $activeCount active" else "Filters"
+                            stateDescription = if (isExpanded) "Expanded" else "Collapsed"
+                        }
+                        .padding(horizontal = 8.dp).testTag("transaction_filter_toggle"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BasicText(filterLabel, modifier = Modifier.weight(1f).testTag("transaction_filter_label"), style = labelStyle.copy(color = MaterialTheme.colorScheme.onSurface), maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = labelStyle.fontSize))
+                    Text(caret, color = MaterialTheme.colorScheme.primary, style = caretStyle, modifier = Modifier.testTag("transaction_filter_caret").clearAndSetSemantics { })
+                }
             }
         }
         if (hasActiveFilter) {
-            FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.Center) {
+            FlowRow(modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary_row"), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.Center, itemVerticalAlignment = Alignment.CenterVertically) {
                 Text(summary, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("transaction_filter_summary"))
-                TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all") }
+                Box(Modifier.weight(1f).widthIn(min = 80.dp), contentAlignment = Alignment.CenterEnd) {
+                    TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all") }
+                }
             }
         }
 

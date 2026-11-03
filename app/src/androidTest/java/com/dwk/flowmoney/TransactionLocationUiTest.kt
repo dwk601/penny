@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasTestTag
@@ -237,6 +238,9 @@ class TransactionLocationUiTest {
     @Test fun freeTextSearchMatchesCityAndStateAndClearRestoresHistory() {
         setTransactionsTab()
         composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Seattle")
+        composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals("Filters")
+        composeRule.onNodeWithTag("transaction_filter_summary").assertExists()
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertExists()
         assertVisible("tx-seattle")
         assertHidden("tx-portland-or", "tx-portland-me", "tx-nowhere")
         scrollTo("transaction_where_filter")
@@ -454,14 +458,33 @@ class TransactionLocationUiTest {
         assertHidden("tx-nowhere")
 
         scrollTo("transaction_filter_clear_compact")
-        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertExists().performClick()
         composeRule.waitForIdle()
 
         assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")
-        composeRule.onNodeWithTag("transaction_filter_clear").assertDoesNotExist()
         composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
         // Clear collapses the panel, so the filter groups are gone with it.
         composeRule.onNodeWithTag("transaction_city_filter_group").assertDoesNotExist()
+    }
+
+    @Test fun everyCombinationOfPlaceFiltersCountsAsOneGroup() {
+        setTransactionsTab()
+        expandFilters()
+        fun choose(tag: String) { scrollTo(tag); composeRule.onNodeWithTag(tag).performClick() }
+        fun count(expected: String) {
+            scrollTo("transaction_filter_toggle")
+            composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals(expected)
+        }
+        choose("transaction_city_filter_seattle"); count("Filters, 1 active")
+        choose("transaction_state_filter_wa"); count("Filters, 1 active")
+        choose("transaction_country_filter_us"); count("Filters, 1 active")
+        choose("transaction_city_filter_all"); count("Filters, 1 active")
+        choose("transaction_state_filter_all"); count("Filters, 1 active")
+        choose("transaction_city_filter_seattle"); count("Filters, 1 active")
+        choose("transaction_country_filter_all"); count("Filters, 1 active")
+        choose("transaction_state_filter_wa"); count("Filters, 1 active")
+        choose("transaction_city_filter_all"); count("Filters, 1 active")
+        choose("transaction_state_filter_all"); count("Filters")
     }
 
     @Test fun compactClearAllResetsLocationFiltersAndCollapses() {

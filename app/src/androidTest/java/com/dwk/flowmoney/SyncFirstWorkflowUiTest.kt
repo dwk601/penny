@@ -499,7 +499,8 @@ class SyncFirstWorkflowUiTest {
         val toggleBounds = composeRule.onNodeWithTag("transaction_filter_toggle").fetchSemanticsNode().boundsInRoot
         val viewBounds = composeRule.onNodeWithTag("transaction_view_mode_group").fetchSemanticsNode().boundsInRoot
         assertTrue(searchBounds.bottom <= toggleBounds.top && viewBounds.top == toggleBounds.top)
-        composeRule.onNodeWithText("Filters · 8", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("Filters · 6", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals("Filters, 6 active")
         composeRule.onAllNodesWithTag("transaction_filter_clear_compact").assertCountEquals(1)
         val summary = composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected)
         val layouts = mutableListOf<TextLayoutResult>()
@@ -507,16 +508,86 @@ class SyncFirstWorkflowUiTest {
         assertFalse(layouts.single().hasVisualOverflow)
         assertTrue(layouts.single().lineCount > 1)
         repeat(layouts.single().lineCount) { assertFalse(layouts.single().isLineEllipsized(it)) }
-        scroll("transaction_search_clear")
-        composeRule.onNodeWithTag("transaction_search_clear").assertContentDescriptionEquals("Clear search").performClick()
-        scroll("transaction_filter_toggle")
-        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected.substringBeforeLast(" · “Brooklyn”"))
         scroll("transaction_filter_clear_compact")
+        val summaryRow = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
+        val clearBounds = composeRule.onNodeWithTag("transaction_filter_clear_compact").fetchSemanticsNode().boundsInRoot
+        assertTrue("clear=$clearBounds summary row=$summaryRow", kotlin.math.abs(clearBounds.right - summaryRow.right) <= 2f)
         composeRule.onNodeWithTag("transaction_filter_clear_compact").assertContentDescriptionEquals("Clear all filters").performClick()
         scroll("transaction_filter_toggle")
         composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
+        assertEquals("", composeRule.onNodeWithTag("transaction_where_filter").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals("Filters").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
         composeRule.onNodeWithText("Filters", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_time_filter_group").assertDoesNotExist()
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_brooklyn"))
+        composeRule.onNodeWithTag("transaction_content_brooklyn").assertIsDisplayed()
+    }
+
+    @Test fun filterControlsFitAtBothWidthsAndEveryFontScale() {
+        var width by mutableStateOf(300)
+        var scale by mutableStateOf(1f)
+        val row = syncedTransaction("filter-size", LocalDate.of(2026, 7, 10))
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(row)), selectedTab = DashboardTab.Transactions,
+                            onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                    }
+                }
+            }
+        }
+        fun verify(label: String, description: String) {
+            for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1f, 1.5f, 2f)) {
+                composeRule.runOnIdle { width = screenWidth; scale = fontScale }
+                composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_filter_controls"))
+                val toggle = composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals(description).fetchSemanticsNode()
+                val bounds = toggle.boundsInRoot
+                val density = toggle.layoutInfo.density.density
+                listOf("transaction_view_list", "transaction_view_map", "transaction_filter_toggle").forEach { tag ->
+                    val target = composeRule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+                    assertTrue("$screenWidth/$fontScale $tag $target", target.width / density >= 47.5f && target.height / density >= 47.5f)
+                }
+                val labelNode = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+                val labelBounds = labelNode.fetchSemanticsNode().boundsInRoot
+                val layouts = mutableListOf<TextLayoutResult>()
+                labelNode.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                assertFalse("$screenWidth/$fontScale $label", layouts.single().hasVisualOverflow)
+                assertFalse(layouts.single().isLineEllipsized(0))
+                assertTrue(layouts.single().layoutInput.style.fontSize.value >= 10f)
+                val caret = composeRule.onNodeWithTag("transaction_filter_caret", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+                assertTrue("toggle=$bounds text=$labelBounds caret=$caret", labelBounds.left >= bounds.left - 1 && labelBounds.right <= caret.left + 1 && caret.right <= bounds.right + 1 && caret.top >= bounds.top && caret.bottom <= bounds.bottom)
+            }
+        }
+        verify("Filters", "Filters")
+        composeRule.onNodeWithTag("transaction_filter_toggle").performClick()
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_category_filter_other"))
+        composeRule.onNodeWithTag("transaction_category_filter_other").performClick()
+        verify("Filters · 1", "Filters, 1 active")
+    }
+
+    @Test fun searchOnlySummarySharesLineAndClearAlignsAtEnd() {
+        val row = syncedTransaction("summary-alignment", LocalDate.of(2026, 7, 10), "A")
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(360.dp, 800.dp))) {
+                FlowMoneyTheme(dynamicColor = false) {
+                    FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(row)), selectedTab = DashboardTab.Transactions,
+                        onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                }
+            }
+        }
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("A")
+        composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals("Filters")
+        composeRule.onNodeWithTag("transaction_filter_summary").assertTextEquals("All time · “A”")
+        val summary = composeRule.onNodeWithTag("transaction_filter_summary").fetchSemanticsNode().boundsInRoot
+        val rowBounds = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
+        val clear = composeRule.onNodeWithTag("transaction_filter_clear_compact").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertTrue("summary=$summary clear=$clear", kotlin.math.abs(summary.center.y - clear.center.y) <= 2f)
+        assertTrue("row=$rowBounds clear=$clear", kotlin.math.abs(rowBounds.right - clear.right) <= 2f)
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
+        assertEquals("", composeRule.onNodeWithTag("transaction_where_filter").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
     }
 
     @Test fun disconnectedAndPendingLabelsAndRoutesRemainDistinctAtAllScales() {
