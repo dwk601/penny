@@ -73,6 +73,10 @@ moving them to `test`. Screenshot testing is not set up.
 | `.agents/skills/simplefin-sync/` | Touching bank sync: connect/reconnect/disconnect, credential storage, the sync worker or throttle, provider-owned columns, the review queue, merchant rules, or transfer classification. |
 | `.agents/skills/room-migrations/` | Changing any `@Entity`, DAO schema, or the Room version in `FlowMoneyDatabase.kt`. |
 | `.agents/skills/release-build/` | Cutting a build into `dist/`, bumping version, or running the on-device upgrade rehearsal. |
+## Engineering standards
+
+- Clean code: clear names, small focused modules, existing conventions; no dead code or unnecessary abstractions.
+- Testing: use E2E tests for real user workflows; do not add unit tests or unit-test scaffolding. Record the runnable E2E command, or mark it TBD until the app exists.
 
 ## Maintaining this file
 
