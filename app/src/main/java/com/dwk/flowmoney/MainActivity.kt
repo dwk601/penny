@@ -769,7 +769,7 @@ fun FlowMoneyApp(
                         message = retryMessage ?: "Reset $rangeLabel: ${current.count.affectedCount} $itemLabel removed",
                         actionLabel = if (retryMessage == null) "Undo" else "Retry",
                         withDismissAction = true,
-                        duration = SnackbarDuration.Long,
+                        duration = SnackbarDuration.Indefinite,
                     )
                 if (result != SnackbarResult.ActionPerformed) {
                     if (viewModel.dismissPendingRangeReset(id)) break
