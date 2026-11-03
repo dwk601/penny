@@ -126,6 +126,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -1097,7 +1098,7 @@ fun FlowMoneyApp(
         scope.launch {
             try {
                 val token = viewModel.acceptAsOther(ids)
-                offerReviewUndo("Accepted ${ids.size} transactions as Other") {
+                offerReviewUndo(reviewAcceptedMessage(ids.size)) {
                     viewModel.restoreReview(token)
                 }
             } catch (failure: CancellationException) {
@@ -2529,6 +2530,9 @@ private fun OverviewReviewStrip(pendingReviewCount: Int, onReview: () -> Unit) {
     }
 }
 
+internal fun reviewAcceptedMessage(count: Int): String =
+    "Accepted $count ${if (count == 1) "transaction" else "transactions"} as Other"
+
 internal data class TransactionDayGroup(
     val date: LocalDate,
     val transactions: List<Transaction>,
@@ -2747,10 +2751,18 @@ private fun ReviewBulkControls(
     val categories = remember { (CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories).distinct() }
     var menuExpanded by remember { mutableStateOf(false) }
     LaunchedEffect(enabled) { if (!enabled) menuExpanded = false }
+    val backdrop = MaterialTheme.colorScheme.background
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth().height(56.dp).testTag("review_bulk_controls"),
+        modifier = Modifier.fillMaxWidth().drawBehind {
+            val horizontalPadding = 20.dp.toPx()
+            drawRect(
+                color = backdrop,
+                topLeft = androidx.compose.ui.geometry.Offset(-horizontalPadding, 0f),
+                size = androidx.compose.ui.geometry.Size(size.width + horizontalPadding * 2, size.height + 8.dp.toPx()),
+            )
+        }.height(56.dp).testTag("review_bulk_controls"),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onDone, modifier = Modifier.size(48.dp).testTag("review_done_selecting").semantics { contentDescription = "Done selecting" }) {
@@ -3345,17 +3357,27 @@ private fun TransactionFilterBar(
         BoxWithConstraints(Modifier.fillMaxWidth().testTag("transaction_filter_controls")) {
             val filterWidth = desiredWidth.coerceAtLeast(48.dp).coerceAtMost((maxWidth - 104.dp).coerceAtLeast(48.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Row(Modifier.weight(1f).selectableGroup().testTag("transaction_view_mode_group")) {
-                    TransactionViewMode.entries.forEach { mode ->
-                        val selected = viewMode == mode
-                        Box(
-                            modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
-                                .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
-                                .selectable(selected = selected, role = Role.RadioButton) { onViewModeChange(mode) }
-                                .testTag("transaction_view_${mode.name.lowercase(Locale.US)}").padding(horizontal = 4.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            BasicText(mode.label, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.labelLarge.copy(color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer, textAlign = TextAlign.Center), maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp))
+                BoxWithConstraints(Modifier.weight(1f).selectableGroup().testTag("transaction_view_mode_group")) {
+                    val availableLabelPx = with(density) { (maxWidth / 2 - 8.dp).coerceAtLeast(0.dp).toPx() }
+                    val sharedSize = remember(availableLabelPx, labelStyle, density, measurer) {
+                        var size = labelStyle.fontSize.value
+                        while (size > 10f && TransactionViewMode.entries.any { mode ->
+                            measurer.measure(mode.label, style = labelStyle.copy(fontSize = size.sp), softWrap = false).size.width > availableLabelPx
+                        }) size = (size - 0.25f).coerceAtLeast(10f)
+                        size.sp
+                    }
+                    Row(Modifier.fillMaxWidth()) {
+                        TransactionViewMode.entries.forEach { mode ->
+                            val selected = viewMode == mode
+                            Box(
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
+                                    .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+                                    .selectable(selected = selected, role = Role.RadioButton) { onViewModeChange(mode) }
+                                    .testTag("transaction_view_${mode.name.lowercase(Locale.US)}").padding(horizontal = 4.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                BasicText(mode.label, modifier = Modifier.fillMaxWidth(), style = labelStyle.copy(fontSize = sharedSize, color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer, textAlign = TextAlign.Center), maxLines = 1, softWrap = false)
+                            }
                         }
                     }
                 }
@@ -3376,10 +3398,13 @@ private fun TransactionFilterBar(
             }
         }
         if (hasActiveFilter) {
+            val clearWidth = remember(labelStyle, density, measurer) {
+                with(density) { measurer.measure("Clear all", style = labelStyle, softWrap = false).size.width.toDp() + 26.dp }.coerceAtLeast(80.dp)
+            }
             FlowRow(modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary_row"), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.Center, itemVerticalAlignment = Alignment.CenterVertically) {
                 Text(summary, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("transaction_filter_summary"))
-                Box(Modifier.weight(1f).widthIn(min = 80.dp), contentAlignment = Alignment.CenterEnd) {
-                    TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all") }
+                Box(Modifier.weight(1f).widthIn(min = clearWidth), contentAlignment = Alignment.CenterEnd) {
+                    TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all", maxLines = 1, softWrap = false) }
                 }
             }
         }
@@ -5842,7 +5867,8 @@ private fun TransactionMetadata(transaction: Transaction, showDate: Boolean, ava
         if (temporal.isEmpty()) 0 else measurer.measure(temporal, style = style, softWrap = false).size.width
     }
     val hasRepeat = transaction.recurringInterval != null
-    val metadataPx = (availablePx - if (hasRepeat) with(density) { 18.dp.toPx() } else 0f).coerceAtLeast(0f)
+    val repeatSize = 14.dp * density.fontScale.coerceAtMost(2f)
+    val metadataPx = (availablePx - if (hasRepeat) with(density) { (repeatSize + 4.dp).toPx() } else 0f).coerceAtLeast(0f)
     val together = temporal.isEmpty() || metadataPx >= temporalWidth + with(density) { 74.dp.toPx() }
     val flexibleWidth = if (together && temporal.isNotEmpty()) metadataPx - temporalWidth - with(density) { 10.dp.toPx() } else metadataPx
     val minimumPlaceWidth = remember(category, place, style, density, measurer) {
@@ -5853,7 +5879,7 @@ private fun TransactionMetadata(transaction: Transaction, showDate: Boolean, ava
     Column {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (hasRepeat) {
-                Icon(painterResource(R.drawable.ic_repeat), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp).testTag("transaction_repeat_${transaction.id}"))
+                Icon(painterResource(R.drawable.ic_repeat), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(repeatSize).testTag("transaction_repeat_${transaction.id}"))
                 Spacer(Modifier.width(4.dp))
             }
             Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)

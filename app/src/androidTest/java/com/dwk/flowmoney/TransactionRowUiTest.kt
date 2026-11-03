@@ -311,7 +311,10 @@ class TransactionRowUiTest {
         val row = transaction("metadata", -100).copy(source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchased, locationCity = "An exceptionally long municipality name that must yield", locationState = "NY", recurringInterval = if (recurring) RecurrenceInterval.Monthly else null)
         setTransactionScreen(row, width = 300, fontScale = fontScale)
         scrollToTransaction(row.id)
-        if (recurring) composeRule.onNodeWithTag("transaction_repeat_metadata", useUnmergedTree = true).assertExists()
+        if (recurring) {
+            val icon = composeRule.onNodeWithTag("transaction_repeat_metadata", useUnmergedTree = true).fetchSemanticsNode()
+            assertEquals(14f * fontScale, icon.boundsInRoot.width / icon.layoutInfo.density.density, 1f)
+        }
         val flexible = composeRule.onNodeWithText("Other · An exceptionally long municipality name that must yield, NY", useUnmergedTree = true)
         val temporal = composeRule.onNodeWithText("Jul 10, 2:15 PM", useUnmergedTree = true)
         val flexLayout = mutableListOf<TextLayoutResult>()

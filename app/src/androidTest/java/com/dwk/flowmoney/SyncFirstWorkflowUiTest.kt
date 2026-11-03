@@ -520,6 +520,10 @@ class SyncFirstWorkflowUiTest {
         scroll("transaction_filter_clear_compact")
         val summaryRow = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
         val clearBounds = composeRule.onNodeWithTag("transaction_filter_clear_compact").fetchSemanticsNode().boundsInRoot
+        val clearText = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("Clear all", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(clearText) }
+        assertEquals(1, clearText.single().lineCount)
+        assertFalse(clearText.single().hasVisualOverflow)
         assertTrue("clear=$clearBounds summary row=$summaryRow", kotlin.math.abs(clearBounds.right - summaryRow.right) <= 2f)
         composeRule.onNodeWithTag("transaction_filter_clear_compact").assertContentDescriptionEquals("Clear all filters").performClick()
         scroll("transaction_filter_toggle")
@@ -558,6 +562,13 @@ class SyncFirstWorkflowUiTest {
                     val target = composeRule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
                     assertTrue("$screenWidth/$fontScale $tag $target", target.width / density >= 47.5f && target.height / density >= 47.5f)
                 }
+                val sizes = listOf("List", "Map").map { mode ->
+                    val result = mutableListOf<TextLayoutResult>()
+                    composeRule.onNodeWithText(mode, useUnmergedTree = true).assertIsDisplayed().performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(result) }
+                    assertFalse("$screenWidth/$fontScale $mode overflow", result.single().hasVisualOverflow)
+                    result.single().layoutInput.style.fontSize
+                }
+                assertEquals("List and Map share a text size", sizes[0], sizes[1])
                 val labelNode = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
                 val labelBounds = labelNode.fetchSemanticsNode().boundsInRoot
                 val layouts = mutableListOf<TextLayoutResult>()
@@ -574,6 +585,36 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_category_filter_other"))
         composeRule.onNodeWithTag("transaction_category_filter_other").performClick()
         verify("Filters · 1", "Filters, 1 active")
+    }
+
+    @Test fun acceptedOtherMessageUsesSingularAndPlural() {
+        assertEquals("Accepted 1 transaction as Other", reviewAcceptedMessage(1))
+        assertEquals("Accepted 2 transactions as Other", reviewAcceptedMessage(2))
+    }
+
+    @Test fun clearAllMovesIntactToNextLineAtLargeFont() {
+        val row = syncedTransaction("amazon-wrap", LocalDate.of(2026, 7, 10), "Amazon")
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(360.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(row)), selectedTab = DashboardTab.Transactions,
+                            onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                    }
+                }
+            }
+        }
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Amazon")
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_filter_clear_compact"))
+        val summary = composeRule.onNodeWithTag("transaction_filter_summary").fetchSemanticsNode().boundsInRoot
+        val clear = composeRule.onNodeWithTag("transaction_filter_clear_compact").fetchSemanticsNode().boundsInRoot
+        val rowBounds = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
+        val text = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("Clear all", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(text) }
+        assertEquals(1, text.single().lineCount)
+        assertFalse(text.single().hasVisualOverflow)
+        assertTrue("summary=$summary clear=$clear", clear.top >= summary.bottom - 1)
+        assertTrue(kotlin.math.abs(clear.right - rowBounds.right) <= 2f)
     }
 
     @Test fun searchOnlySummarySharesLineAndClearAlignsAtEnd() {
