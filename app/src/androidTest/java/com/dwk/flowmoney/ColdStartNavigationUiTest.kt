@@ -239,6 +239,9 @@ class ColdStartNavigationUiTest {
         lateinit var editorRoot: View
         composeRule.runOnUiThread {
             editorRoot = if (Build.VERSION.SDK_INT >= 29) WindowInspector.getGlobalWindowViews().single { it.hasWindowFocus() } else host
+        }
+        composeRule.waitUntil(5_000) { ViewCompat.getRootWindowInsets(editorRoot)?.isVisible(WindowInsetsCompat.Type.ime()) == true }
+        composeRule.runOnUiThread {
             checkNotNull(keyboard).hide()
             if (Build.VERSION.SDK_INT >= 29) {
                 (host.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(editorRoot.windowToken, 0)
