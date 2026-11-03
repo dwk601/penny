@@ -9,9 +9,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.DeviceConfigurationOverride
+import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.FontScale
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyDescendant
@@ -19,9 +28,12 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,6 +113,52 @@ class SyncFirstWorkflowUiTest {
                 .fetchSemanticsNode()
                 .children.size,
         )
+    }
+
+    @Test
+    fun reviewSelectionKeepsPresentationGeometryAt300Dp() {
+        val transaction = syncedTransaction("stable", LocalDate.of(2026, 7, 10), "A long merchant name for the review queue").copy(accountName = "Checking")
+        var edits = 0
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 800.dp))) {
+                FlowMoneyTheme(dynamicColor = false) {
+                    ReviewPage(listOf(transaction), onEdit = { edits++ }, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false)
+                }
+            }
+        }
+        fun geometry(): List<Float> {
+            composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_stable"))
+            val row = composeRule.onNodeWithTag("review_row_stable").fetchSemanticsNode().boundsInRoot
+            val merchant = composeRule.onNodeWithText(transaction.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val amount = composeRule.onNodeWithText("-\$5.00", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val metadata = composeRule.onNodeWithText("Other · Checking", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            return listOf(merchant.left - row.left, merchant.top - row.top, amount.left - row.left, amount.top - row.top, metadata.left - row.left, metadata.width)
+        }
+        val before = geometry()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_select_action"))
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        assertEquals(before, geometry())
+        composeRule.onNodeWithTag("review_row_stable").performClick().assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
+        assertEquals(0, edits)
+    }
+
+    @Test
+    fun reviewIdentityAnnouncesPostedAndPurchaseDatesAndRecurrence() {
+        val posted = syncedTransaction("posted", LocalDate.of(2026, 7, 10), "Posted cafe")
+        val purchased = syncedTransaction("purchase", LocalDate.of(2026, 7, 10), "Purchase cafe").copy(
+            transactedAtEpochMillis = posted.occurredAtEpochMillis,
+            recurringInterval = RecurrenceInterval.Monthly,
+        )
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                ReviewPage(
+                    unreviewedTransactions = listOf(posted, purchased), onEdit = {}, onCategorize = { _, _, _ -> },
+                    onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false,
+                )
+            }
+        }
+        composeRule.onNodeWithContentDescription("Posted cafe, -\$5.00, Other, Posted Jul 10, 2026", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithContentDescription("Purchase cafe, -\$5.00, Other, Purchase Jul 10, 2026, 12:00 PM, Recurring Monthly", useUnmergedTree = true).assertExists()
     }
 
     @Test
@@ -242,6 +300,84 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithTag("transaction_category_filter_category15").assertExists()
     }
 
+    @Test fun filterSummaryWrapsAndClearsCorrectlyAtOneX() = assertFilterSummary(1f)
+    @Test fun filterSummaryWrapsAndClearsCorrectlyAtTwoX() = assertFilterSummary(2f)
+
+    private fun assertFilterSummary(fontScale: Float) {
+        val transaction = syncedTransaction("brooklyn", LocalDate.of(2026, 7, 10), "Brooklyn Cafe").copy(accountKey = "account-a", accountName = "Checking", locationCity = "Brooklyn", locationState = "NY", locationCountry = "US")
+        val accounts = listOf(account("account-a", "Checking", "Bank A"), account("account-b", "Checking", "Bank B"))
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(fontScale)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(transaction), simpleFin = SimpleFinUiState(accounts = accounts)),
+                            selectedTab = DashboardTab.Transactions, onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                    }
+                }
+            }
+        }
+        fun scroll(tag: String) = composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag(tag))
+        composeRule.onNodeWithTag("transaction_filter_toggle").performClick()
+        scroll("transaction_time_filter_group")
+        composeRule.onNodeWithText("Range").assertIsDisplayed()
+        composeRule.onNodeWithTag("transaction_filter_week").performClick()
+        scroll("transaction_source_filter_synced")
+        composeRule.onNodeWithTag("transaction_source_filter_synced").performClick()
+        scroll("transaction_account_filter_action")
+        composeRule.onNodeWithTag("transaction_account_filter_action").performClick()
+        composeRule.onNodeWithText("Checking (Bank A)").performClick()
+        scroll("transaction_unreviewed_filter")
+        composeRule.onNodeWithTag("transaction_unreviewed_filter").performClick()
+        scroll("transaction_category_filter_other")
+        composeRule.onNodeWithTag("transaction_category_filter_other").performClick()
+        scroll("transaction_city_filter_brooklyn")
+        composeRule.onNodeWithTag("transaction_city_filter_brooklyn").performClick()
+        scroll("transaction_country_filter_us")
+        composeRule.onNodeWithTag("transaction_country_filter_us").performClick()
+        scroll("transaction_where_filter")
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Brooklyn")
+        val expected = "Last 7 days · Other · Synced · Checking (Bank A) · Needs review · Brooklyn · US · “Brooklyn”"
+        scroll("transaction_filter_toggle")
+        val summary = composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected)
+        val layouts = mutableListOf<TextLayoutResult>()
+        summary.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertFalse(layouts.single().hasVisualOverflow)
+        assertTrue(layouts.single().lineCount > 1)
+        repeat(layouts.single().lineCount) { assertFalse(layouts.single().isLineEllipsized(it)) }
+        scroll("transaction_search_clear")
+        composeRule.onNodeWithTag("transaction_search_clear").assertContentDescriptionEquals("Clear search").performClick()
+        scroll("transaction_filter_toggle")
+        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected.substringBeforeLast(" · “Brooklyn”"))
+        scroll("transaction_filter_clear_compact")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertContentDescriptionEquals("Clear all filters").performClick()
+        scroll("transaction_filter_toggle")
+        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals("All time")
+        composeRule.onNodeWithTag("transaction_time_filter_group").assertDoesNotExist()
+    }
+
+    @Test fun disconnectedAndPendingLabelsAndRoutesRemainDistinctAtAllScales() {
+        var scale by mutableStateOf(1f)
+        var pending by mutableStateOf(false)
+        var busy by mutableStateOf(false)
+        var dataClicks = 0
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                FlowMoneyTheme(dynamicColor = false) {
+                    FlowMoneyTopAppBar(onData = { dataClicks++ }, onAddTransaction = {}, simpleFin = SimpleFinUiState(isConnectionPending = pending), operation = if (busy) DataOperation.Import else null)
+                }
+            }
+        }
+        for (fontScale in listOf(1f, 1.5f, 2f)) for (isPending in listOf(false, true)) {
+            composeRule.runOnIdle { scale = fontScale; pending = isPending; busy = false }
+            val label = if (isPending) "Pending" else if (fontScale >= 1.5f) "No bank" else "Disconnected"
+            composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+            val description = if (isPending) "Connection pending; open Data to retry" else "Bank sync disconnected; open Data to connect"
+            composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, description)).performClick()
+        }
+        composeRule.runOnIdle { assertEquals(6, dataClicks); busy = true }
+        composeRule.onNodeWithTag("sync_health_action").assertIsNotEnabled()
+    }
+
     @Test
     fun syncHealthRoutesDisconnectedAndDailyStatesToDataAndEligibleStateToManualSync() {
         val now = 1_800_000_000_000L
@@ -251,8 +387,8 @@ class SyncFirstWorkflowUiTest {
         composeRule.setContent {
             MaterialTheme {
                 FlowMoneyTopAppBar(
-                    selectedTab = DashboardTab.Overview,
                     onData = { dataClicks++ },
+                    onAddTransaction = {},
                     simpleFin = simpleFin,
                     syncHealthNowEpochMillis = now,
                     onManualSync = { syncClicks++ },
@@ -547,13 +683,8 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithText("as of ${listDateText(balanceDateSeconds * 1000L)}").assertIsDisplayed()
     }
 
-    /**
-     * The Overview banner is a review prompt, not a sync log: a healthy connection must say nothing
-     * about its last successful sync. Only the states the user has to act on keep a status line, and
-     * the pending-review count stays regardless.
-     */
     @Test
-    fun overviewBannerDropsHealthySyncTimestampsButKeepsReviewAndActionableStates() {
+    fun overviewReviewStaysSeparateFromTopBarConnectionStatus() {
         FlowMoneyDatabase.resetForTest()
         context.deleteDatabase("flow_money.db")
         val dao = FlowMoneyDatabase.get(context).simpleFinDao()
@@ -590,58 +721,41 @@ class SyncFirstWorkflowUiTest {
         }
 
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithTag("overview_sync_review_banner").assertExists() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2") }.isSuccess
         }
-        composeRule.waitUntil(5_000) {
-            runCatching {
-                composeRule
-                    .onNodeWithTag("overview_pending_review_count")
-                    .assertTextEquals("2 synced transactions available for optional corrections")
-            }.isSuccess
-        }
-        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
-        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
         composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed()
-        composeRule.onNodeWithTag("overview_sync_data_action").assertDoesNotExist()
-
-        // A never-synced but healthy connection is still silent about sync history.
-        runBlocking { dao.upsertProfile(healthy.copy(lastSuccessfulSyncAtEpochMillis = null)) }
-        composeRule.waitForIdle()
-        composeRule.onNodeWithText("No successful sync yet").assertDoesNotExist()
+        composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed()
         composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
-        composeRule
-            .onNodeWithTag("overview_pending_review_count")
-            .assertTextEquals("2 synced transactions available for optional corrections")
 
-        // States the user must act on keep their status line.
+        fun assertNoOverviewSyncActions() {
+            composeRule.onAllNodesWithContentDescription("Bank sync status").assertCountEquals(1)
+            composeRule.onNodeWithText("Connect bank").assertDoesNotExist()
+            composeRule.onNodeWithText("Open Data").assertDoesNotExist()
+            composeRule.onNodeWithText("Adjust sync cadence", substring = true).assertDoesNotExist()
+        }
         runBlocking { dao.upsertProfile(healthy.copy(isPaused = true, lastError = "SimpleFIN reconnect required")) }
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithText("Reconnect required").assertIsDisplayed() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Bank reconnect required; open Data")) }.isSuccess
         }
-        composeRule.onNodeWithTag("overview_sync_data_action").assertIsDisplayed()
-
+        assertNoOverviewSyncActions()
         runBlocking { dao.clearProfile() }
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithText("Bank not connected").assertIsDisplayed() }.isSuccess
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Bank sync disconnected; open Data to connect")) }.isSuccess
         }
-        composeRule.onNodeWithText("Connect bank").assertIsDisplayed()
-        composeRule
-            .onNodeWithTag("overview_pending_review_count")
-            .assertTextEquals("2 synced transactions available for optional corrections")
-
-        // With nothing to review the banner falls back to its empty line, still without sync history.
+        assertNoOverviewSyncActions()
+        runBlocking { dao.upsertProfile(healthy.copy(automaticSyncsPerDay = 1, lastSuccessfulSyncAtEpochMillis = 1, lastSyncAttemptAtEpochMillis = 1)) }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Connected and idle; automatic sync is once daily; open Data to change cadence")) }.isSuccess
+        }
+        assertNoOverviewSyncActions()
+        composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2")
         composeRule.runOnIdle {
             gateway.rows.value = gateway.rows.value.map { it.copy(reviewedAtEpochMillis = 1L) }
             gateway.pending.value = emptyList()
         }
         composeRule.waitUntil(5_000) {
-            runCatching {
-                composeRule
-                    .onNodeWithTag("overview_pending_review_count")
-                    .assertTextEquals("No synced transactions to check")
-            }.isSuccess
+            runCatching { composeRule.onNodeWithTag("overview_review_action").assertDoesNotExist() }.isSuccess
         }
-        composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
     }
 
     private class BannerGateway(

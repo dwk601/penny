@@ -9,6 +9,9 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.hasContentDescription
 import androidx.test.core.app.ActivityScenario
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
@@ -151,9 +154,11 @@ class MainViewModelReadinessTest {
             transactionOpen = false
 
             composeRule.waitUntil(5_000) {
-                composeRule.onAllNodesWithText(legacy.merchant).fetchSemanticsNodes().isNotEmpty()
+                composeRule.onAllNodesWithTag("app_loading_state").fetchSemanticsNodes().isEmpty()
             }
-            composeRule.onAllNodesWithText(legacy.merchant).onFirst().assertIsDisplayed()
+            composeRule.onNodeWithTag("tab_transactions").performClick()
+            composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasContentDescription(legacy.merchant, substring = true))
+            composeRule.onAllNodesWithText(legacy.merchant, useUnmergedTree = true).onFirst().assertIsDisplayed()
             composeRule.onNodeWithTag("app_loading_state").assertDoesNotExist()
             composeRule.onNodeWithTag("empty_add_transaction").assertDoesNotExist()
             val importedIds = runBlocking { database.transactionDao().getAll() }.map { it.id }

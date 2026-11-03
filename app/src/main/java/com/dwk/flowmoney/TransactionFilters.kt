@@ -155,7 +155,9 @@ private fun Transaction.matchesSource(filter: TransactionSourceFilter): Boolean 
 private fun Transaction.matchesWhere(query: String): Boolean =
     merchant.searchKey().contains(query) ||
         note.searchKey().contains(query) ||
-        accountName.orEmpty().searchKey().contains(query)
+        accountName.orEmpty().searchKey().contains(query) ||
+        locationCity.searchKey().contains(query) ||
+        locationState.searchKey().contains(query)
 
 private data class AccountOptionData(
     val accountKey: String,

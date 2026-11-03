@@ -18,6 +18,7 @@ import androidx.compose.ui.test.ForcedSize
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -102,7 +103,13 @@ class AdaptiveShellUiTest {
         val bottomNavigation = bounds("compact_navigation")
         assertTrue("content=$compactContent navigation=$bottomNavigation", compactContent.bottom <= bottomNavigation.top)
         val fab = bounds("add_transaction_fab")
-        assertTrue("fab=$fab navigation=$bottomNavigation", fab.bottom <= bottomNavigation.top)
+        val bar = bounds("penny_top_bar")
+        assertTrue("add=$fab bar=$bar", fab.top >= bar.top && fab.bottom <= bar.bottom && fab.right <= bar.right)
+        assertTrue("add=$fab content=$compactContent", fab.bottom <= compactContent.top)
+        assertTrue("add=$fab navigation=$bottomNavigation", fab.bottom <= bottomNavigation.top)
+        composeRule.onAllNodesWithTag("add_transaction_fab").assertCountEquals(1)
+        val compactDensity = composeRule.onNodeWithTag("add_transaction_fab").fetchSemanticsNode().layoutInfo.density.density
+        assertTrue(fab.width / compactDensity >= 48f && fab.height / compactDensity >= 48f)
 
         composeRule.runOnIdle { resize(600.dp) }
         val wideContent = bounds("destination_content")
@@ -111,7 +118,12 @@ class AdaptiveShellUiTest {
         val root = composeRule.onRoot().fetchSemanticsNode().boundsInRoot
         val wideFab = bounds("add_transaction_fab")
         assertTrue("content=$wideContent root=$root", wideContent.bottom < root.bottom)
-        assertTrue("fab=$wideFab content=$wideContent", wideFab.bottom <= wideContent.bottom)
+        val wideBar = bounds("penny_top_bar")
+        assertTrue("add=$wideFab bar=$wideBar", wideFab.top >= wideBar.top && wideFab.bottom <= wideBar.bottom && wideFab.right <= wideBar.right)
+        assertTrue("add=$wideFab content=$wideContent", wideFab.bottom <= wideContent.top)
+        val wideDensity = composeRule.onNodeWithTag("add_transaction_fab").fetchSemanticsNode().layoutInfo.density.density
+        assertTrue(wideFab.width / wideDensity >= 48f && wideFab.height / wideDensity >= 48f)
+        composeRule.onAllNodesWithTag("add_transaction_fab").assertCountEquals(1)
     }
 
     @Test
@@ -121,14 +133,20 @@ class AdaptiveShellUiTest {
             var width by remember { mutableStateOf(599.dp) }
             resize = { width = it }
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width, 800.dp))) {
-                MaterialTheme { TestShell(DashboardTab.Review, {}) }
+                MaterialTheme { TestShell(DashboardTab.Review, {}, reviewOriginTab = DashboardTab.Insights) }
             }
         }
 
         composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
+        composeRule.onNodeWithTag("tab_insights").assertIsSelected()
+        composeRule.onNodeWithTag("tab_overview").assertIsNotSelected()
+        composeRule.onNodeWithTag("tab_transactions").assertIsNotSelected()
         composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
         composeRule.runOnIdle { resize(600.dp) }
         composeRule.onAllNodesWithTag("tab_review").assertCountEquals(0)
+        composeRule.onNodeWithTag("tab_insights").assertIsSelected()
+        composeRule.onNodeWithTag("tab_overview").assertIsNotSelected()
+        composeRule.onNodeWithTag("tab_transactions").assertIsNotSelected()
         composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
     }
 
@@ -176,9 +194,11 @@ class AdaptiveShellUiTest {
 private fun TestShell(
     selectedTab: DashboardTab,
     onTabSelected: (DashboardTab) -> Unit,
+    reviewOriginTab: DashboardTab = DashboardTab.Overview,
 ) {
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
+        reviewOriginTab = reviewOriginTab,
         snackbarHostState = remember { SnackbarHostState() },
         onTabSelected = onTabSelected,
         onAddTransaction = {},

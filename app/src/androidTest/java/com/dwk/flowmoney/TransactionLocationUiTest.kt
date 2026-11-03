@@ -11,10 +11,16 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextClearance
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -175,6 +181,31 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithTag("transactions_unmappable").assertExists()
     }
 
+    @Test fun unmappableSheetUsesSharedRowsAndScrollsToEditableLastItem() {
+        val date = LocalDate.of(2026, 7, 10).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = (0..11).map { index ->
+            Transaction("sheet-$index", date, "Merchant $index", "Other", "", -12300 - index,
+                accountName = "Checking", locationState = if (index == 0) "NY" else null)
+        }
+        var edited: String? = null
+        val geocoder = PlaceGeocoder(FlowMoneyDatabase.get(context).placeGeocodeDao())
+        composeRule.setContent {
+            MaterialTheme { TransactionMap(transactions = rows, geocoder = geocoder, onEdit = { edited = it.id }, modifier = Modifier.fillMaxSize()) }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("transactions_unmappable").performClick()
+        composeRule.onNodeWithTag("transaction_unmappable_sheet").assertExists()
+        composeRule.onNodeWithText("Other · NY", useUnmergedTree = true).assertExists()
+        composeRule.onNode(hasText("Jul 10") and hasAnyAncestor(hasTestTag("transaction_content_sheet-0")), useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("-\$123.00", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_map_rows").performScrollToNode(hasTestTag("transaction_content_sheet-11"))
+        composeRule.onNode(hasText("Other · Checking") and hasAnyAncestor(hasTestTag("transaction_content_sheet-11")), useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("-\$123.11", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_content_sheet-11").performClick()
+        composeRule.runOnIdle { org.junit.Assert.assertEquals("sheet-11", edited) }
+        composeRule.onNodeWithTag("transaction_unmappable_sheet").assertDoesNotExist()
+    }
+
     @Test fun everyLocationFilterGroupIsOfferedOnlyForPlacesThatExist() {
         setTransactionsTab()
         expandFilters()
@@ -194,6 +225,21 @@ class TransactionLocationUiTest {
         scrollTo("transaction_country_filter_group")
         composeRule.onNodeWithTag("transaction_country_filter_us").assertExists()
         composeRule.onNodeWithTag("transaction_country_filter_ca").assertDoesNotExist()
+    }
+
+    @Test fun freeTextSearchMatchesCityAndStateAndClearRestoresHistory() {
+        setTransactionsTab()
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Seattle")
+        assertVisible("tx-seattle")
+        assertHidden("tx-portland-or", "tx-portland-me", "tx-nowhere")
+        scrollTo("transaction_where_filter")
+        composeRule.onNodeWithTag("transaction_where_filter").performTextClearance()
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("WA")
+        assertVisible("tx-seattle")
+        assertHidden("tx-portland-or", "tx-portland-me", "tx-nowhere")
+        scrollTo("transaction_filter_clear_compact")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
+        assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")
     }
 
     @Test fun selectingADuplicatedCityNarrowsToExactlyThatPlace() {
@@ -359,13 +405,17 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithTag("transaction_city_filter_seattle").performClick()
         composeRule.waitForIdle()
 
+        scrollTo("transaction_view_map")
         composeRule.onNodeWithTag("transaction_view_map").performClick()
         composeRule.waitForIdle()
 
+        composeRule.onNodeWithTag("transaction_view_map").assertIsSelected()
+        composeRule.onNodeWithTag("transactions_list").performScrollToIndex(2)
         composeRule.onNodeWithTag("transactions_map").assertExists()
-        composeRule.onNodeWithTag("transaction_city_filter_seattle").assertIsSelected()
         // Everything on the map now has a place, so there is nothing to report as unmappable.
         composeRule.onNodeWithTag("transactions_unmappable").assertDoesNotExist()
+        scrollTo("transaction_city_filter_seattle")
+        composeRule.onNodeWithTag("transaction_city_filter_seattle").assertIsSelected()
     }
 
     @Test fun optionsThatDisappearFromTheDataClearTheSelectionInsteadOfEmptyingTheList() {
@@ -407,6 +457,19 @@ class TransactionLocationUiTest {
         composeRule.onNodeWithTag("transaction_city_filter_group").assertDoesNotExist()
     }
 
+    @Test fun compactClearAllResetsLocationFiltersAndCollapses() {
+        setTransactionsTab()
+        expandFilters()
+        scrollTo("transaction_city_filter_group")
+        composeRule.onNodeWithTag("transaction_city_filter_portlandorus").performClick()
+        assertVisible("tx-portland-or")
+        scrollTo("transaction_filter_clear_compact")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
+        assertVisible("tx-portland-or", "tx-portland-me", "tx-seattle", "tx-nowhere")
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
+        composeRule.onNodeWithTag("transaction_city_filter_group").assertDoesNotExist()
+    }
+
     private fun setTransactionsTab() {
         composeRule.setContent {
             MaterialTheme {
@@ -415,7 +478,7 @@ class TransactionLocationUiTest {
                         MainUiState(
                             isLoading = false,
                             sortedTransactions = transactions,
-                            recentTransactions = transactions,
+                            latestSpendingTransactions = transactions,
                             rangeTransactions = transactions,
                             metrics = DashboardMetrics(0, 0, transactions.size),
                             dateRange =

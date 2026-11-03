@@ -157,6 +157,8 @@ class RangeResetUiTest {
                 .fetchSemanticsNode()
                 .config[SemanticsActions.OnClick]
                 .action!!
+        composeRule.onNodeWithTag("tab_transactions").performClick()
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_${editorTarget.id}"))
         composeRule.onNodeWithTag("transaction_content_${editorTarget.id}").performClick()
         composeRule.onNodeWithTag("transaction_editor").assertIsDisplayed()
         val saveAction =

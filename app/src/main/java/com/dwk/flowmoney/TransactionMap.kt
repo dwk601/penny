@@ -4,12 +4,15 @@ import android.view.ViewGroup
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -314,6 +317,7 @@ private fun PlaceTransactionSheet(
     onDismiss: () -> Unit,
     testTag: String,
 ) {
+    val amountWidth = rememberTransactionAmountWidth(transactions)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -334,38 +338,18 @@ private fun PlaceTransactionSheet(
                 shape = MaterialTheme.shapes.large,
                 modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
             ) {
-                Column {
-                    transactions.forEach { transaction ->
-                        TransactionMapRow(
-                            merchant = transaction.merchant,
-                            subtitle = "${transaction.category.ifBlank { "Other" }} · ${MoneyFormatter.formatUsd(transaction.cents)}",
-                            onClick = { onEdit(transaction) },
-                        )
+                LazyColumn(modifier = Modifier.testTag("transaction_map_rows")) {
+                    items(transactions, key = { it.id }) { transaction ->
+                        Box(Modifier.testTag("transaction_map_row")) {
+                            TransactionRow(
+                                transaction = transaction,
+                                amountWidth = amountWidth,
+                                showDate = true,
+                                onClick = { onEdit(transaction) },
+                            )
+                        }
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TransactionMapRow(
-    merchant: String,
-    subtitle: String,
-    onClick: () -> Unit,
-) {
-    Column(
-        modifier =
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 10.dp)
-                .testTag("transaction_map_row"),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        TextButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(merchant, style = MaterialTheme.typography.bodyLarge)
-                Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             }
         }
     }

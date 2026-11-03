@@ -11,6 +11,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
@@ -29,6 +33,7 @@ import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -219,6 +224,43 @@ class Phase4UiTest {
     }
 
     @Test
+    fun editorSaveLabelsStayContainedForExpenseIncomeAndEffectiveTransfers() {
+        var width by mutableStateOf(360)
+        var scale by mutableStateOf(1f)
+        var draft by mutableStateOf(newEditorDraft().copy(amount = "12.50", isExpense = true))
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                    MaterialTheme {
+                        TransactionEditor(transaction = null, draft = draft, suggestionHistory = TransactionSuggestionHistory.Empty,
+                            onDraftChange = { draft = it }, onSave = {}, onDelete = {}, onCancel = {}, persistenceBusy = false)
+                    }
+                }
+            }
+        }
+        val examples = listOf(
+            newEditorDraft().copy(amount = "12.50", isExpense = true) to "Save expense",
+            newEditorDraft().copy(amount = "12.50", isExpense = false) to "Save income",
+            newEditorDraft().copy(amount = "12.50", isExpense = true, source = "simplefin", flowKind = FlowKind.TRANSFER) to "Save transfer",
+            newEditorDraft().copy(amount = "12.50", isExpense = false, flowKind = FlowKind.NORMAL, flowKindOverride = FlowKind.TRANSFER) to "Save transfer",
+            newEditorDraft().copy(amount = "12.50", isExpense = true, flowKind = FlowKind.TRANSFER, flowKindOverride = FlowKind.NORMAL) to "Save expense",
+        )
+        for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1f, 2f)) for ((example, label) in examples) {
+            composeRule.runOnIdle { width = screenWidth; scale = fontScale; draft = example }
+            val save = composeRule.onNodeWithTag("save_transaction_button").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            composeRule.onNodeWithTag("delete_transaction_button").assertIsDisplayed()
+            val text = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+            val bounds = text.fetchSemanticsNode().boundsInRoot
+            val layouts = mutableListOf<TextLayoutResult>()
+            text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertEquals(1, layouts.single().lineCount)
+            assertFalse(layouts.single().isLineEllipsized(0))
+            assertFalse("$screenWidth/$fontScale $label overflow", layouts.single().hasVisualOverflow)
+            assertTrue("$screenWidth/$fontScale $label $bounds not within $save", bounds.left >= save.left && bounds.right <= save.right && bounds.top >= save.top && bounds.bottom <= save.bottom)
+        }
+    }
+
+    @Test
     fun nearbySuggestionAddressExpandsMoreDetailsAndStaysExpanded() {
         val draftState =
             mutableStateOf(
@@ -333,6 +375,96 @@ class Phase4UiTest {
     }
 
     @Test
+    fun transactionsHeadingStaysSingleLineAtTwoXFont() {
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(360.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    MaterialTheme {
+                        FlowMoneyScreen(
+                            uiState = MainUiState(isLoading = false), selectedTab = DashboardTab.Transactions,
+                            onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {},
+                            onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {},
+                        )
+                    }
+                }
+            }
+        }
+        val layouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("Transactions").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertEquals(1, layouts.single().lineCount)
+        assertTrue(!layouts.single().isLineEllipsized(0))
+        composeRule.onNodeWithText("Spent \$0.00 · 0 total").assertIsDisplayed()
+    }
+
+    @Test
+    fun dayTotalsExcludeTransfersAndReactToOverride() {
+        val date = java.time.LocalDate.of(2026, 7, 10)
+        val timestamp = date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val expense = Transaction("normal", timestamp, "Cafe", "Food", "", -1_250)
+        val income = Transaction("income", timestamp + 1, "Client", "Salary", "", 5_000)
+        val transfer = Transaction("transfer", timestamp + 2, "Payment", "Food", "", -2_000, flowKind = FlowKind.TRANSFER)
+        var overridden by mutableStateOf(false)
+        var neutral = Color.Unspecified
+        var expenseColor = Color.Unspecified
+        composeRule.setContent {
+            MaterialTheme {
+                neutral = MaterialTheme.colorScheme.onSurfaceVariant
+                expenseColor = LocalFinanceColors.current.expense
+                FlowMoneyScreen(
+                    uiState = MainUiState(isLoading = false, sortedTransactions = listOf(transfer, income, expense.copy(flowKindOverride = if (overridden) FlowKind.TRANSFER else null))),
+                    selectedTab = DashboardTab.Transactions,
+                    onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {},
+                    onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {},
+                )
+            }
+        }
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
+        composeRule.onNodeWithTag("transaction_day_spent_$date").assertTextContains("Spent \$12.50")
+        composeRule.onNodeWithTag("transaction_day_received_$date").assertTextContains("Received \$50.00")
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_transfer"))
+        composeRule.onNodeWithTag("transaction_content_transfer").assertContentDescriptionEquals("Payment, -\$20.00, Transfer, Occurred Jul 10, 2026, 12:00 AM")
+        val layouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("-\$20.00", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertEquals(neutral, layouts.single().layoutInput.style.color)
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_normal"))
+        val expenseLayouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("-\$12.50", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(expenseLayouts) }
+        assertEquals(expenseColor, expenseLayouts.single().layoutInput.style.color)
+        assertTrue(expenseColor != neutral)
+        composeRule.runOnIdle { overridden = true }
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
+        composeRule.onNodeWithTag("transaction_day_spent_$date").assertDoesNotExist()
+        composeRule.onNodeWithTag("transaction_day_received_$date").assertTextContains("Received \$50.00")
+    }
+
+    @Test
+    fun dayHeadersOmitZeroSidesForExpenseIncomeTransferAndMixed() {
+        val day = java.time.LocalDate.of(2026, 7, 10)
+        fun at(offset: Long) = day.minusDays(offset).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = listOf(
+            Transaction("expense-only", at(0), "Expense", "Food", "", -100),
+            Transaction("income-only", at(1), "Income", "Salary", "", 200),
+            Transaction("transfer-only", at(2), "Transfer", "Other", "", -300, flowKind = FlowKind.TRANSFER),
+            Transaction("mixed-expense", at(3), "Mixed expense", "Food", "", -400),
+            Transaction("mixed-income", at(3), "Mixed income", "Salary", "", 500),
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = rows), selectedTab = DashboardTab.Transactions,
+                    onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+            }
+        }
+        listOf(0L, 1L, 2L, 3L).forEach { offset ->
+            val date = day.minusDays(offset)
+            composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_day_header_$date"))
+            val spent = composeRule.onNodeWithTag("transaction_day_spent_$date")
+            val received = composeRule.onNodeWithTag("transaction_day_received_$date")
+            if (offset == 0L || offset == 3L) spent.assertExists() else spent.assertDoesNotExist()
+            if (offset == 1L || offset == 3L) received.assertExists() else received.assertDoesNotExist()
+        }
+    }
+
+    @Test
     fun transactionDaysShowSeparateTotalsAndSupportSwipeDelete() {
         val date = java.time.LocalDate.of(2026, 7, 10)
         val occurredAt = date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
@@ -419,7 +551,7 @@ class Phase4UiTest {
         return MainUiState(
             isLoading = false,
             sortedTransactions = listOf(transaction),
-            recentTransactions = listOf(transaction),
+            latestSpendingTransactions = listOf(transaction),
             rangeTransactions = listOf(transaction),
             metrics = DashboardMetrics(spentCents = 450, incomeCents = 0, transactionCount = 1),
         )

@@ -163,7 +163,7 @@ class MainViewModelDataPathTest {
                     val state = viewModel.uiState.first { !it.isLoading }
 
                     assertEquals(listOf("newest", "middle", "oldest"), state.sortedTransactions.map { it.id })
-                    assertEquals(newestFirst, state.recentTransactions)
+                    assertEquals(listOf(newestFirst[0], newestFirst[2]), state.latestSpendingTransactions)
                     assertEquals(newestFirst, state.suggestionHistory.transactions)
                     assertEquals(
                         DashboardMetrics(spentCents = 400, incomeCents = 200, transactionCount = 3),

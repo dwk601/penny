@@ -93,11 +93,10 @@ class Phase2E2ETest {
         composeRule.waitUntil(5_000) {
             runCatching { composeRule.onNodeWithTag("tab_overview").assertIsSelected() }.isSuccess
         }
-        waitForMerchant(original.merchant)
-
         composeRule.onNodeWithTag("tab_overview").assertIsSelected()
         composeRule.onNodeWithTag("tab_review").assertDoesNotExist()
         composeRule.onNodeWithTag("tab_transactions").performClick()
+        waitForMerchant(original.merchant)
         composeRule.onNodeWithTag("transaction_content_${original.id}").assertIsDisplayed().performClick()
         composeRule.onNodeWithText("RAW PROVIDER DESCRIPTION").assertIsDisplayed()
         composeRule.onNodeWithTag("merchant_override_field").performScrollTo().performTextInput("Edited merchant")
@@ -299,6 +298,7 @@ class Phase2E2ETest {
                 cents = -1_234,
             )
         seed(original)
+        composeRule.onNodeWithTag("tab_transactions").performClick()
         waitForMerchant(original.merchant)
 
         composeRule.onNodeWithTag("transaction_content_${original.id}").performClick()
@@ -325,6 +325,7 @@ class Phase2E2ETest {
                 cents = -2_345,
             )
         seed(original)
+        composeRule.onNodeWithTag("tab_transactions").performClick()
         waitForMerchant(original.merchant)
         val action =
             composeRule
@@ -364,9 +365,9 @@ class Phase2E2ETest {
 
     private fun waitForMerchant(merchant: String) {
         composeRule.waitUntil(5_000) {
-            composeRule.onAllNodesWithText(merchant).fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText(merchant, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onAllNodesWithText(merchant).onFirst().assertIsDisplayed()
+        composeRule.onAllNodesWithText(merchant, useUnmergedTree = true).onFirst().assertIsDisplayed()
     }
 
     private fun context() = ApplicationProvider.getApplicationContext<Context>()

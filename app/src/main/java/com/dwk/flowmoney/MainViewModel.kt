@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicLong
 data class MainUiState(
     val isLoading: Boolean = true,
     val sortedTransactions: List<Transaction> = emptyList(),
-    val recentTransactions: List<Transaction> = emptyList(),
+    val latestSpendingTransactions: List<Transaction> = emptyList(),
     val rangeTransactions: List<Transaction> = emptyList(),
     val metrics: DashboardMetrics = DashboardMetrics(spentCents = 0, incomeCents = 0, transactionCount = 0),
     val dateRange: DashboardDateRange = DashboardAnalytics.rangeFor(ChartRangeMode.Week, YearMonth.now()),
@@ -113,7 +113,6 @@ class MainViewModel(
             .map { transactions ->
                 TransactionSnapshot(
                     sortedTransactions = transactions,
-                    recentTransactions = transactions.take(5),
                     suggestionHistory = TransactionSuggestions.historyFromNewestFirst(transactions),
                 )
             }.flowOn(defaultDispatcher)
@@ -127,7 +126,10 @@ class MainViewModel(
             val ranged = DashboardAnalytics.filterTransactions(sorted, range)
             DashboardUiState(
                 sortedTransactions = sorted,
-                recentTransactions = snapshot.recentTransactions,
+                latestSpendingTransactions = ranged.asSequence()
+                    .filter { it.effectiveFlowKind == FlowKind.NORMAL && it.cents < 0 }
+                    .take(3)
+                    .toList(),
                 rangeTransactions = ranged,
                 metrics = DashboardAnalytics.metrics(ranged),
                 dateRange = range,
@@ -135,7 +137,7 @@ class MainViewModel(
                 selectedMonth = month,
                 availableMonths = availableMonths,
                 dailySpending = DashboardAnalytics.dailySpending(ranged, range),
-                categoryTotals = DashboardAnalytics.categoryTotals(ranged),
+                categoryTotals = DashboardAnalytics.categoryTotals(ranged, limit = Int.MAX_VALUE),
                 pendingReviewSummary = DashboardAnalytics.unreviewedSpendingSummary(ranged),
                 suggestionHistory = snapshot.suggestionHistory,
             )
@@ -170,7 +172,7 @@ class MainViewModel(
                     MainUiState(
                         isLoading = false,
                         sortedTransactions = dashboard.sortedTransactions,
-                        recentTransactions = dashboard.recentTransactions,
+                        latestSpendingTransactions = dashboard.latestSpendingTransactions,
                         rangeTransactions = dashboard.rangeTransactions,
                         metrics = dashboard.metrics,
                         dateRange = dashboard.dateRange,
@@ -580,13 +582,12 @@ private data class PendingRangeResetRecord(
 
 private data class TransactionSnapshot(
     val sortedTransactions: List<Transaction>,
-    val recentTransactions: List<Transaction>,
     val suggestionHistory: TransactionSuggestionHistory,
 )
 
 private data class DashboardUiState(
     val sortedTransactions: List<Transaction>,
-    val recentTransactions: List<Transaction>,
+    val latestSpendingTransactions: List<Transaction>,
     val rangeTransactions: List<Transaction>,
     val metrics: DashboardMetrics,
     val dateRange: DashboardDateRange,

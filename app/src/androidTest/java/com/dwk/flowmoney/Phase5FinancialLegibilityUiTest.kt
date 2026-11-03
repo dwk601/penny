@@ -2,6 +2,8 @@ package com.dwk.flowmoney
 
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
@@ -12,10 +14,13 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import java.time.LocalDate
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 
@@ -30,7 +35,7 @@ class Phase5FinancialLegibilityUiTest {
             state = MainUiState(
                 isLoading = false,
                 sortedTransactions = listOf(transaction),
-                recentTransactions = listOf(transaction),
+                latestSpendingTransactions = listOf(transaction),
                 rangeTransactions = listOf(transaction),
                 metrics = DashboardMetrics(
                     spentCents = 123_456_789,
@@ -83,6 +88,26 @@ class Phase5FinancialLegibilityUiTest {
             "\$7,654,321.09" to "insight_category_travel",
             "\$5,432,109.87" to "insight_category_food",
         ).forEach { (amount, itemTag) -> assertTextContained(amount, itemTag) }
+    }
+
+    @Test fun expandedInsightLegendAmountsHaveNoTextOverflow() {
+        val totals = listOf(
+            CategoryTotal("Food", 123_456_789), CategoryTotal("Housing", 98_765_432),
+            CategoryTotal("Travel", 76_543_210), CategoryTotal("Bills", 54_321_098),
+            CategoryTotal("Other", 12_345_678), CategoryTotal("Coffee", 1_234_567),
+        )
+        setScreen(DashboardTab.Insights, MainUiState(isLoading = false, dailySpending = listOf(DailySpend(LocalDate.of(2026, 7, 10), totals.sumOf { it.cents })), categoryTotals = totals))
+        composeRule.onNodeWithTag("insight_categories_expand").performScrollTo().performClick()
+        totals.forEach { total ->
+            val tag = "insight_category_${total.category.lowercase()}"
+            val amount = MoneyFormatter.formatUsd(total.cents)
+            assertTextContained(amount, tag)
+            val layouts = mutableListOf<TextLayoutResult>()
+            composeRule.onNode(hasText(amount) and hasAnyAncestor(hasTestTag(tag)), useUnmergedTree = true)
+                .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertFalse("$amount overflow: ${layouts.single()}", layouts.single().hasVisualOverflow)
+            assertFalse(layouts.single().isLineEllipsized(0))
+        }
     }
 
     private fun setScreen(tab: DashboardTab, state: MainUiState) {

@@ -90,6 +90,7 @@ class MainViewModelDashboardAnalyticsTest {
                         DashboardMetrics(spentCents = 1_000, incomeCents = 500, transactionCount = 3),
                         initial.metrics,
                     )
+                    assertEquals(listOf("pending-expense", "reviewed-expense"), initial.latestSpendingTransactions.map { it.id })
                     assertEquals(
                         listOf(
                             CategoryTotal(category = "Other", cents = 900),
@@ -118,6 +119,7 @@ class MainViewModelDashboardAnalyticsTest {
                         }
 
                     assertEquals(initial.metrics, updated.metrics)
+                    assertEquals(initial.latestSpendingTransactions.map { it.id }, updated.latestSpendingTransactions.map { it.id })
                     assertEquals(
                         listOf(
                             CategoryTotal(category = "Travel", cents = 900),
@@ -134,6 +136,76 @@ class MainViewModelDashboardAnalyticsTest {
                 }
             }
         }
+
+    @Test fun latestSpendingTracksRangeAndEffectiveTransferOverrides() = runBlocking {
+        val start = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val older = LocalDate.now().minusDays(9).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = MutableStateFlow(listOf(
+            transaction("expense-a", start + 8, -100, "Food"),
+            transaction("income", start + 7, 500, "Salary"),
+            transaction("transfer", start + 6, -200, "Food").copy(flowKind = FlowKind.TRANSFER),
+            transaction("expense-b", start + 5, -300, "Food"),
+            transaction("expense-c", start + 4, -400, "Food"),
+            transaction("expense-d", start + 3, -500, "Food"),
+            transaction("out-of-range", older, -600, "Food"),
+        ))
+        withContext(Dispatchers.Main) {
+            val store = ViewModelStore()
+            val viewModel = ViewModelProvider(
+                store,
+                MainViewModel.Factory(FakeGateway(rows), SimpleFinSyncRepository(context), MutableStateFlow(emptyList())),
+            )[MainViewModel::class.java]
+            try {
+                viewModel.reportInitializationComplete()
+                val initial = viewModel.uiState.first { !it.isLoading }
+                assertEquals(listOf("expense-a", "expense-b", "expense-c"), initial.latestSpendingTransactions.map { it.id })
+                rows.value = rows.value.map {
+                    when (it.id) {
+                        "expense-a" -> it.copy(flowKindOverride = FlowKind.TRANSFER)
+                        "transfer" -> it.copy(flowKindOverride = FlowKind.NORMAL)
+                        else -> it
+                    }
+                }
+                val updated = viewModel.uiState.first { state ->
+                    state.latestSpendingTransactions.firstOrNull()?.id == "transfer"
+                }
+                assertEquals(listOf("transfer", "expense-b", "expense-c"), updated.latestSpendingTransactions.map { it.id })
+                assertEquals(FlowKind.TRANSFER, updated.sortedTransactions.first { it.id == "transfer" }.flowKind)
+                assertEquals(FlowKind.NORMAL, updated.sortedTransactions.first { it.id == "expense-a" }.flowKind)
+            } finally {
+                store.clear()
+            }
+        }
+    }
+
+    @Test fun allSpendingCategoriesReachStateAndReconcileAfterReview() = runBlocking {
+        val time = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val rows = MutableStateFlow(
+            listOf("Food", "Housing", "Travel", "Bills", "Coffee").mapIndexed { index, category ->
+                transaction("reviewed-$index", time + index, -(index + 1) * 100, category, reviewedAtEpochMillis = 1)
+            } + transaction("pending", time + 10, -600, "Groceries") +
+                transaction("transfer", time + 11, -9000, "Food", reviewedAtEpochMillis = 1).copy(flowKind = FlowKind.TRANSFER),
+        )
+        withContext(Dispatchers.Main) {
+            val store = ViewModelStore()
+            val vm = ViewModelProvider(store, MainViewModel.Factory(FakeGateway(rows), SimpleFinSyncRepository(context), MutableStateFlow(emptyList())))[MainViewModel::class.java]
+            try {
+                vm.reportInitializationComplete()
+                val initial = vm.uiState.first { !it.isLoading && it.categoryTotals.size == 6 }
+                assertEquals(2100L, initial.metrics.spentCents)
+                assertEquals(initial.metrics.spentCents, initial.categoryTotals.sumOf { it.cents })
+                assertTrue(initial.categoryTotals.any { it.category == "Other" && it.cents == 600L })
+                rows.value = rows.value.map { if (it.id == "pending") it.copy(reviewedAtEpochMillis = 2) else it }
+                val corrected = vm.uiState.first { it.categoryTotals.any { total -> total.category == "Groceries" } }
+                assertEquals(6, corrected.categoryTotals.size)
+                assertEquals(corrected.metrics.spentCents, corrected.categoryTotals.sumOf { it.cents })
+                assertEquals(2100L, corrected.metrics.spentCents)
+                assertEquals(0, corrected.pendingReviewSummary.transactionCount)
+            } finally {
+                store.clear()
+            }
+        }
+    }
 
     private class FakeGateway(
         override val transactions: Flow<List<Transaction>>,

@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -29,7 +30,6 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -69,6 +69,8 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -81,9 +83,9 @@ import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -102,13 +104,10 @@ import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -120,14 +119,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -137,6 +134,7 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -294,9 +292,10 @@ internal data class DashboardNavigationState(
     val restoredNavigation: Boolean = false,
     val userSelectedBeforeLoading: Boolean = false,
     val externalRouteHandled: Boolean = false,
+    val reviewOriginTab: DashboardTab = DashboardTab.Overview,
 )
 
-private val DashboardNavigationStateSaver =
+internal val DashboardNavigationStateSaver =
     Saver<DashboardNavigationState, Any>(
         save = { state ->
             listOf(
@@ -304,6 +303,7 @@ private val DashboardNavigationStateSaver =
                 state.coldStartRoutingHandled,
                 state.userSelectedBeforeLoading,
                 state.externalRouteHandled,
+                state.reviewOriginTab.name,
             )
         },
         restore = { saved ->
@@ -316,6 +316,7 @@ private val DashboardNavigationStateSaver =
                 restoredNavigation = true,
                 userSelectedBeforeLoading = (values?.getOrNull(2) as? Boolean) ?: false,
                 externalRouteHandled = (values?.getOrNull(3) as? Boolean) ?: false,
+                reviewOriginTab = DashboardTab.entries.firstOrNull { it.name == values?.getOrNull(4) && it != DashboardTab.Review } ?: DashboardTab.Overview,
             )
         },
     )
@@ -1197,8 +1198,13 @@ fun FlowMoneyApp(
             }
         }
 
+    BackHandler(enabled = selectedTab == DashboardTab.Review) {
+        navigationState = navigationState.copy(selectedTab = navigationState.reviewOriginTab)
+    }
+
     AdaptiveFlowMoneyShell(
         selectedTab = selectedTab,
+        reviewOriginTab = navigationState.reviewOriginTab,
         snackbarHostState = snackbarHostState,
         onTabSelected = { tab ->
             navigationState =
@@ -1235,6 +1241,7 @@ fun FlowMoneyApp(
                 navigationState =
                     navigationState.copy(
                         selectedTab = DashboardTab.Review,
+                        reviewOriginTab = selectedTab.takeUnless { it == DashboardTab.Review } ?: DashboardTab.Overview,
                         coldStartRoutingHandled = true,
                     )
             },
@@ -1865,10 +1872,18 @@ internal enum class SyncHealthKind {
 
 internal data class SyncHealthUiState(
     val kind: SyncHealthKind,
-    val label: String,
     val stateDescription: String,
     val manualSync: Boolean = false,
-)
+) {
+    val label: String get() = when (kind) {
+        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
+        SyncHealthKind.Syncing -> "Syncing"
+        SyncHealthKind.Error -> "Error"
+        SyncHealthKind.ReconnectRequired -> "Reconnect"
+        SyncHealthKind.Disconnected -> "Disconnected"
+        SyncHealthKind.Pending -> "Pending"
+    }
+}
 
 internal fun simpleFinNextEligibleSyncAt(profile: SimpleFinProfileEntity): Long? {
     val attempt = profile.lastSyncAttemptAtEpochMillis
@@ -1894,18 +1909,17 @@ internal fun syncHealthUiState(
     nowEpochMillis: Long,
 ): SyncHealthUiState {
     if (operation == DataOperation.Sync) {
-        return SyncHealthUiState(SyncHealthKind.Syncing, "Syncing", "Bank sync in progress")
+        return SyncHealthUiState(SyncHealthKind.Syncing, "Bank sync in progress")
     }
     if (simpleFin.isConnectionPending) {
-        return SyncHealthUiState(SyncHealthKind.Pending, "Connection pending", "Connection pending; open Data to retry")
+        return SyncHealthUiState(SyncHealthKind.Pending, "Connection pending; open Data to retry")
     }
     val profile =
         simpleFin.profile
-            ?: return SyncHealthUiState(SyncHealthKind.Disconnected, "Disconnected", "Bank sync disconnected; open Data to connect")
+            ?: return SyncHealthUiState(SyncHealthKind.Disconnected, "Bank sync disconnected; open Data to connect")
     if (profile.isPaused) {
         return SyncHealthUiState(
             SyncHealthKind.ReconnectRequired,
-            "Reconnect required",
             "Bank reconnect required; open Data",
         )
     }
@@ -1921,7 +1935,6 @@ internal fun syncHealthUiState(
         val next = simpleFinNextEligibleSyncAt(profile).toSyncTime()
         return SyncHealthUiState(
             kind = if (failedAttempt) SyncHealthKind.Error else SyncHealthKind.CoolingDown,
-            label = if (failedAttempt) "Error · cooling until $next" else "Cooling down · $next",
             stateDescription =
                 if (failedAttempt) {
                     "Sync error; cooling down until $next"
@@ -1933,7 +1946,6 @@ internal fun syncHealthUiState(
     if (failedAttempt) {
         return SyncHealthUiState(
             SyncHealthKind.Error,
-            "Sync error · Retry",
             "Sync error; retry now",
             manualSync = true,
         )
@@ -1941,13 +1953,11 @@ internal fun syncHealthUiState(
     if (profile.automaticSyncsPerDay == 1) {
         return SyncHealthUiState(
             SyncHealthKind.Connected,
-            "Connected · once daily",
             "Connected and idle; automatic sync is once daily; open Data to change cadence",
         )
     }
     return SyncHealthUiState(
         kind = SyncHealthKind.Connected,
-        label = "Connected · Sync now",
         stateDescription = "Connected and idle; sync now",
         manualSync = true,
     )
@@ -1965,18 +1975,20 @@ internal fun AdaptiveFlowMoneyShell(
     syncHealthNowEpochMillis: Long = System.currentTimeMillis(),
     onManualSync: () -> Unit = {},
     modifier: Modifier = Modifier,
+    reviewOriginTab: DashboardTab = DashboardTab.Overview,
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    val navigationTab = if (selectedTab == DashboardTab.Review) reviewOriginTab.takeUnless { it == DashboardTab.Review } ?: DashboardTab.Overview else selectedTab
     BoxWithConstraints(modifier = modifier) {
         val isWide = maxWidth >= NavigationBreakpoint
         if (isWide) {
             Row(modifier = Modifier.fillMaxSize()) {
                 FlowMoneyNavigationRail(
-                    selectedTab = selectedTab,
+                    selectedTab = navigationTab,
                     onTabSelected = onTabSelected,
                 )
                 FlowMoneyScaffold(
-                    selectedTab = selectedTab,
+                    selectedTab = navigationTab,
                     isWide = true,
                     snackbarHostState = snackbarHostState,
                     onTabSelected = onTabSelected,
@@ -1992,7 +2004,7 @@ internal fun AdaptiveFlowMoneyShell(
             }
         } else {
             FlowMoneyScaffold(
-                selectedTab = selectedTab,
+                selectedTab = navigationTab,
                 isWide = false,
                 snackbarHostState = snackbarHostState,
                 onTabSelected = onTabSelected,
@@ -2010,10 +2022,6 @@ internal fun AdaptiveFlowMoneyShell(
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-internal val LocalTopAppBarScrollBehavior =
-    staticCompositionLocalOf<TopAppBarScrollBehavior?> { null }
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FlowMoneyScaffold(
     selectedTab: DashboardTab,
@@ -2029,19 +2037,16 @@ private fun FlowMoneyScaffold(
     modifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
-    CompositionLocalProvider(LocalTopAppBarScrollBehavior provides scrollBehavior) {
     Scaffold(
-        modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        modifier = modifier,
         topBar = {
             FlowMoneyTopAppBar(
-                selectedTab = selectedTab,
                 simpleFin = simpleFin,
                 operation = operation,
                 syncHealthNowEpochMillis = syncHealthNowEpochMillis,
                 onManualSync = onManualSync,
                 onData = onData,
-                scrollBehavior = scrollBehavior,
+                onAddTransaction = onAddTransaction,
             )
         },
         snackbarHost = {
@@ -2058,31 +2063,6 @@ private fun FlowMoneyScaffold(
                 )
             }
         },
-        floatingActionButton = {
-            Box(
-                modifier =
-                    if (isWide) {
-                        Modifier.windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
-                    } else {
-                        Modifier
-                    },
-            ) {
-                FloatingActionButton(
-                    onClick = onAddTransaction,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier =
-                        Modifier
-                            .testTag("add_transaction_fab")
-                            .semantics { contentDescription = "Add transaction" },
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_add),
-                        contentDescription = null,
-                    )
-                }
-            }
-        },
         contentWindowInsets =
             if (isWide) {
                 WindowInsets.navigationBars.only(WindowInsetsSides.Bottom)
@@ -2091,15 +2071,12 @@ private fun FlowMoneyScaffold(
             },
         content = content,
     )
-    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FlowMoneyTopAppBar(
-    selectedTab: DashboardTab,
     onData: () -> Unit,
-    scrollBehavior: TopAppBarScrollBehavior? = null,
+    onAddTransaction: () -> Unit,
     simpleFin: SimpleFinUiState = SimpleFinUiState(),
     operation: DataOperation? = null,
     syncHealthNowEpochMillis: Long = System.currentTimeMillis(),
@@ -2107,54 +2084,47 @@ internal fun FlowMoneyTopAppBar(
 ) {
     val syncHealth = syncHealthUiState(simpleFin, operation, syncHealthNowEpochMillis)
     val syncActionEnabled = operation == null
-    PennyOverviewTopAppBar(
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Image(
-                    painter = painterResource(R.drawable.penny_logo),
-                    contentDescription = "Penny logo",
-                    modifier = Modifier.size(32.dp),
-                )
-                Spacer(Modifier.width(10.dp))
-                Text("Penny", style = MaterialTheme.typography.titleLarge)
-            }
-        },
-        subtitle = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+    val density = LocalDensity.current
+    val label = if (density.fontScale >= 1.5f) when (syncHealth.kind) {
+        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
+        SyncHealthKind.Syncing -> "Syncing"
+        SyncHealthKind.Error -> "Error"
+        SyncHealthKind.ReconnectRequired -> "Fix"
+        SyncHealthKind.Disconnected -> "No bank"
+        SyncHealthKind.Pending -> "Pending"
+    } else syncHealth.label
+    val labelStyle = MaterialTheme.typography.labelSmall
+    val measurer = rememberTextMeasurer()
+    val labelWidth = remember(label, labelStyle, density, measurer) { measurer.measure(label, style = labelStyle, softWrap = false).size.width }
+    PennyTopAppBar(
+        status = {
+            Box(
+                modifier = Modifier.widthIn(min = 48.dp).heightIn(min = 48.dp).clip(MaterialTheme.shapes.small)
+                    .clickable(enabled = syncActionEnabled, role = Role.Button) {
+                        if (syncHealth.manualSync) onManualSync() else onData()
+                    }.semantics {
+                        contentDescription = "Bank sync status"
+                        stateDescription = syncHealth.stateDescription
+                    }.padding(horizontal = 4.dp).testTag("sync_health_action"),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    text = selectedTab.label,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = " · ${syncHealth.label}",
+                    text = label,
+                    modifier = Modifier.width(with(density) { labelWidth.toDp() } + 2.dp),
                     color =
                         if (syncHealth.kind == SyncHealthKind.Error || syncHealth.kind == SyncHealthKind.ReconnectRequired) {
                             MaterialTheme.colorScheme.error
                         } else {
                             MaterialTheme.colorScheme.primary
                         },
-                    style = MaterialTheme.typography.labelSmall,
+                    style = labelStyle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier =
-                        Modifier
-                            .heightIn(min = 48.dp)
-                            .clip(MaterialTheme.shapes.small)
-                            .clickable(enabled = syncActionEnabled, role = Role.Button) {
-                                if (syncHealth.manualSync) onManualSync() else onData()
-                            }.semantics {
-                                contentDescription = "Bank sync status"
-                                stateDescription = syncHealth.stateDescription
-                            }.padding(horizontal = 4.dp, vertical = 14.dp)
-                            .testTag("sync_health_action"),
                 )
             }
         },
         onData = onData,
-        scrollBehavior = scrollBehavior,
+        onAddTransaction = onAddTransaction,
     )
 }
 
@@ -2173,7 +2143,7 @@ private fun FlowMoneyNavigationBar(
                 selected = selectedTab == tab,
                 onClick = { onTabSelected(tab) },
                 icon = { NavigationTabIcon(tab) },
-                label = { Text(tab.label, maxLines = 1) },
+                label = { Text(tab.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
             )
         }
@@ -2270,8 +2240,7 @@ internal fun FlowMoneyScreen(
             DashboardTab.Overview -> {
                 OverviewPage(
                     sortedTransactions = uiState.sortedTransactions,
-                    recentTransactions = uiState.recentTransactions,
-                    rangeTransactions = uiState.rangeTransactions,
+                    latestSpendingTransactions = uiState.latestSpendingTransactions,
                     metrics = uiState.metrics,
                     dateRange = uiState.dateRange,
                     chartRangeMode = uiState.chartRangeMode,
@@ -2335,6 +2304,7 @@ internal fun FlowMoneyScreen(
                     onBulkCategorize = onBulkCategorizeReview,
                     onBulkAcceptOther = onBulkAcceptOther,
                     operationBusy = reviewOperationBusy,
+                    isActive = selectedTab == DashboardTab.Review,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -2364,8 +2334,7 @@ private fun LoadingState(modifier: Modifier = Modifier) {
 @Composable
 private fun OverviewPage(
     sortedTransactions: List<Transaction>,
-    recentTransactions: List<Transaction>,
-    rangeTransactions: List<Transaction>,
+    latestSpendingTransactions: List<Transaction>,
     metrics: DashboardMetrics,
     dateRange: DashboardDateRange,
     chartRangeMode: ChartRangeMode,
@@ -2383,6 +2352,7 @@ private fun OverviewPage(
     onReview: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val amountWidth = rememberTransactionAmountWidth(latestSpendingTransactions)
     Box(modifier = modifier) {
         LazyColumn(
             modifier =
@@ -2395,61 +2365,33 @@ private fun OverviewPage(
             contentPadding = PagePadding,
         ) {
             item {
-                OverviewSyncReviewBanner(
-                    simpleFin = simpleFin,
-                    pendingReviewCount = pendingReviewCount,
-                    onReview = onReview,
-                    onData = onData,
+                DateRangeControls(
+                    mode = chartRangeMode,
+                    selectedMonth = selectedMonth,
+                    dateRange = dateRange,
+                    availableMonths = availableMonths,
+                    onModeSelected = onChartRangeModeSelected,
+                    onSelectedMonthChange = onSelectedMonthChange,
                 )
+            }
+            if (sortedTransactions.isNotEmpty()) item { SummaryBand(metrics = metrics) }
+            if (pendingReviewCount > 0) {
+                item { OverviewReviewStrip(pendingReviewCount, onReview) }
             }
             if (sortedTransactions.isEmpty()) {
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DateRangeControls(
-                            mode = chartRangeMode,
-                            selectedMonth = selectedMonth,
-                            dateRange = dateRange,
-                            availableMonths = availableMonths,
-                            onModeSelected = onChartRangeModeSelected,
-                            onSelectedMonthChange = onSelectedMonthChange,
-                        )
-                        EmptyState(
-                            onAddTransaction = onAddTransaction,
-                            onData = onData,
-                            disconnected = simpleFin.profile == null && !simpleFin.isConnectionPending,
-                            modifier =
-                                Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 260.dp),
-                        )
-                    }
+                    EmptyState(
+                        onAddTransaction = onAddTransaction,
+                        onData = onData,
+                        disconnected = simpleFin.profile == null && !simpleFin.isConnectionPending,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
+                    )
                 }
             } else {
-                item {
-                    DateRangeControls(
-                        mode = chartRangeMode,
-                        selectedMonth = selectedMonth,
-                        dateRange = dateRange,
-                        availableMonths = availableMonths,
-                        onModeSelected = onChartRangeModeSelected,
-                        onSelectedMonthChange = onSelectedMonthChange,
-                    )
-                }
-                item {
-                    SummaryBand(
-                        rangeLabel = dateRange.label,
-                        metrics = metrics,
-                    )
-                }
-                item {
-                    RecentTransactionsHeader(
-                        title = "Recent",
-                        count = sortedTransactions.size,
-                        detail = "${metrics.transactionCount} in range",
-                        actionText = "View all",
-                        onAction = onViewAllTransactions,
-                    )
-                }
+                if (latestSpendingTransactions.isEmpty()) {
+                    item { Text("No spending in this period", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium) }
+                } else {
+                item { Text("Latest spending", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
                 item {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -2457,17 +2399,19 @@ private fun OverviewPage(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column {
-                            recentTransactions.forEachIndexed { index, transaction ->
+                            latestSpendingTransactions.forEachIndexed { index, transaction ->
                                 key(transaction.id) {
                                     SwipeTransactionRow(
                                         transaction = transaction,
                                         onEdit = { onEdit(transaction) },
                                         onDelete = { onDelete(transaction) },
+                                        showDate = true,
+                                        amountWidth = amountWidth,
                                     )
                                 }
-                                if (index < recentTransactions.lastIndex) {
+                                if (index < latestSpendingTransactions.lastIndex) {
                                     HorizontalDivider(
-                                        modifier = Modifier.padding(start = 68.dp),
+                                        modifier = Modifier.padding(start = 14.dp),
                                         thickness = 1.dp,
                                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                                     )
@@ -2476,72 +2420,25 @@ private fun OverviewPage(
                         }
                     }
                 }
+                }
+                item {
+                    TextButton(onClick = onViewAllTransactions, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text("All transactions")
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun OverviewSyncReviewBanner(
-    simpleFin: SimpleFinUiState,
-    pendingReviewCount: Int,
-    onReview: () -> Unit,
-    onData: () -> Unit,
-) {
-    val profile = simpleFin.profile
-    val syncText =
-        when {
-            simpleFin.isConnectionPending -> "Connection pending"
-            profile == null -> "Bank not connected"
-            profile.isPaused -> "Reconnect required"
-            else -> null
-        }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier =
-            Modifier
-                .fillMaxWidth()
-                .testTag("overview_sync_review_banner"),
+private fun OverviewReviewStrip(pendingReviewCount: Int, onReview: () -> Unit) {
+    TextButton(
+        onClick = onReview,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("overview_review_action"),
+        contentPadding = PaddingValues(horizontal = 12.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            syncText?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-            }
-            Text(
-                if (pendingReviewCount == 0) {
-                    "No synced transactions to check"
-                } else {
-                    "$pendingReviewCount synced ${if (pendingReviewCount == 1) "transaction" else "transactions"} " +
-                        "available for optional corrections"
-                },
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.testTag("overview_pending_review_count"),
-            )
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (pendingReviewCount > 0) {
-                    TextButton(
-                        onClick = onReview,
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_review_action"),
-                    ) { Text("Check & correct") }
-                }
-                if (simpleFin.isConnectionPending || profile?.isPaused == true || profile == null) {
-                    TextButton(
-                        onClick = onData,
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_sync_data_action"),
-                    ) { Text(if (profile == null && !simpleFin.isConnectionPending) "Connect bank" else "Open Data") }
-                } else if (profile.automaticSyncsPerDay == 1) {
-                    TextButton(
-                        onClick = onData,
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("overview_sync_cadence_action"),
-                    ) { Text("Adjust sync cadence (1–12/day)") }
-                }
-            }
-        }
+        Text("Review $pendingReviewCount", modifier = Modifier.testTag("overview_pending_review_count"))
     }
 }
 
@@ -2556,11 +2453,12 @@ internal fun transactionDayGroups(transactions: List<Transaction>): List<Transac
     transactions
         .groupBy { it.occurredAtDateTime().toLocalDate() }
         .map { (date, dayTransactions) ->
+            val metrics = DashboardAnalytics.metrics(dayTransactions)
             TransactionDayGroup(
                 date = date,
                 transactions = dayTransactions,
-                spentCents = dayTransactions.filter { it.cents < 0 }.sumOf { it.cents.toLong().absoluteValue },
-                receivedCents = dayTransactions.filter { it.cents > 0 }.sumOf { it.cents.toLong() },
+                spentCents = metrics.spentCents,
+                receivedCents = metrics.incomeCents,
             )
         }
 
@@ -2574,9 +2472,14 @@ internal fun ReviewPage(
     onBulkAcceptOther: (List<String>) -> Unit,
     operationBusy: Boolean,
     modifier: Modifier = Modifier,
+    isActive: Boolean = true,
 ) {
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedIds by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
+    BackHandler(enabled = isActive && selectionMode) {
+        selectedIds = emptyList()
+        selectionMode = false
+    }
     var confirmAcceptOther by rememberSaveable { mutableStateOf(false) }
     val orderedTransactions =
         remember(unreviewedTransactions) {
@@ -2585,6 +2488,7 @@ internal fun ReviewPage(
                 .sortedByDescending(Transaction::occurredAtEpochMillis)
         }
     val groups = remember(orderedTransactions) { transactionDayGroups(orderedTransactions) }
+    val amountWidth = rememberTransactionAmountWidth(orderedTransactions)
 
     LaunchedEffect(orderedTransactions) {
         val availableIds = orderedTransactions.mapTo(mutableSetOf(), Transaction::id)
@@ -2671,6 +2575,7 @@ internal fun ReviewPage(
                                     ReviewTransactionCard(
                                         transaction = transaction,
                                         selectionMode = selectionMode,
+                                        amountWidth = amountWidth,
                                         selected = transaction.id in selectedIds,
                                         enabled = !operationBusy,
                                         onSelectionChange = { selected ->
@@ -2769,6 +2674,7 @@ private fun ReviewBulkControls(
 private fun ReviewTransactionCard(
     transaction: Transaction,
     selectionMode: Boolean,
+    amountWidth: Int,
     selected: Boolean,
     enabled: Boolean,
     onSelectionChange: (Boolean) -> Unit,
@@ -2811,15 +2717,15 @@ private fun ReviewTransactionCard(
                         ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (selectionMode) {
-                    Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
-                    Spacer(Modifier.width(8.dp))
+                Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
+                    if (selectionMode) Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
                 }
-                TransactionCategoryBadge(transaction.category)
-                Spacer(Modifier.width(12.dp))
-                TransactionIdentity(transaction, Modifier.weight(1f))
                 Spacer(Modifier.width(8.dp))
-                TransactionAmount(transaction)
+                TransactionPresentation(
+                    transaction,
+                    amountWidth = amountWidth,
+                    modifier = Modifier.weight(1f).clearAndSetSemantics { contentDescription = transaction.rowAccessibility() },
+                )
             }
             if (!selectionMode) {
                 Row(
@@ -3012,13 +2918,9 @@ private fun TransactionsPage(
         if (selectedCountry != null && countryOptions.none { it == selectedCountry }) selectedCountry = null
     }
     val dayGroups = remember(filteredTransactions) { transactionDayGroups(filteredTransactions) }
+    val amountWidth = rememberTransactionAmountWidth(filteredTransactions)
 
-    val headerDetail =
-        if (filteredTransactions.size == sortedTransactions.size) {
-            "All time"
-        } else {
-            "${sortedTransactions.size} total"
-        }
+    val filteredMetrics = remember(filteredTransactions) { DashboardAnalytics.metrics(filteredTransactions) }
     val clearFilters: () -> Unit = {
         timeFilterName = TransactionTimeFilter.All.name
         selectedCategory = null
@@ -3082,14 +2984,6 @@ private fun TransactionsPage(
         )
     }
 
-    val topBar = LocalTopAppBarScrollBehavior.current
-    LaunchedEffect(viewMode) {
-        if (viewMode == TransactionViewMode.Map) {
-            topBar?.state?.heightOffset = 0f
-            topBar?.state?.contentOffset = 0f
-        }
-    }
-
     Box(modifier = modifier) {
         LazyColumn(
             modifier =
@@ -3104,14 +2998,13 @@ private fun TransactionsPage(
                     start = 20.dp,
                     top = 16.dp,
                     end = 20.dp,
-                    bottom = 16.dp + 88.dp,
+                    bottom = 16.dp,
                 ),
         ) {
             item {
-                RecentTransactionsHeader(
-                    title = "Transactions",
+                TransactionsHeader(
                     count = filteredTransactions.size,
-                    detail = headerDetail,
+                    metrics = filteredMetrics,
                 )
             }
             item {
@@ -3175,11 +3068,12 @@ private fun TransactionsPage(
                                             transaction = transaction,
                                             onEdit = { onEdit(transaction) },
                                             onDelete = { onDelete(transaction) },
+                                            amountWidth = amountWidth,
                                         )
                                     }
                                     if (index < group.transactions.lastIndex) {
                                         HorizontalDivider(
-                                            modifier = Modifier.padding(start = 68.dp),
+                                            modifier = Modifier.padding(start = 14.dp),
                                             thickness = 1.dp,
                                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                                         )
@@ -3218,13 +3112,13 @@ private fun TransactionDayHeader(group: TransactionDayGroup) {
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text(
+                if (group.spentCents != 0L) Text(
                     text = "Spent ${MoneyFormatter.formatUsd(group.spentCents)}",
                     color = LocalFinanceColors.current.expense,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.testTag("transaction_day_spent_${group.date}"),
                 )
-                Text(
+                if (group.receivedCents != 0L) Text(
                     text = "Received ${MoneyFormatter.formatUsd(group.receivedCents)}",
                     color = LocalFinanceColors.current.income,
                     style = MaterialTheme.typography.bodySmall,
@@ -3288,7 +3182,11 @@ private fun TransactionFilterBar(
             selectedCountry != null
     val summary =
         buildList {
-            if (timeFilter != TransactionTimeFilter.All) add(timeFilter.label)
+            add(when (timeFilter) {
+                TransactionTimeFilter.All -> "All time"
+                TransactionTimeFilter.Week -> "Last 7 days"
+                TransactionTimeFilter.Month -> "This month"
+            })
             selectedCategory?.let { add(it) }
             if (sourceFilter != TransactionSourceFilter.All) add(sourceFilter.label)
             selectedAccountLabel?.let { add(it) }
@@ -3297,7 +3195,7 @@ private fun TransactionFilterBar(
             if (selectedState != null && selectedCityLabel?.contains(selectedState) != true) add(selectedState)
             selectedCountry?.let { add(it) }
             if (whereFilter.isNotBlank()) add("“${whereFilter.trim()}”")
-        }.joinToString(" · ").ifBlank { "All transactions" }
+        }.joinToString(" · ")
 
     Column(
         modifier =
@@ -3310,11 +3208,24 @@ private fun TransactionFilterBar(
             ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        FlowRow(
+        OutlinedTextField(
+            value = whereFilter,
+            onValueChange = onWhereFilterChange,
+            placeholder = { Text("Merchant, place, note, or account", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            trailingIcon = if (whereFilter.isNotEmpty()) {
+                { IconButton(onClick = { onWhereFilterChange("") }, modifier = Modifier.testTag("transaction_search_clear").semantics { contentDescription = "Clear search" }) { Text("×") } }
+            } else null,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            colors = flowTextFieldColors(),
+            shape = MaterialTheme.shapes.large,
             modifier =
                 Modifier
-                    .selectableGroup()
-                    .testTag("transaction_view_mode_group"),
+                    .fillMaxWidth()
+                    .testTag("transaction_where_filter"),
+        )
+        FlowRow(
+            modifier = Modifier.selectableGroup().testTag("transaction_view_mode_group"),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -3327,20 +3238,7 @@ private fun TransactionFilterBar(
                 )
             }
         }
-        OutlinedTextField(
-            value = whereFilter,
-            onValueChange = onWhereFilterChange,
-            placeholder = { Text("Merchant, note, or account") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            colors = flowTextFieldColors(),
-            shape = MaterialTheme.shapes.large,
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .testTag("transaction_where_filter"),
-        )
-        Row(
+        Column(
             modifier =
                 Modifier
                     .fillMaxWidth()
@@ -3351,27 +3249,20 @@ private fun TransactionFilterBar(
                     .semantics { stateDescription = if (isExpanded) "Expanded" else "Collapsed" }
                     .padding(horizontal = 14.dp, vertical = 10.dp)
                     .testTag("transaction_filter_toggle"),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Filters", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                Text(
-                    summary,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Filters", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics { })
             }
-            if (hasActiveFilter) {
-                TextButton(
-                    onClick = onClear,
-                    modifier = Modifier.testTag("transaction_filter_clear_compact"),
-                ) {
-                    Text("Clear", fontSize = 12.sp)
-                }
-            }
-            Text(if (isExpanded) "Hide" else "Show", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+            Text(
+                summary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary"),
+            )
+        }
+        if (hasActiveFilter) {
+            TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all") }
         }
 
         AnimatedVisibility(
@@ -3408,6 +3299,7 @@ private fun TransactionFilterBar(
                     ),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionLabel("Range")
                 FlowRow(
                     modifier =
                         Modifier
@@ -3634,6 +3526,7 @@ private fun InsightsPage(
 ) {
     var selectedBucketKey by remember { mutableStateOf<String?>(null) }
     var selectedCategory by remember { mutableStateOf<String?>(null) }
+    var categoriesExpanded by remember(dateRange, chartRangeMode, selectedBucketKey) { mutableStateOf(false) }
     val buckets =
         remember(dailySpending, chartRangeMode, dateRange) {
             DashboardAnalytics.spendBuckets(dailySpending, chartRangeMode, dateRange)
@@ -3658,14 +3551,15 @@ private fun InsightsPage(
             if (selectedBucket == null) {
                 categoryTotals
             } else {
-                DashboardAnalytics.categoryTotals(bucketTransactions)
+                DashboardAnalytics.categoryTotals(bucketTransactions, limit = Int.MAX_VALUE)
             }
         }
     val visibleTotalSpentCents = selectedBucket?.cents ?: totalSpentCents
 
-    LaunchedEffect(buckets, visibleCategoryTotals) {
+    LaunchedEffect(buckets, visibleCategoryTotals, categoriesExpanded) {
         if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
-        if (selectedCategory != null && visibleCategoryTotals.none { it.category == selectedCategory }) {
+        val available = if (categoriesExpanded) visibleCategoryTotals else visibleCategoryTotals.take(4)
+        if (selectedCategory != null && available.none { it.category == selectedCategory }) {
             selectedCategory = null
         }
     }
@@ -3696,9 +3590,11 @@ private fun InsightsPage(
                 }
             }
         }
+    val amountWidth = rememberTransactionAmountWidth(selectedTransactions)
     val insightTitle =
-        selectedCategoryTotal?.let { "${it.category} spending" }
-            ?: selectedBucket?.label
+        selectedCategoryTotal?.let { category ->
+            "${category.category} spending" + (selectedBucket?.let { " · ${it.label}" } ?: "")
+        } ?: selectedBucket?.label
     val insightAmount =
         selectedCategoryTotal?.let { MoneyFormatter.formatUsd(it.cents) }
             ?: selectedBucket?.let { MoneyFormatter.formatUsd(it.cents) }
@@ -3719,6 +3615,7 @@ private fun InsightsPage(
                     totalCents = totalSpentCents,
                     range = dateRange,
                     dayCount = dailySpending.size,
+                    hasTransfers = remember(rangeTransactions) { DashboardAnalytics.metrics(rangeTransactions).transferCents > 0 },
                 )
             }
             item {
@@ -3729,15 +3626,8 @@ private fun InsightsPage(
                     availableMonths = availableMonths,
                     onModeSelected = onChartRangeModeSelected,
                     onSelectedMonthChange = onSelectedMonthChange,
+                    showRangeLabel = false,
                 )
-            }
-            if (pendingReviewSummary.transactionCount > 0) {
-                item {
-                    PendingReviewInsightsCard(
-                        summary = pendingReviewSummary,
-                        onReview = onReview,
-                    )
-                }
             }
             if (categoryTotals.isEmpty()) {
                 item { InsightsEmptyState(onAddTransaction = onAddTransaction) }
@@ -3757,6 +3647,8 @@ private fun InsightsPage(
                         totals = visibleCategoryTotals,
                         totalSpentCents = visibleTotalSpentCents,
                         selectedCategory = selectedCategory,
+                        expanded = categoriesExpanded,
+                        onExpandedChange = { categoriesExpanded = it },
                         onSelect = { category ->
                             selectedCategory = if (selectedCategory == category) null else category
                         },
@@ -3775,9 +3667,14 @@ private fun InsightsPage(
                             transaction = transaction,
                             onClick = { onEdit(transaction) },
                             modifier = Modifier.testTag("insight_transaction_${transaction.id}"),
+                            showDate = true,
+                            amountWidth = amountWidth,
                         )
                     }
                 }
+            }
+            if (pendingReviewSummary.transactionCount > 0) {
+                item { PendingReviewInsightsCard(summary = pendingReviewSummary, onReview = onReview) }
             }
         }
     }
@@ -3788,36 +3685,10 @@ private fun PendingReviewInsightsCard(
     summary: UnreviewedSpendingSummary,
     onReview: () -> Unit,
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier.fillMaxWidth().testTag("insights_pending_review_card"),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text("Optional corrections", fontWeight = FontWeight.SemiBold)
-            Text(
-                "${summary.transactionCount} ${if (summary.transactionCount == 1) "transaction" else "transactions"}",
-                modifier = Modifier.testTag("insights_pending_review_count"),
-            )
-            Text(
-                MoneyFormatter.formatUsd(summary.spentCents),
-                color = LocalFinanceColors.current.expense,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.testTag("insights_pending_review_amount"),
-            )
-            Text(
-                "Already included in spending and grouped under Other; review only to correct details.",
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            TextButton(
-                onClick = onReview,
-                modifier = Modifier.heightIn(min = 48.dp).testTag("insights_pending_review_action"),
-            ) { Text("Check & correct") }
-        }
+    Column(modifier = Modifier.fillMaxWidth().testTag("insights_pending_review_card")) {
+        val noun = if (summary.transactionCount == 1) "correction" else "corrections"
+        Text("${summary.transactionCount} optional $noun · ${MoneyFormatter.formatUsd(summary.spentCents)} · included under Other", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("insights_pending_review_note"))
+        TextButton(onClick = onReview, modifier = Modifier.heightIn(min = 48.dp).testTag("insights_pending_review_action")) { Text("Check & correct") }
     }
 }
 
@@ -5018,6 +4889,7 @@ private fun DateRangeControls(
     availableMonths: List<YearMonth>,
     onModeSelected: (ChartRangeMode) -> Unit,
     onSelectedMonthChange: (YearMonth) -> Unit,
+    showRangeLabel: Boolean = true,
 ) {
     var monthPickerExpanded by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(mode) {
@@ -5030,17 +4902,14 @@ private fun DateRangeControls(
         modifier =
             Modifier
                 .fillMaxWidth()
-                .clip(MaterialTheme.shapes.medium)
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-                .padding(14.dp)
                 .testTag("date_range_controls"),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        BoxWithConstraints(
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            val rangeButtons: @Composable () -> Unit = {
-                PennyBinaryChoice(
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (showRangeLabel) {
+                Text(dateRange.label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            }
+            PennyBinaryChoice(
                     firstLabel = ChartRangeMode.Week.label,
                     firstSelected = mode == ChartRangeMode.Week,
                     onFirstClick = {
@@ -5057,22 +4926,6 @@ private fun DateRangeControls(
                     secondModifier = Modifier.testTag("range_month"),
                     modifier = Modifier.testTag("range_mode_group"),
                 )
-            }
-            if (maxWidth < 420.dp) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Date range", fontWeight = FontWeight.SemiBold)
-                    Text(dateRange.label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                    rangeButtons()
-                }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Date range", fontWeight = FontWeight.SemiBold)
-                        Text(dateRange.label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                    }
-                    rangeButtons()
-                }
-            }
         }
         AnimatedVisibility(
             visible = mode == ChartRangeMode.Month && monthPickerExpanded,
@@ -5259,114 +5112,26 @@ private fun PickerNavButton(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SummaryBand(
-    rangeLabel: String,
-    metrics: DashboardMetrics,
-) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.inverseSurface),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Text(
-                text = "Spending in $rangeLabel",
-                color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.72f),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            AnimatedContent(
-                targetState = MoneyFormatter.formatUsd(metrics.spentCents),
-                transitionSpec = {
-                    fadeIn(
-                        tween(
-                            durationMillis = PennyMotion.DurationMedium,
-                            easing = PennyMotion.StandardDecelerateEasing,
-                        ),
-                    ).togetherWith(
-                        fadeOut(
-                            tween(
-                                durationMillis = PennyMotion.DurationShort,
-                                easing = PennyMotion.StandardAccelerateEasing,
-                            ),
-                        ),
-                    )
-                },
-                contentAlignment = Alignment.CenterEnd,
-                modifier = Modifier.fillMaxWidth(),
-                label = "summary_spending_amount",
-            ) { amount ->
-                Text(
-                    text = amount,
-                    color = MaterialTheme.colorScheme.inverseOnSurface,
-                    style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
-                    letterSpacing = 0.sp,
-                    textAlign = TextAlign.End,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+private fun SummaryBand(metrics: DashboardMetrics) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("Spent", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(MoneyFormatter.formatUsd(metrics.spentCents), style = MaterialTheme.typography.headlineMedium.copy(fontFeatureSettings = "tnum"))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Income", style = MaterialTheme.typography.bodySmall)
+                Text(MoneyFormatter.formatUsd(metrics.incomeCents), style = MaterialTheme.typography.bodySmall)
             }
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                SummaryPill("Transactions", metrics.transactionCount.toString(), Modifier.widthIn(min = 132.dp).weight(1f))
-                SummaryPill("Income", MoneyFormatter.formatUsd(metrics.incomeCents), Modifier.widthIn(min = 132.dp).weight(1f))
-                SummaryPill("Net", MoneyFormatter.formatUsd(metrics.netCents), Modifier.widthIn(min = 132.dp).weight(1f))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Net", style = MaterialTheme.typography.bodySmall)
+                Text(MoneyFormatter.formatUsd(metrics.netCents), style = MaterialTheme.typography.bodySmall)
             }
         }
-    }
-}
-
-@Composable
-private fun SummaryPill(
-    label: String,
-    value: String,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier =
-            modifier
-                .clip(MaterialTheme.shapes.large)
-                .background(MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.06f))
-                .padding(horizontal = 10.dp, vertical = 7.dp),
-    ) {
         Text(
-            label,
-            color = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.64f),
-            style = MaterialTheme.typography.labelSmall,
+            "${metrics.transactionCount} ${if (metrics.transactionCount == 1) "transaction" else "transactions"}" +
+                if (metrics.transferCents > 0) " · Transfers excluded" else "",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        AnimatedContent(
-            targetState = value,
-            transitionSpec = {
-                fadeIn(
-                    tween(
-                        durationMillis = PennyMotion.DurationMedium,
-                        easing = PennyMotion.StandardDecelerateEasing,
-                    ),
-                ).togetherWith(
-                    fadeOut(
-                        tween(
-                            durationMillis = PennyMotion.DurationShort,
-                            easing = PennyMotion.StandardAccelerateEasing,
-                        ),
-                    ),
-                )
-            },
-            contentAlignment = Alignment.CenterEnd,
-            modifier = Modifier.fillMaxWidth(),
-            label = "summary_$label",
-        ) { animatedValue ->
-            Text(
-                animatedValue,
-                color = MaterialTheme.colorScheme.inverseOnSurface,
-                style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                textAlign = TextAlign.End,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
     }
 }
 
@@ -5375,26 +5140,22 @@ private fun InsightsHeroSummary(
     totalCents: Long,
     range: DashboardDateRange,
     dayCount: Int,
+    hasTransfers: Boolean,
 ) {
     val averageCents = if (dayCount <= 0) 0L else totalCents / dayCount
-    val heading =
-        if (!range.startInclusive.plusDays(7).isBefore(range.endExclusive)) {
-            "Spent this week"
-        } else {
-            "Spent this month"
-        }
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(text = heading, style = MaterialTheme.typography.titleMedium)
+        Text(text = "Spent", style = MaterialTheme.typography.titleMedium)
         Text(
             text = MoneyFormatter.formatUsd(totalCents),
             style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
             modifier = Modifier.testTag("insights_total_amount"),
         )
         Text(
-            text = "${range.label} · avg ${MoneyFormatter.formatUsd(averageCents)}/day",
+            text = "${range.label} · avg ${MoneyFormatter.formatUsd(averageCents)}/day" +
+                if (hasTransfers) " · Transfers excluded" else "",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.testTag("insights_total_caption"),
@@ -5405,7 +5166,7 @@ private fun InsightsHeroSummary(
 /**
  * Hit targets, stated honestly: at the 360 dp reference width, [PagePadding]
  * (`horizontal = 20.dp`) leaves 320 dp, so a 7-bucket week row gives cells of
- * ≈44 × 140 dp — 4 dp under the 48 dp width guidance. This is a deliberate
+ * ≈44 × 112 dp — 4 dp under the 48 dp width guidance. This is a deliberate
  * deviation: the cell is full chart height, the whole cell (not just the drawn
  * bar) is the target, [Arrangement.spacedBy] is kept at 2.dp to maximise it,
  * and every cell carries `selectable` semantics so TalkBack and keyboard focus
@@ -5421,7 +5182,7 @@ private fun SpendingBucketsChart(
     val total = remember(buckets) { buckets.sumOf { it.cents } }
     val peak = remember(buckets) { buckets.maxOfOrNull { it.cents } ?: 0L }
     val selectionColor = LocalFinanceColors.current.expense
-    val unselectedColor = MaterialTheme.colorScheme.surfaceContainerHigh
+    val unselectedColor = MaterialTheme.colorScheme.outline
     val chartSummary =
         buildString {
             append("Spending timeline for ${range.label}. Total ${MoneyFormatter.formatUsd(total)}. ")
@@ -5440,7 +5201,7 @@ private fun SpendingBucketsChart(
             modifier =
                 Modifier
                     .fillMaxWidth()
-                    .height(140.dp)
+                    .height(112.dp)
                     .semantics { contentDescription = chartSummary }
                     .testTag("spending_timeline_chart"),
         ) {
@@ -5493,7 +5254,12 @@ private fun SpendingBucketsChart(
                 }
             }
         }
-        if (buckets.isNotEmpty()) {
+        if (buckets.isNotEmpty() && LocalDensity.current.fontScale >= 1.3f) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(buckets.first().startInclusive.format(ShortDateFormatter), style = MaterialTheme.typography.labelSmall)
+                Text(buckets.last().endExclusive.minusDays(1).format(ShortDateFormatter), style = MaterialTheme.typography.labelSmall)
+            }
+        } else if (buckets.isNotEmpty()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -5526,8 +5292,13 @@ private fun CategoryRankList(
     totals: List<CategoryTotal>,
     totalSpentCents: Long,
     selectedCategory: String?,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
     onSelect: (String) -> Unit,
 ) {
+    val amountStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
     val chartColors =
         listOf(
             MaterialTheme.colorScheme.primary,
@@ -5549,14 +5320,17 @@ private fun CategoryRankList(
                 .testTag("category_breakdown_chart"),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("Where it went", fontWeight = FontWeight.SemiBold)
+        Text("Top categories", fontWeight = FontWeight.SemiBold)
         Column(
             modifier = Modifier.fillMaxWidth().selectableGroup(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            totals.forEachIndexed { index, entry ->
+            (if (expanded) totals else totals.take(4)).forEachIndexed { index, entry ->
                 val selected = selectedCategory == entry.category
                 val amount = MoneyFormatter.formatUsd(entry.cents)
+                val amountWidth = remember(amount, amountStyle, measurer, density) {
+                    measurer.measure(amount, style = amountStyle, softWrap = false).size.width
+                }
                 val fraction =
                     if (totalSpentCents <= 0L) {
                         0f
@@ -5605,7 +5379,8 @@ private fun CategoryRankList(
                         )
                         Text(
                             text = amount,
-                            style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                            style = amountStyle,
+                            modifier = Modifier.width(with(density) { amountWidth.toDp() } + 2.dp),
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
@@ -5626,6 +5401,14 @@ private fun CategoryRankList(
                     }
                 }
             }
+        }
+        if (totals.size > 4) {
+            val remaining = totals.drop(4)
+            val label = if (expanded) "Show less" else {
+                val noun = if (remaining.size == 1) "category" else "categories"
+                "${remaining.size} more $noun · ${MoneyFormatter.formatUsd(remaining.sumOf { it.cents })}"
+            }
+            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.testTag("insight_categories_expand")) { Text(label) }
         }
     }
 }
@@ -5659,32 +5442,23 @@ private fun InsightsSelectionHeader(
 }
 
 @Composable
-private fun RecentTransactionsHeader(
-    title: String,
+private fun TransactionsHeader(
     count: Int,
-    detail: String,
-    actionText: String? = null,
-    onAction: (() -> Unit)? = null,
+    metrics: DashboardMetrics,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = title,
+            text = "Transactions",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
-        Text("$count total · $detail", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-        if (actionText != null && onAction != null) {
-            Spacer(Modifier.width(6.dp))
-            TextButton(
-                onClick = onAction,
-                modifier = Modifier.testTag("view_all_transactions"),
-            ) {
-                Text(actionText, fontWeight = FontWeight.SemiBold)
-            }
-        }
+        Text(
+            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · $count total" +
+                if (metrics.transferCents > 0) " · Transfers excluded" else "",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -5778,6 +5552,8 @@ private fun SwipeTransactionRow(
     transaction: Transaction,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    amountWidth: Int,
+    showDate: Boolean = false,
 ) {
     val haptic = LocalHapticFeedback.current
     val latestOnEdit by rememberUpdatedState(onEdit)
@@ -5815,7 +5591,7 @@ private fun SwipeTransactionRow(
                     .fillMaxWidth()
                     .testTag("transaction_row"),
         ) {
-            TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete)
+            TransactionRow(transaction = transaction, onClick = onEdit, onDelete = onDelete, showDate = showDate, amountWidth = amountWidth)
         }
     }
 }
@@ -5861,21 +5637,23 @@ private fun SwipeActionBackground(dismissDirection: SwipeToDismissBoxValue) {
 }
 
 @Composable
-private fun TransactionRow(
+internal fun TransactionRow(
     transaction: Transaction,
+    amountWidth: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onDelete: (() -> Unit)? = null,
+    showDate: Boolean = false,
 ) {
-    val fontScale = LocalDensity.current.fontScale
-    BoxWithConstraints(
+    Box(
         modifier =
             modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .testTag("transaction_content_${transaction.id}")
-                .clickable(onClick = onClick)
-                .semantics {
+                .clickable(onClickLabel = "Edit", onClick = onClick)
+                .clearAndSetSemantics {
+                    contentDescription = transaction.rowAccessibility()
                     customActions =
                         buildList {
                             add(
@@ -5895,81 +5673,89 @@ private fun TransactionRow(
                         }
                 },
     ) {
-        val shouldStack = maxWidth < 420.dp || fontScale >= 1.3f
-        if (shouldStack) {
-            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TransactionCategoryBadge(transaction.category)
-                    Spacer(Modifier.width(12.dp))
-                    TransactionIdentity(transaction, Modifier.weight(1f))
-                }
-                TransactionAmount(
-                    transaction = transaction,
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(top = 4.dp),
-                )
-            }
-        } else {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TransactionCategoryBadge(transaction.category)
-                Spacer(Modifier.width(12.dp))
-                TransactionIdentity(transaction, Modifier.weight(1f))
-                Spacer(Modifier.width(10.dp))
-                TransactionAmount(transaction, Modifier.widthIn(min = 96.dp))
-            }
+        TransactionPresentation(transaction, amountWidth = amountWidth, showDate = showDate, padded = true)
+    }
+}
+
+internal fun transactionAmountCandidates(transactions: List<Transaction>): List<Int> {
+    var negative: Int? = null
+    var positive: Int? = null
+    for (transaction in transactions) {
+        val cents = transaction.cents
+        if (cents < 0 && (negative == null || cents.toLong() < negative.toLong())) negative = cents
+        if (cents >= 0 && (positive == null || cents > positive)) positive = cents
+    }
+    return listOfNotNull(negative, positive)
+}
+
+internal fun transactionAmountWidth(transactions: List<Transaction>, measure: (String) -> Int): Int =
+    transactionAmountCandidates(transactions).maxOfOrNull { measure(MoneyFormatter.formatUsd(it)) } ?: 0
+
+@Composable
+internal fun rememberTransactionAmountWidth(transactions: List<Transaction>): Int {
+    val measurer = rememberTextMeasurer()
+    val style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")
+    val density = LocalDensity.current
+    val resolver = androidx.compose.ui.platform.LocalFontFamilyResolver.current
+    return remember(transactions, measurer, style, density, resolver) {
+        transactionAmountWidth(transactions) { text ->
+            measurer.measure(text, style = style, softWrap = false).size.width
         }
     }
 }
 
 @Composable
-private fun TransactionCategoryBadge(category: String) {
-    val badgeColors = categoryBadgeColors(category)
-    Box(
-        modifier =
-            Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .background(badgeColors.container),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = category.firstOrNull()?.uppercase() ?: "$",
-            fontWeight = FontWeight.Bold,
-            color = badgeColors.content,
-        )
+private fun TransactionMetadata(transaction: Transaction, showDate: Boolean) {
+    val (flexible, temporal) = transaction.rowMetadata(showDate)
+    val style = MaterialTheme.typography.bodyMedium
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val temporalWidth = remember(temporal, style, density, measurer) {
+        if (temporal.isEmpty()) 0 else measurer.measure(temporal, style = style, softWrap = false).size.width
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val together = temporal.isEmpty() || with(density) { maxWidth.toPx() } >= temporalWidth + with(density) { 74.dp.toPx() }
+        Column {
+            Row(Modifier.fillMaxWidth()) {
+                Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (together && temporal.isNotEmpty()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(temporal, modifier = Modifier.width(with(density) { temporalWidth.toDp() } + 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, softWrap = false)
+                }
+            }
+            if (!together) Text(temporal, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style)
+        }
     }
 }
 
 @Composable
-private fun TransactionIdentity(
+private fun TransactionPresentation(
     transaction: Transaction,
+    amountWidth: Int,
     modifier: Modifier = Modifier,
+    showDate: Boolean = false,
+    padded: Boolean = false,
 ) {
-    Column(modifier = modifier) {
-        Text(
-            text = transaction.merchant.ifBlank { "Untitled" },
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = transaction.rowSubtitle(),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            transaction.recurringInterval?.let { recurringInterval ->
-                Spacer(Modifier.width(6.dp))
-                RecurringPill(recurringInterval = recurringInterval)
+    val density = LocalDensity.current
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val actualAvailable = with(density) { (maxWidth - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
+        val stack = density.fontScale >= 1.3f || amountWidth + with(density) { 104.dp.toPx() } > actualAvailable
+        Column(modifier = Modifier.fillMaxWidth().then(if (padded) Modifier.padding(horizontal = 14.dp, vertical = 10.dp) else Modifier)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = transaction.merchant.ifBlank { "Untitled" },
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (!stack) {
+                    Spacer(Modifier.width(8.dp))
+                    TransactionAmount(transaction, Modifier.width(with(density) { amountWidth.toDp() }), availablePx = actualAvailable, measuredWidth = amountWidth)
+                }
             }
+            TransactionMetadata(transaction, showDate)
+            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), availablePx = actualAvailable, measuredWidth = amountWidth)
         }
     }
 }
@@ -5978,35 +5764,33 @@ private fun TransactionIdentity(
 private fun TransactionAmount(
     transaction: Transaction,
     modifier: Modifier = Modifier,
+    availablePx: Float,
+    measuredWidth: Int,
 ) {
-    Text(
-        text = MoneyFormatter.formatUsd(transaction.cents),
-        color = if (transaction.cents < 0) LocalFinanceColors.current.expense else LocalFinanceColors.current.income,
-        style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
-        textAlign = TextAlign.End,
+    val color = when {
+        transaction.effectiveFlowKind == FlowKind.TRANSFER -> MaterialTheme.colorScheme.onSurfaceVariant
+        transaction.cents < 0 -> LocalFinanceColors.current.expense
+        else -> LocalFinanceColors.current.income
+    }
+    val baseStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum", color = color, textAlign = TextAlign.End)
+    val text = MoneyFormatter.formatUsd(transaction.cents)
+    val measurer = rememberTextMeasurer()
+    val fontSize = remember(text, baseStyle, availablePx, measuredWidth, measurer) {
+        var size = baseStyle.fontSize
+        if (measuredWidth > availablePx) {
+            while (size.value > 8f && measurer.measure(text, style = baseStyle.copy(fontSize = size), softWrap = false).size.width > availablePx) {
+                size = (size.value - 0.5f).coerceAtLeast(8f).sp
+            }
+        }
+        size
+    }
+    BasicText(
+        text = text,
+        style = baseStyle.copy(fontSize = fontSize),
+        softWrap = false,
+        maxLines = 1,
         modifier = modifier,
     )
-}
-
-@Composable
-private fun RecurringPill(recurringInterval: RecurrenceInterval) {
-    Box(
-        modifier =
-            Modifier
-                .clip(MaterialTheme.shapes.small)
-                .background(MaterialTheme.colorScheme.secondaryContainer)
-                .semantics { contentDescription = "Recurring ${recurringInterval.label}" }
-                .padding(horizontal = 7.dp, vertical = 3.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = recurringInterval.label,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-        )
-    }
 }
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
@@ -6562,11 +6346,7 @@ internal fun TransactionEditor(
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(10.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 if (onDelete != null) {
                     TextButton(
                         onClick = onDelete,
@@ -6576,7 +6356,6 @@ internal fun TransactionEditor(
                         Text("Delete", color = LocalFinanceColors.current.expense)
                     }
                 }
-                Spacer(Modifier.weight(1f))
                 Button(
                     onClick = {
                         if (MoneyFormatter.parseAmountToCents(draft.amount).absoluteValue == 0) {
@@ -6595,12 +6374,20 @@ internal fun TransactionEditor(
                     shape = MaterialTheme.shapes.large,
                     modifier =
                         Modifier
-                            .weight(1f)
-                            .height(56.dp)
+                            .fillMaxWidth()
+                            .heightIn(min = 56.dp)
                             .testTag("save_transaction_button"),
                 ) {
                     Text(
-                        text = if (draft.isExpense) "Save expense" else "Save income",
+                        text = when {
+                            draft.effectiveFlowKind == FlowKind.TRANSFER -> "Save transfer"
+                            draft.isExpense -> "Save expense"
+                            else -> "Save income"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        softWrap = false,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -7124,15 +6911,37 @@ private fun EditorDraft.occurredAtDateTime(): LocalDateTime =
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
 
-private fun Transaction.rowSubtitle(): String {
-    val categoryLabel = category.ifBlank { "Other" }
-    val date = occurredAtDateTime()
-    val account = accountName?.takeIf { source == "simplefin" && it.isNotBlank() }
-    return if (account == null) {
-        "$categoryLabel • ${date.format(ListDateFormatter)}"
+private fun Transaction.rowMetadata(showDate: Boolean): Pair<String, String> {
+    val categoryLabel = if (effectiveFlowKind == FlowKind.TRANSFER) "Transfer" else category.trim().ifBlank { "Other" }
+    val location = listOfNotNull(locationCity?.trim()?.takeIf { it.isNotEmpty() }, locationState?.trim()?.takeIf { it.isNotEmpty() })
+        .joinToString(", ").ifBlank { accountName?.trim().orEmpty() }
+    val timestamp = transactedAtEpochMillis ?: occurredAtEpochMillis.takeIf { source != "simplefin" }
+    val whenLabel = if (showDate) {
+        Instant.ofEpochMilli(timestamp ?: occurredAtEpochMillis).atZone(ZoneId.systemDefault()).format(ShortDateFormatter)
     } else {
-        "$categoryLabel • $account • ${date.format(ShortDateFormatter)}"
+        timestamp?.let {
+            val dateTime = Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
+            val time = dateTime.format(RowTimeFormatter)
+            if (transactedAtEpochMillis != null && dateTime.toLocalDate() != occurredAtDateTime().toLocalDate()) {
+                "${dateTime.format(ShortDateFormatter)}, $time"
+            } else {
+                time
+            }
+        }.orEmpty()
     }
+    return listOf(categoryLabel, location).filter { it.isNotBlank() }.joinToString(" · ") to whenLabel
+}
+
+private fun Transaction.rowAccessibility(): String {
+    val timestamp = transactedAtEpochMillis
+    val date = when {
+        timestamp != null -> "Purchase ${Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).format(AccessibilityDateTimeFormatter)}"
+        source == "simplefin" -> "Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}"
+        else -> "Occurred ${occurredAtDateTime().format(AccessibilityDateTimeFormatter)}"
+    }
+    val categoryLabel = if (effectiveFlowKind == FlowKind.TRANSFER) "Transfer" else category.trim().ifBlank { "Other" }
+    val place = listOfNotNull(locationCity?.trim()?.takeIf { it.isNotEmpty() }, locationState?.trim()?.takeIf { it.isNotEmpty() }).joinToString(", ").takeIf { it.isNotBlank() }
+    return listOfNotNull(merchant.ifBlank { "Untitled" }, MoneyFormatter.formatUsd(cents), categoryLabel, place, accountName?.trim()?.takeIf { it.isNotEmpty() }, date, recurringInterval?.let { "Recurring ${it.label}" }).joinToString(", ")
 }
 
 private fun Transaction.deleteDescription(): String {
@@ -7197,50 +7006,13 @@ private fun parseDateTime(
         null
     }
 
-private data class CategoryBadgeColors(
-    val container: Color,
-    val content: Color,
-)
-
-@Composable
-private fun categoryBadgeColors(category: String): CategoryBadgeColors {
-    val colors = MaterialTheme.colorScheme
-    return when (category) {
-        "Food", "Groceries", "Restaurants", "Coffee",
-        "Healthcare", "Pharmacy", "Fitness", "Education", "Charity",
-        -> {
-            CategoryBadgeColors(colors.secondaryContainer, colors.onSecondaryContainer)
-        }
-
-        "Transit", "Gas", "Ride share", "Car", "Parking", "Travel",
-        "Salary", "Bonus", "Freelance", "Business", "Deposit", "Refund", "Interest",
-        "Dividends", "Investments", "Rental", "Reimbursement", "Transfer", "Gift", "Sale",
-        -> {
-            CategoryBadgeColors(colors.primaryContainer, colors.onPrimaryContainer)
-        }
-
-        "Home", "Rent", "Mortgage", "Utilities", "Phone", "Internet" -> {
-            CategoryBadgeColors(colors.tertiaryContainer, colors.onTertiaryContainer)
-        }
-
-        "Insurance", "Taxes", "Fees", "Debt", "Subscriptions" -> {
-            CategoryBadgeColors(colors.surfaceContainerHighest, colors.onSurface)
-        }
-
-        "Entertainment", "Shopping", "Clothing", "Gifts", "Kids", "Pets" -> {
-            CategoryBadgeColors(colors.errorContainer, colors.onErrorContainer)
-        }
-
-        else -> {
-            CategoryBadgeColors(colors.surfaceContainerHighest, colors.onSurface)
-        }
-    }
-}
-
 private val DateFormatter = DateTimeFormatter.ISO_LOCAL_DATE
 private val TimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val ListDateFormatter = DateTimeFormatter.ofPattern("MMM d, h:mm a")
 private val ShortDateFormatter = DateTimeFormatter.ofPattern("MMM d")
+private val RowTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
+private val AccessibilityDateFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy")
+private val AccessibilityDateTimeFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm a")
 private val DayHeaderFormatter = DateTimeFormatter.ofPattern("EEEE, MMM d")
 private val MonthLabelFormatter = DateTimeFormatter.ofPattern("MMM", Locale.US)
 private const val SimpleFinCreateUrl = "https://bridge.simplefin.org/simplefin/create"
