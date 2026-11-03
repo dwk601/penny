@@ -91,6 +91,7 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -118,6 +119,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -2085,7 +2087,7 @@ private fun FlowMoneyScaffold(
     modifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    var snackbarHeight by remember { mutableStateOf(0) }
+    var snackbarHeight by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
     Scaffold(
         modifier = modifier,
@@ -2181,21 +2183,51 @@ private fun FlowMoneyNavigationBar(
     selectedTab: DashboardTab,
     onTabSelected: (DashboardTab) -> Unit,
 ) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        windowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
-        modifier = Modifier.testTag("compact_navigation"),
-    ) {
-        PrimaryDashboardTabs.forEach { tab ->
-            NavigationBarItem(
-                selected = selectedTab == tab,
-                onClick = { onTabSelected(tab) },
-                icon = { NavigationTabIcon(tab) },
-                label = {
-                    BasicText(tab.label, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.labelMedium.copy(color = LocalContentColor.current, textAlign = TextAlign.Center, fontWeight = FontWeight.Normal, fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif, textGeometricTransform = androidx.compose.ui.text.style.TextGeometricTransform(scaleX = 0.8f)), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 12.sp))
-                },
-                modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
-            )
+    val density = LocalDensity.current
+    val style = MaterialTheme.typography.labelMedium
+    val measurer = rememberTextMeasurer()
+    val longestLabelPx = remember(measurer, style, density) {
+        PrimaryDashboardTabs.maxOf { measurer.measure(it.label, style = style.copy(fontSize = 10.sp), softWrap = false).size.width }
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val widthPx = with(density) { maxWidth.toPx() }
+        // M3 reserves horizontal label padding; allow for pixel rounding as well.
+        val requiredPx = longestLabelPx + with(density) { 16.dp.toPx() } + 2f
+        val fallback = requiredPx > widthPx / PrimaryDashboardTabs.size
+        val minimumPeerPx = with(density) { 48.dp.toPx() }
+        val selectedPx = requiredPx.coerceAtLeast(widthPx / PrimaryDashboardTabs.size)
+            .coerceAtMost((widthPx - 2 * minimumPeerPx).coerceAtLeast(0f))
+        val peerPx = (widthPx - selectedPx) / 2f
+        NavigationBar(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            windowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
+            modifier = Modifier.testTag("compact_navigation"),
+        ) {
+            val rowScope = this
+            PrimaryDashboardTabs.forEach { tab ->
+                val selected = selectedTab == tab
+                val weight = if (!fallback) 1f else if (selected) selectedPx else peerPx
+                Box(Modifier.weight(weight.coerceAtLeast(1f))) {
+                    rowScope.NavigationBarItem(
+                        selected = selected,
+                        onClick = { onTabSelected(tab) },
+                        alwaysShowLabel = !fallback,
+                        icon = { NavigationTabIcon(tab) },
+                        label = {
+                            BasicText(
+                                tab.label,
+                                modifier = Modifier.fillMaxWidth(),
+                                style = style.copy(color = LocalContentColor.current, textAlign = TextAlign.Center),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = style.fontSize),
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("tab_${tab.name.lowercase(Locale.US)}"),
+                    )
+                }
+            }
         }
     }
 }
@@ -6420,9 +6452,13 @@ internal fun TransactionEditor(
                     IconButton(
                         onClick = onDelete,
                         enabled = !persistenceBusy,
+                        colors = IconButtonDefaults.iconButtonColors(
+                            contentColor = LocalFinanceColors.current.expense,
+                            disabledContentColor = IconButtonDefaults.iconButtonColors().disabledContentColor,
+                        ),
                         modifier = Modifier.size(48.dp).testTag("delete_transaction_button").semantics { contentDescription = "Delete transaction" },
                     ) {
-                        Icon(painterResource(R.drawable.ic_delete), contentDescription = null, tint = LocalFinanceColors.current.expense)
+                        Icon(painterResource(R.drawable.ic_delete), contentDescription = null)
                     }
                 }
                 Button(
