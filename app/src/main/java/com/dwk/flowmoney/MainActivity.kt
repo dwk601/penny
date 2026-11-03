@@ -70,6 +70,7 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -84,8 +85,10 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -113,6 +116,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -122,11 +126,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -150,9 +156,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -644,6 +652,7 @@ fun FlowMoneyApp(
     var merchantRules by remember(viewModel) { mutableStateOf<List<MerchantRuleEntity>>(emptyList()) }
     val viewModelMutationBusy by viewModel.mutationBusy.collectAsStateWithLifecycle()
     val pendingRangeReset by viewModel.pendingRangeReset.collectAsStateWithLifecycle()
+    val syncHealthNow = rememberSyncHealthNow(syncHealthClock, uiState.simpleFin.profile)
     var showSheet by rememberSaveable { mutableStateOf(false) }
     var editorSessionId by rememberSaveable { mutableStateOf(0) }
     var showDataSheet by rememberSaveable { mutableStateOf(false) }
@@ -847,6 +856,7 @@ fun FlowMoneyApp(
                         message = "Deleted $description",
                         actionLabel = "Undo",
                         withDismissAction = true,
+                        duration = SnackbarDuration.Indefinite,
                     )
                 if (result == SnackbarResult.ActionPerformed) {
                     val restored =
@@ -919,6 +929,7 @@ fun FlowMoneyApp(
                 message = message,
                 actionLabel = "Undo",
                 withDismissAction = true,
+                duration = SnackbarDuration.Indefinite,
             )
         if (result == SnackbarResult.ActionPerformed) {
             try {
@@ -1087,7 +1098,7 @@ fun FlowMoneyApp(
         scope.launch {
             try {
                 val token = viewModel.acceptAsOther(ids)
-                offerReviewUndo("Accepted ${ids.size} transactions as Other") {
+                offerReviewUndo(reviewAcceptedMessage(ids.size)) {
                     viewModel.restoreReview(token)
                 }
             } catch (failure: CancellationException) {
@@ -1218,7 +1229,7 @@ fun FlowMoneyApp(
         onData = { showDataSheet = true },
         simpleFin = uiState.simpleFin,
         operation = dataOperation,
-        syncHealthNowEpochMillis = syncHealthClock.millis(),
+        syncHealthNowEpochMillis = syncHealthNow,
         onManualSync = ::requestManualSimpleFinSync,
         modifier =
             Modifier
@@ -1874,9 +1885,10 @@ internal data class SyncHealthUiState(
     val kind: SyncHealthKind,
     val stateDescription: String,
     val manualSync: Boolean = false,
+    val completed: Boolean = false,
 ) {
     val label: String get() = when (kind) {
-        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
+        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> if (completed) "Synced" else "Sync now"
         SyncHealthKind.Syncing -> "Syncing"
         SyncHealthKind.Error -> "Error"
         SyncHealthKind.ReconnectRequired -> "Reconnect"
@@ -1924,6 +1936,9 @@ internal fun syncHealthUiState(
         )
     }
 
+    val attempt = profile.lastSyncAttemptAtEpochMillis
+    val success = profile.lastSuccessfulSyncAtEpochMillis
+    val lastAttemptSucceeded = success != null && (attempt == null || success >= attempt)
     val failedAttempt =
         profile.lastError?.isNotBlank() == true &&
             profile.lastSyncAttemptAtEpochMillis != null &&
@@ -1937,10 +1952,13 @@ internal fun syncHealthUiState(
             kind = if (failedAttempt) SyncHealthKind.Error else SyncHealthKind.CoolingDown,
             stateDescription =
                 if (failedAttempt) {
-                    "Sync error; cooling down until $next"
+                    "Sync error; cooling down until $next; open Data"
+                } else if (lastAttemptSucceeded) {
+                    "Sync completed; cooling down until $next; open Data"
                 } else {
-                    "Connected; cooling down until $next"
+                    "Last sync didn’t finish; retry after $next; open Data"
                 },
+            completed = lastAttemptSucceeded && !failedAttempt,
         )
     }
     if (failedAttempt) {
@@ -1953,14 +1971,48 @@ internal fun syncHealthUiState(
     if (profile.automaticSyncsPerDay == 1) {
         return SyncHealthUiState(
             SyncHealthKind.Connected,
-            "Connected and idle; automatic sync is once daily; open Data to change cadence",
+            when {
+                attempt == null && success == null -> "Not synced yet; automatic sync is once daily; open Data to change cadence"
+                !lastAttemptSucceeded -> "Last sync didn’t finish; automatic sync is once daily; open Data to change cadence"
+                else -> "Sync due; automatic sync is once daily; open Data to change cadence"
+            },
         )
     }
     return SyncHealthUiState(
         kind = SyncHealthKind.Connected,
-        stateDescription = "Connected and idle; sync now",
+        stateDescription = when {
+            attempt == null && success == null -> "Not synced yet; sync now"
+            !lastAttemptSucceeded -> "Last sync didn’t finish; sync now"
+            else -> "Sync due; sync now"
+        },
         manualSync = true,
     )
+}
+
+@Composable
+internal fun rememberSyncHealthNow(clock: Clock, profile: SimpleFinProfileEntity?): Long {
+    var now by remember(clock) { mutableStateOf(clock.millis()) }
+    var resumeGeneration by remember(clock) { mutableIntStateOf(0) }
+    LifecycleResumeEffect(clock) {
+        now = clock.millis()
+        resumeGeneration++
+        onPauseOrDispose { }
+    }
+    LaunchedEffect(clock, profile, resumeGeneration) {
+        val current = clock.millis()
+        now = current
+        val next = profile?.let(::simpleFinNextEligibleSyncAt)
+        if (next != null && next != Long.MAX_VALUE && next > current) {
+            var observed = current
+            while (observed < next) {
+                val wait = try { Math.subtractExact(next, observed) } catch (_: ArithmeticException) { Long.MAX_VALUE }
+                delay(wait)
+                observed = clock.millis()
+            }
+            now = observed
+        }
+    }
+    return now
 }
 
 @Composable
@@ -2037,6 +2089,8 @@ private fun FlowMoneyScaffold(
     modifier: Modifier = Modifier,
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    var snackbarHeight by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -2052,7 +2106,7 @@ private fun FlowMoneyScaffold(
         snackbarHost = {
             SnackbarHost(
                 hostState = snackbarHostState,
-                modifier = Modifier.testTag("app_snackbar_host"),
+                modifier = Modifier.testTag("app_snackbar_host").onSizeChanged { snackbarHeight = it.height },
             )
         },
         bottomBar = {
@@ -2069,7 +2123,10 @@ private fun FlowMoneyScaffold(
             } else {
                 WindowInsets(0.dp)
             },
-        content = content,
+        content = { padding ->
+            val extra = if (snackbarHostState.currentSnackbarData != null) with(density) { snackbarHeight.toDp() } else 0.dp
+            Box(Modifier.fillMaxSize().padding(bottom = extra)) { content(padding) }
+        },
     )
 }
 
@@ -2085,14 +2142,9 @@ internal fun FlowMoneyTopAppBar(
     val syncHealth = syncHealthUiState(simpleFin, operation, syncHealthNowEpochMillis)
     val syncActionEnabled = operation == null
     val density = LocalDensity.current
-    val label = if (density.fontScale >= 1.5f) when (syncHealth.kind) {
-        SyncHealthKind.Connected, SyncHealthKind.CoolingDown -> "Synced"
-        SyncHealthKind.Syncing -> "Syncing"
-        SyncHealthKind.Error -> "Error"
-        SyncHealthKind.ReconnectRequired -> "Fix"
-        SyncHealthKind.Disconnected -> "No bank"
-        SyncHealthKind.Pending -> "Pending"
-    } else syncHealth.label
+    val label = if (density.fontScale >= 1.5f && syncHealth.kind == SyncHealthKind.ReconnectRequired) "Fix"
+        else if (density.fontScale >= 1.5f && syncHealth.kind == SyncHealthKind.Disconnected) "No bank"
+        else syncHealth.label
     val labelStyle = MaterialTheme.typography.labelSmall
     val measurer = rememberTextMeasurer()
     val labelWidth = remember(label, labelStyle, density, measurer) { measurer.measure(label, style = labelStyle, softWrap = false).size.width }
@@ -2133,19 +2185,53 @@ private fun FlowMoneyNavigationBar(
     selectedTab: DashboardTab,
     onTabSelected: (DashboardTab) -> Unit,
 ) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        windowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
-        modifier = Modifier.testTag("compact_navigation"),
-    ) {
-        PrimaryDashboardTabs.forEach { tab ->
-            NavigationBarItem(
-                selected = selectedTab == tab,
-                onClick = { onTabSelected(tab) },
-                icon = { NavigationTabIcon(tab) },
-                label = { Text(tab.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                modifier = Modifier.testTag("tab_${tab.name.lowercase(Locale.US)}"),
-            )
+    val density = LocalDensity.current
+    val style = MaterialTheme.typography.labelMedium
+    val measurer = rememberTextMeasurer()
+    val longestLabelPx = remember(measurer, style, density) {
+        PrimaryDashboardTabs.maxOf { measurer.measure(it.label, style = style.copy(fontSize = 10.sp), softWrap = false).size.width }
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val widthPx = with(density) { maxWidth.toPx() }
+        val peerCount = PrimaryDashboardTabs.size - 1
+        // NavigationBar reserves 8dp between items; size weights against the remaining row width.
+        val availablePx = (widthPx - with(density) { (8.dp * peerCount).toPx() }).coerceAtLeast(0f)
+        val requiredPx = longestLabelPx + with(density) { 16.dp.toPx() } + 2f
+        val fallback = requiredPx > availablePx / PrimaryDashboardTabs.size
+        val minimumPeerPx = with(density) { 48.dp.toPx() }
+        val selectedPx = requiredPx.coerceAtLeast(availablePx / PrimaryDashboardTabs.size)
+            .coerceAtMost((availablePx - peerCount * minimumPeerPx).coerceAtLeast(0f))
+        val peerPx = (availablePx - selectedPx) / peerCount
+        NavigationBar(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            windowInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom),
+            modifier = Modifier.testTag("compact_navigation"),
+        ) {
+            val rowScope = this
+            PrimaryDashboardTabs.forEach { tab ->
+                val selected = selectedTab == tab
+                val weight = if (!fallback) 1f else if (selected) selectedPx else peerPx
+                Box(Modifier.weight(weight.coerceAtLeast(1f))) {
+                    rowScope.NavigationBarItem(
+                        selected = selected,
+                        onClick = { onTabSelected(tab) },
+                        alwaysShowLabel = !fallback,
+                        icon = { NavigationTabIcon(tab, if (fallback && !selected) tab.label else null) },
+                        label = {
+                            BasicText(
+                                tab.label,
+                                modifier = Modifier.fillMaxWidth().then(if (fallback && !selected) Modifier.clearAndSetSemantics { } else Modifier),
+                                style = style.copy(color = LocalContentColor.current, textAlign = TextAlign.Center),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = style.fontSize),
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("tab_${tab.name.lowercase(Locale.US)}"),
+                    )
+                }
+            }
         }
     }
 }
@@ -2176,8 +2262,8 @@ private fun FlowMoneyNavigationRail(
 }
 
 @Composable
-private fun NavigationTabIcon(tab: DashboardTab) {
-    Icon(painter = painterResource(tab.iconRes), contentDescription = null)
+private fun NavigationTabIcon(tab: DashboardTab, contentDescription: String? = null) {
+    Icon(painter = painterResource(tab.iconRes), contentDescription = contentDescription)
 }
 
 @Composable
@@ -2435,12 +2521,17 @@ private fun OverviewPage(
 private fun OverviewReviewStrip(pendingReviewCount: Int, onReview: () -> Unit) {
     TextButton(
         onClick = onReview,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("overview_review_action"),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("overview_review_action").semantics {
+            contentDescription = "Review $pendingReviewCount synced ${if (pendingReviewCount == 1) "transaction" else "transactions"}"
+        },
         contentPadding = PaddingValues(horizontal = 12.dp),
     ) {
         Text("Review $pendingReviewCount", modifier = Modifier.testTag("overview_pending_review_count"))
     }
 }
+
+internal fun reviewAcceptedMessage(count: Int): String =
+    "Accepted $count ${if (count == 1) "transaction" else "transactions"} as Other"
 
 internal data class TransactionDayGroup(
     val date: LocalDate,
@@ -2520,7 +2611,7 @@ internal fun ReviewPage(
                             modifier = Modifier.testTag("review_pending_count"),
                         )
                     }
-                    if (orderedTransactions.isNotEmpty()) {
+                    if (orderedTransactions.isNotEmpty() && !selectionMode) {
                         TextButton(
                             onClick = {
                                 selectionMode = !selectionMode
@@ -2528,15 +2619,16 @@ internal fun ReviewPage(
                             },
                             enabled = !operationBusy,
                             modifier = Modifier.heightIn(min = 48.dp).testTag("review_select_action"),
-                        ) { Text(if (selectionMode) "Done" else "Select") }
+                        ) { Text("Select") }
                     }
                 }
             }
             if (selectionMode) {
-                item {
+                stickyHeader(key = "review_bulk_header") {
                     ReviewBulkControls(
                         selectedCount = selectedIds.size,
                         enabled = selectedIds.isNotEmpty() && !operationBusy,
+                        onDone = { selectionMode = false; selectedIds = emptyList() },
                         onCategorize = { category ->
                             val ids = selectedIds
                             selectionMode = false
@@ -2544,6 +2636,20 @@ internal fun ReviewPage(
                             onBulkCategorize(ids, category)
                         },
                         onAcceptOther = { confirmAcceptOther = true },
+                    )
+                }
+                item(key = "review_quick_categories") {
+                    CategoryChoiceBar(
+                        categories = (CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories).distinct(),
+                        enabled = selectedIds.isNotEmpty() && !operationBusy,
+                        moreContentDescription = "More quick bulk categories",
+                        testTagPrefix = "review_quick_category",
+                        onCategory = { category ->
+                            val ids = selectedIds
+                            selectionMode = false
+                            selectedIds = emptyList()
+                            onBulkCategorize(ids, category)
+                        },
                     )
                 }
             }
@@ -2567,7 +2673,11 @@ internal fun ReviewPage(
                 }
             } else {
                 groups.forEach { group ->
-                    stickyHeader(key = "review_day_${group.date}") { TransactionDayHeader(group) }
+                    if (selectionMode) {
+                        item(key = "review_day_${group.date}") { TransactionDayHeader(group) }
+                    } else {
+                        stickyHeader(key = "review_day_${group.date}") { TransactionDayHeader(group) }
+                    }
                     item(key = "review_rows_${group.date}") {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             group.transactions.forEach { transaction ->
@@ -2631,40 +2741,51 @@ internal fun ReviewPage(
 }
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
 private fun ReviewBulkControls(
     selectedCount: Int,
     enabled: Boolean,
+    onDone: () -> Unit,
     onCategorize: (String) -> Unit,
     onAcceptOther: () -> Unit,
 ) {
     val categories = remember { (CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories).distinct() }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-        modifier = Modifier.fillMaxWidth().testTag("review_bulk_controls"),
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text("$selectedCount selected", fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag("review_selected_count"))
-            CategoryChoiceBar(
-                categories = categories,
-                enabled = enabled,
-                moreContentDescription = "More bulk categories",
-                testTagPrefix = "review_bulk_category",
-                onCategory = onCategorize,
+    var menuExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) menuExpanded = false }
+    val backdrop = MaterialTheme.colorScheme.background
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth().drawBehind {
+            val horizontalPadding = 20.dp.toPx()
+            drawRect(
+                color = backdrop,
+                topLeft = androidx.compose.ui.geometry.Offset(-horizontalPadding, 0f),
+                size = androidx.compose.ui.geometry.Size(size.width + horizontalPadding * 2, size.height + 8.dp.toPx()),
             )
-            Button(
-                onClick = onAcceptOther,
-                enabled = enabled,
-                colors =
-                    ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.secondary,
-                        contentColor = MaterialTheme.colorScheme.onSecondary,
-                    ),
-                modifier = Modifier.heightIn(min = 48.dp).testTag("review_accept_other_action"),
-            ) { Text("Accept as Other") }
+        }.height(56.dp).testTag("review_bulk_controls"),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onDone, modifier = Modifier.size(48.dp).testTag("review_done_selecting").semantics { contentDescription = "Done selecting" }) {
+                Text("×", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clearAndSetSemantics {})
+            }
+            BasicText(
+                "$selectedCount selected",
+                modifier = Modifier.weight(1f).testTag("review_selected_count"),
+                style = MaterialTheme.typography.labelLarge.copy(color = MaterialTheme.colorScheme.onSecondaryContainer, fontWeight = FontWeight.SemiBold),
+                maxLines = 1, softWrap = false,
+                autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = MaterialTheme.typography.labelLarge.fontSize),
+            )
+            Box {
+                IconButton(onClick = { menuExpanded = true }, enabled = enabled, modifier = Modifier.size(48.dp).testTag("review_bulk_actions").semantics { contentDescription = "Bulk actions" }) {
+                    Text("⋮", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.clearAndSetSemantics {})
+                }
+                DropdownMenu(expanded = menuExpanded && enabled, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(text = { Text("Accept as Other…") }, onClick = { menuExpanded = false; onAcceptOther() }, modifier = Modifier.testTag("review_accept_other_action"))
+                    categories.forEach { category ->
+                        DropdownMenuItem(text = { Text(category) }, onClick = { menuExpanded = false; onCategorize(category) }, modifier = Modifier.testTag("review_bulk_category_${category.toCategoryChipTagSuffix()}"))
+                    }
+                }
+            }
         }
     }
 }
@@ -2717,13 +2838,16 @@ private fun ReviewTransactionCard(
                         ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
-                    if (selectionMode) Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+                if (selectionMode) {
+                    Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) {
+                        Checkbox(checked = selected, onCheckedChange = null, enabled = enabled)
+                    }
+                    Spacer(Modifier.width(8.dp))
                 }
-                Spacer(Modifier.width(8.dp))
                 TransactionPresentation(
                     transaction,
                     amountWidth = amountWidth,
+                    decisionWidthInset = if (selectionMode) 0.dp else 56.dp,
                     modifier = Modifier.weight(1f).clearAndSetSemantics { contentDescription = transaction.rowAccessibility() },
                 )
             }
@@ -2773,13 +2897,10 @@ private fun CategoryChoiceBar(
     onCategory: (String) -> Unit,
 ) {
     var moreExpanded by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) moreExpanded = false }
     val visible = categories.take(4)
     val remaining = categories.drop(4)
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxWidth().testTag("${testTagPrefix}_choices"),
-    ) {
+    FlowRow(modifier = Modifier.fillMaxWidth().testTag("${testTagPrefix}_choices"), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         visible.forEach { category ->
             SuggestionChip(
                 label = category,
@@ -2800,7 +2921,7 @@ private fun CategoryChoiceBar(
                     onClick = { moreExpanded = true },
                 )
                 DropdownMenu(
-                    expanded = moreExpanded,
+                    expanded = moreExpanded && enabled,
                     onDismissRequest = { moreExpanded = false },
                     modifier = Modifier.testTag("${testTagPrefix}_menu"),
                 ) {
@@ -3003,8 +3124,8 @@ private fun TransactionsPage(
         ) {
             item {
                 TransactionsHeader(
-                    count = filteredTransactions.size,
                     metrics = filteredMetrics,
+                    hasTransfers = filteredTransactions.any { it.effectiveFlowKind == FlowKind.TRANSFER },
                 )
             }
             item {
@@ -3108,7 +3229,8 @@ private fun TransactionDayHeader(group: TransactionDayGroup) {
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            FlowRow(
+            if (group.spentCents != 0L || group.receivedCents != 0L) FlowRow(
+                modifier = Modifier.testTag("transaction_day_totals_${group.date}"),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -3170,16 +3292,12 @@ private fun TransactionFilterBar(
                     (selectedState == null || option.state == selectedState) &&
                     (selectedCountry == null || option.country == selectedCountry)
             }?.label ?: selectedCity
-    val hasActiveFilter =
-        timeFilter != TransactionTimeFilter.All ||
-            selectedCategory != null ||
-            whereFilter.isNotBlank() ||
-            sourceFilter != TransactionSourceFilter.All ||
-            selectedAccountKey != null ||
-            unreviewedOnly ||
-            selectedCity != null ||
-            selectedState != null ||
-            selectedCountry != null
+    val activeCount = listOf(
+        timeFilter != TransactionTimeFilter.All, selectedCategory != null,
+        sourceFilter != TransactionSourceFilter.All, selectedAccountKey != null, unreviewedOnly,
+        selectedCity != null || selectedState != null || selectedCountry != null,
+    ).count { it }
+    val hasActiveFilter = activeCount > 0 || whereFilter.isNotBlank()
     val summary =
         buildList {
             add(when (timeFilter) {
@@ -3224,45 +3342,79 @@ private fun TransactionFilterBar(
                     .fillMaxWidth()
                     .testTag("transaction_where_filter"),
         )
-        FlowRow(
-            modifier = Modifier.selectableGroup().testTag("transaction_view_mode_group"),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TransactionViewMode.entries.forEach { mode ->
-                SuggestionChip(
-                    label = mode.label,
-                    selected = viewMode == mode,
-                    testTag = "transaction_view_${mode.name.lowercase(Locale.US)}",
-                    onClick = { onViewModeChange(mode) },
-                )
+        val filterLabel = if (activeCount > 0) "Filters · $activeCount" else "Filters"
+        val labelStyle = MaterialTheme.typography.labelLarge
+        val caretStyle = MaterialTheme.typography.bodyLarge
+        val density = LocalDensity.current
+        val measurer = rememberTextMeasurer()
+        val caret = if (isExpanded) "▴" else "▾"
+        val desiredWidth = remember(filterLabel, caret, labelStyle, caretStyle, density, measurer) {
+            with(density) {
+                (measurer.measure(filterLabel, style = labelStyle, softWrap = false).size.width +
+                    measurer.measure(caret, style = caretStyle, softWrap = false).size.width).toDp() + 20.dp
             }
         }
-        Column(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .clip(MaterialTheme.shapes.large)
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .clickable(role = Role.Button) { onExpandedChange(!isExpanded) }
-                    .semantics { stateDescription = if (isExpanded) "Expanded" else "Collapsed" }
-                    .padding(horizontal = 14.dp, vertical = 10.dp)
-                    .testTag("transaction_filter_toggle"),
-        ) {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Filters", modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                Text(if (isExpanded) "▴" else "▾", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium, modifier = Modifier.clearAndSetSemantics { })
+        BoxWithConstraints(Modifier.fillMaxWidth().testTag("transaction_filter_controls")) {
+            val filterWidth = desiredWidth.coerceAtLeast(48.dp).coerceAtMost((maxWidth - 104.dp).coerceAtLeast(48.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                BoxWithConstraints(Modifier.weight(1f).selectableGroup().testTag("transaction_view_mode_group")) {
+                    val availableLabelPx = with(density) { (maxWidth / 2 - 8.dp).coerceAtLeast(0.dp).toPx() }
+                    val sharedSize = remember(availableLabelPx, labelStyle, density, measurer) {
+                        var size = labelStyle.fontSize.value
+                        while (size > 10f && TransactionViewMode.entries.any { mode ->
+                            measurer.measure(mode.label, style = labelStyle.copy(fontSize = size.sp), softWrap = false).size.width > availableLabelPx
+                        }) size = (size - 0.25f).coerceAtLeast(10f)
+                        size.sp
+                    }
+                    Row(Modifier.fillMaxWidth()) {
+                        TransactionViewMode.entries.forEach { mode ->
+                            val selected = viewMode == mode
+                            Box(
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
+                                    .background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+                                    .selectable(selected = selected, role = Role.RadioButton) { onViewModeChange(mode) }
+                                    .testTag("transaction_view_${mode.name.lowercase(Locale.US)}").padding(horizontal = 4.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                BasicText(mode.label, modifier = Modifier.fillMaxWidth(), style = labelStyle.copy(fontSize = sharedSize, color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer, textAlign = TextAlign.Center), maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.width(filterWidth).heightIn(min = 48.dp).clip(MaterialTheme.shapes.large)
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                        .clickable(role = Role.Button) { onExpandedChange(!isExpanded) }
+                        .semantics {
+                            contentDescription = if (activeCount > 0) "Filters, $activeCount active" else "Filters"
+                            stateDescription = if (isExpanded) "Expanded" else "Collapsed"
+                        }
+                        .padding(horizontal = 8.dp).testTag("transaction_filter_toggle"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BasicText(filterLabel, modifier = Modifier.weight(1f).testTag("transaction_filter_label"), style = labelStyle.copy(color = MaterialTheme.colorScheme.onSurface), maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = labelStyle.fontSize))
+                    Text(caret, color = MaterialTheme.colorScheme.primary, style = caretStyle, modifier = Modifier.testTag("transaction_filter_caret").clearAndSetSemantics { })
+                }
             }
-            Text(
-                summary,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary"),
-            )
         }
         if (hasActiveFilter) {
-            TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all") }
+            val clearTextWidth = remember(labelStyle, density, measurer) {
+                with(density) { measurer.measure("Clear all", style = labelStyle, softWrap = false).size.width.toDp() + 2.dp }
+            }
+            val clearWidth = (clearTextWidth + 24.dp).coerceAtLeast(80.dp)
+            val summaryStyle = MaterialTheme.typography.bodySmall
+            val summaryWidth = remember(summary, summaryStyle, density, measurer) {
+                with(density) { measurer.measure(summary, style = summaryStyle, softWrap = false).size.width.toDp() }
+            }
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val sharesLine = summaryWidth + 4.dp + clearWidth <= maxWidth
+                FlowRow(modifier = Modifier.fillMaxWidth().testTag("transaction_filter_summary_row"), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.Center, itemVerticalAlignment = Alignment.CenterVertically) {
+                    Text(summary, color = MaterialTheme.colorScheme.onSurfaceVariant, style = summaryStyle, modifier = Modifier.testTag("transaction_filter_summary"))
+                    Box(if (sharesLine) Modifier.weight(1f) else Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                        TextButton(onClick = onClear, modifier = Modifier.testTag("transaction_filter_clear_compact").semantics { contentDescription = "Clear all filters" }) { Text("Clear all", modifier = Modifier.width(clearTextWidth), maxLines = 1) }
+                    }
+                }
+            }
         }
 
         AnimatedVisibility(
@@ -3493,17 +3645,17 @@ private fun TransactionFilterBar(
                         }
                     }
                 }
-                if (hasActiveFilter) {
-                    SuggestionChip(
-                        label = "Clear",
-                        testTag = "transaction_filter_clear",
-                        isSelection = false,
-                        onClick = onClear,
-                    )
-                }
             }
         }
     }
+}
+
+private const val CollapsedCategoryCount = 4
+
+internal fun collapsedInsightCategories(totals: List<CategoryTotal>, keepOther: Boolean): List<CategoryTotal> {
+    val first = totals.take(CollapsedCategoryCount)
+    val other = totals.firstOrNull { it.category == "Other" }
+    return if (keepOther && other != null && other !in first) first.take(CollapsedCategoryCount - 1) + other else first
 }
 
 @Composable
@@ -3556,9 +3708,10 @@ private fun InsightsPage(
         }
     val visibleTotalSpentCents = selectedBucket?.cents ?: totalSpentCents
 
-    LaunchedEffect(buckets, visibleCategoryTotals, categoriesExpanded) {
+    val keepOther = pendingReviewSummary.transactionCount > 0
+    LaunchedEffect(buckets, visibleCategoryTotals, categoriesExpanded, keepOther) {
         if (selectedBucketKey != null && buckets.none { it.key == selectedBucketKey }) selectedBucketKey = null
-        val available = if (categoriesExpanded) visibleCategoryTotals else visibleCategoryTotals.take(4)
+        val available = if (categoriesExpanded) visibleCategoryTotals else collapsedInsightCategories(visibleCategoryTotals, keepOther)
         if (selectedCategory != null && available.none { it.category == selectedCategory }) {
             selectedCategory = null
         }
@@ -3648,6 +3801,7 @@ private fun InsightsPage(
                         totalSpentCents = visibleTotalSpentCents,
                         selectedCategory = selectedCategory,
                         expanded = categoriesExpanded,
+                        keepOther = keepOther,
                         onExpandedChange = { categoriesExpanded = it },
                         onSelect = { category ->
                             selectedCategory = if (selectedCategory == category) null else category
@@ -5293,6 +5447,7 @@ private fun CategoryRankList(
     totalSpentCents: Long,
     selectedCategory: String?,
     expanded: Boolean,
+    keepOther: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     onSelect: (String) -> Unit,
 ) {
@@ -5306,11 +5461,18 @@ private fun CategoryRankList(
             MaterialTheme.colorScheme.secondary,
             LocalFinanceColors.current.expense,
         )
-    val chartSummary =
-        totals.joinToString(
-            prefix = "Top categories. ",
-            separator = ". ",
-        ) { "${it.category} ${MoneyFormatter.formatUsd(it.cents)}" }
+    val collapsed = remember(totals, keepOther) { collapsedInsightCategories(totals, keepOther) }
+    val shown = if (expanded) totals else collapsed
+    val omitted = remember(totals, collapsed) { totals.filterNot { it in collapsed } }
+    val amountWidth = remember(totals, amountStyle, measurer, density) {
+        totals.maxOfOrNull { measurer.measure(MoneyFormatter.formatUsd(it.cents), style = amountStyle, softWrap = false).size.width } ?: 0
+    }
+    val percentStyle = MaterialTheme.typography.labelSmall
+    val percentWidth = remember(percentStyle, measurer, density) {
+        listOf("100%", "<1%").maxOf { measurer.measure(it, style = percentStyle, softWrap = false).size.width }
+    }
+    val chartSummary = shown.joinToString(prefix = "Top categories. ", separator = ". ") { "${it.category} ${MoneyFormatter.formatUsd(it.cents)}" } +
+        if (!expanded && omitted.isNotEmpty()) ". ${omitted.size} more" else ""
 
     Column(
         modifier =
@@ -5325,12 +5487,9 @@ private fun CategoryRankList(
             modifier = Modifier.fillMaxWidth().selectableGroup(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            (if (expanded) totals else totals.take(4)).forEachIndexed { index, entry ->
+            shown.forEachIndexed { index, entry ->
                 val selected = selectedCategory == entry.category
                 val amount = MoneyFormatter.formatUsd(entry.cents)
-                val amountWidth = remember(amount, amountStyle, measurer, density) {
-                    measurer.measure(amount, style = amountStyle, softWrap = false).size.width
-                }
                 val fraction =
                     if (totalSpentCents <= 0L) {
                         0f
@@ -5381,12 +5540,15 @@ private fun CategoryRankList(
                             text = amount,
                             style = amountStyle,
                             modifier = Modifier.width(with(density) { amountWidth.toDp() } + 2.dp),
+                            textAlign = TextAlign.End,
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "$sharePercent%",
+                            text = if (entry.cents > 0 && totalSpentCents > 0 && entry.cents.toDouble() * 100 < totalSpentCents) "<1%" else "$sharePercent%",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = percentStyle,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.width(with(density) { percentWidth.toDp() } + 2.dp),
                         )
                     }
                     Box(modifier = Modifier.fillMaxWidth().height(4.dp)) {
@@ -5402,13 +5564,12 @@ private fun CategoryRankList(
                 }
             }
         }
-        if (totals.size > 4) {
-            val remaining = totals.drop(4)
+        if (omitted.isNotEmpty()) {
             val label = if (expanded) "Show less" else {
-                val noun = if (remaining.size == 1) "category" else "categories"
-                "${remaining.size} more $noun · ${MoneyFormatter.formatUsd(remaining.sumOf { it.cents })}"
+                val noun = if (omitted.size == 1) "category" else "categories"
+                "${omitted.size} more $noun · ${MoneyFormatter.formatUsd(omitted.sumOf { it.cents })}"
             }
-            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.testTag("insight_categories_expand")) { Text(label) }
+            TextButton(onClick = { onExpandedChange(!expanded) }, modifier = Modifier.testTag("insight_categories_expand").semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }) { Text(label) }
         }
     }
 }
@@ -5443,8 +5604,8 @@ private fun InsightsSelectionHeader(
 
 @Composable
 private fun TransactionsHeader(
-    count: Int,
     metrics: DashboardMetrics,
+    hasTransfers: Boolean,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -5454,8 +5615,8 @@ private fun TransactionsHeader(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · $count total" +
-                if (metrics.transferCents > 0) " · Transfers excluded" else "",
+            "Spent ${MoneyFormatter.formatUsd(metrics.spentCents)} · ${metrics.transactionCount} ${if (metrics.transactionCount == 1) "transaction" else "transactions"}" +
+                if (hasTransfers) " · Transfers excluded" else "",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -5705,26 +5866,37 @@ internal fun rememberTransactionAmountWidth(transactions: List<Transaction>): In
 }
 
 @Composable
-private fun TransactionMetadata(transaction: Transaction, showDate: Boolean) {
-    val (flexible, temporal) = transaction.rowMetadata(showDate)
+private fun TransactionMetadata(transaction: Transaction, showDate: Boolean, availablePx: Float) {
+    val (category, place, temporal) = transaction.rowMetadata(showDate)
     val style = MaterialTheme.typography.bodyMedium
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val temporalWidth = remember(temporal, style, density, measurer) {
         if (temporal.isEmpty()) 0 else measurer.measure(temporal, style = style, softWrap = false).size.width
     }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val together = temporal.isEmpty() || with(density) { maxWidth.toPx() } >= temporalWidth + with(density) { 74.dp.toPx() }
-        Column {
-            Row(Modifier.fillMaxWidth()) {
-                Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (together && temporal.isNotEmpty()) {
-                    Spacer(Modifier.width(8.dp))
-                    Text(temporal, modifier = Modifier.width(with(density) { temporalWidth.toDp() } + 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, softWrap = false)
-                }
+    val hasRepeat = transaction.recurringInterval != null
+    val repeatSize = 14.dp * density.fontScale.coerceAtMost(2f)
+    val metadataPx = (availablePx - if (hasRepeat) with(density) { (repeatSize + 4.dp).toPx() } else 0f).coerceAtLeast(0f)
+    val together = temporal.isEmpty() || metadataPx >= temporalWidth + with(density) { 74.dp.toPx() }
+    val flexibleWidth = if (together && temporal.isNotEmpty()) metadataPx - temporalWidth - with(density) { 10.dp.toPx() } else metadataPx
+    val minimumPlaceWidth = remember(category, place, style, density, measurer) {
+        if (place.isEmpty()) 0 else measurer.measure("$category · ${place.take(1)}…", style = style, softWrap = false).size.width
+    }
+    val showPlace = place.isNotEmpty() && flexibleWidth >= with(density) { 64.dp.toPx() } && flexibleWidth >= minimumPlaceWidth
+    val flexible = if (showPlace) "$category · $place" else category
+    Column {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (hasRepeat) {
+                Icon(painterResource(R.drawable.ic_repeat), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(repeatSize).testTag("transaction_repeat_${transaction.id}"))
+                Spacer(Modifier.width(4.dp))
             }
-            if (!together) Text(temporal, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style)
+            Text(flexible, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (together && temporal.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
+                Text(temporal, modifier = Modifier.width(with(density) { temporalWidth.toDp() } + 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style, softWrap = false)
+            }
         }
+        if (!together) Text(temporal, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = style)
     }
 }
 
@@ -5735,11 +5907,19 @@ private fun TransactionPresentation(
     modifier: Modifier = Modifier,
     showDate: Boolean = false,
     padded: Boolean = false,
+    decisionWidthInset: androidx.compose.ui.unit.Dp = 0.dp,
 ) {
     val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val amountStyle = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")
+    val amountText = MoneyFormatter.formatUsd(transaction.cents)
+    val ownAmountWidth = remember(amountText, amountStyle, density, measurer) {
+        measurer.measure(amountText, style = amountStyle, softWrap = false).size.width
+    }
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val actualAvailable = with(density) { (maxWidth - if (padded) 28.dp else 0.dp).coerceAtLeast(0.dp).toPx() }
-        val stack = density.fontScale >= 1.3f || amountWidth + with(density) { 104.dp.toPx() } > actualAvailable
+        val merchantReservation = 96.dp * density.fontScale.coerceAtMost(2f) + 8.dp + decisionWidthInset
+        val stack = amountWidth + with(density) { merchantReservation.toPx() } > actualAvailable
         Column(modifier = Modifier.fillMaxWidth().then(if (padded) Modifier.padding(horizontal = 14.dp, vertical = 10.dp) else Modifier)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -5751,11 +5931,11 @@ private fun TransactionPresentation(
                 )
                 if (!stack) {
                     Spacer(Modifier.width(8.dp))
-                    TransactionAmount(transaction, Modifier.width(with(density) { amountWidth.toDp() }), availablePx = actualAvailable, measuredWidth = amountWidth)
+                    TransactionAmount(transaction, Modifier.width(with(density) { ownAmountWidth.toDp() }), availablePx = actualAvailable, measuredWidth = ownAmountWidth)
                 }
             }
-            TransactionMetadata(transaction, showDate)
-            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), availablePx = actualAvailable, measuredWidth = amountWidth)
+            TransactionMetadata(transaction, showDate, actualAvailable)
+            if (stack) TransactionAmount(transaction, Modifier.fillMaxWidth(), availablePx = actualAvailable, measuredWidth = ownAmountWidth)
         }
     }
 }
@@ -6346,14 +6526,18 @@ internal fun TransactionEditor(
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(10.dp))
-            Column(modifier = Modifier.fillMaxWidth()) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (onDelete != null) {
-                    TextButton(
+                    IconButton(
                         onClick = onDelete,
                         enabled = !persistenceBusy,
-                        modifier = Modifier.testTag("delete_transaction_button"),
+                        colors = IconButtonDefaults.iconButtonColors(
+                            contentColor = LocalFinanceColors.current.expense,
+                            disabledContentColor = IconButtonDefaults.iconButtonColors().disabledContentColor,
+                        ),
+                        modifier = Modifier.size(48.dp).testTag("delete_transaction_button").semantics { contentDescription = "Delete transaction" },
                     ) {
-                        Text("Delete", color = LocalFinanceColors.current.expense)
+                        Icon(painterResource(R.drawable.ic_delete), contentDescription = null)
                     }
                 }
                 Button(
@@ -6374,21 +6558,21 @@ internal fun TransactionEditor(
                     shape = MaterialTheme.shapes.large,
                     modifier =
                         Modifier
-                            .fillMaxWidth()
+                            .weight(1f)
                             .heightIn(min = 56.dp)
                             .testTag("save_transaction_button"),
                 ) {
-                    Text(
+                    BasicText(
                         text = when {
                             draft.effectiveFlowKind == FlowKind.TRANSFER -> "Save transfer"
                             draft.isExpense -> "Save expense"
                             else -> "Save income"
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.labelLarge.copy(color = LocalContentColor.current, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold),
                         maxLines = 1,
                         softWrap = false,
-                        fontWeight = FontWeight.SemiBold,
+                        autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp),
                     )
                 }
             }
@@ -6775,7 +6959,7 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun SuggestionChip(
+internal fun SuggestionChip(
     label: String,
     selected: Boolean = false,
     testTag: String? = null,
@@ -6785,12 +6969,23 @@ private fun SuggestionChip(
     onClick: () -> Unit,
 ) {
     val tagModifier = if (testTag == null) Modifier else Modifier.testTag(testTag)
-    val interactionModifier =
-        if (isSelection) {
-            Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
-        } else {
-            Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-        }
+    if (!isSelection) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            shape = MaterialTheme.shapes.large,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer,
+            ),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+            modifier = tagModifier.heightIn(min = 48.dp).widthIn(max = 220.dp).then(
+                if (accessibilityLabel == null) Modifier else Modifier.semantics { contentDescription = accessibilityLabel },
+            ),
+        ) { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        return
+    }
+    val interactionModifier = Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
     Box(
         modifier =
             tagModifier
@@ -6911,13 +7106,15 @@ private fun EditorDraft.occurredAtDateTime(): LocalDateTime =
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
 
-private fun Transaction.rowMetadata(showDate: Boolean): Pair<String, String> {
+private fun Transaction.rowMetadata(showDate: Boolean): Triple<String, String, String> {
     val categoryLabel = if (effectiveFlowKind == FlowKind.TRANSFER) "Transfer" else category.trim().ifBlank { "Other" }
     val location = listOfNotNull(locationCity?.trim()?.takeIf { it.isNotEmpty() }, locationState?.trim()?.takeIf { it.isNotEmpty() })
         .joinToString(", ").ifBlank { accountName?.trim().orEmpty() }
     val timestamp = transactedAtEpochMillis ?: occurredAtEpochMillis.takeIf { source != "simplefin" }
     val whenLabel = if (showDate) {
-        Instant.ofEpochMilli(timestamp ?: occurredAtEpochMillis).atZone(ZoneId.systemDefault()).format(ShortDateFormatter)
+        val posted = occurredAtDateTime().toLocalDate()
+        val purchase = transactedAtEpochMillis?.takeIf { source == "simplefin" }?.let { Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalDate() }
+        if (purchase != null && purchase != posted) "${purchase.format(ShortDateFormatter)} · posted ${posted.format(ShortDateFormatter)}" else posted.format(ShortDateFormatter)
     } else {
         timestamp?.let {
             val dateTime = Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
@@ -6929,13 +7126,17 @@ private fun Transaction.rowMetadata(showDate: Boolean): Pair<String, String> {
             }
         }.orEmpty()
     }
-    return listOf(categoryLabel, location).filter { it.isNotBlank() }.joinToString(" · ") to whenLabel
+    return Triple(categoryLabel, location, whenLabel)
 }
 
 private fun Transaction.rowAccessibility(): String {
     val timestamp = transactedAtEpochMillis
     val date = when {
-        timestamp != null -> "Purchase ${Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).format(AccessibilityDateTimeFormatter)}"
+        timestamp != null -> {
+            val purchase = Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault())
+            "Purchase ${purchase.format(AccessibilityDateTimeFormatter)}" +
+                if (purchase.toLocalDate() != occurredAtDateTime().toLocalDate()) ", Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}" else ""
+        }
         source == "simplefin" -> "Posted ${occurredAtDateTime().format(AccessibilityDateFormatter)}"
         else -> "Occurred ${occurredAtDateTime().format(AccessibilityDateTimeFormatter)}"
     }

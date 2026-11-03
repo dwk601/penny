@@ -407,7 +407,9 @@ class Phase2AsyncEdgeTest {
         composeRule.onNodeWithTag("delete_transaction_button").performClick()
         composeRule.onNodeWithTag("confirm_delete_transaction").performClick()
         composeRule.waitUntil(5_000) { gateway.rows.value.isEmpty() }
-        composeRule.onNodeWithText("Undo").performClick()
+        composeRule.onNodeWithText("Undo").assertIsDisplayed()
+        composeRule.mainClock.advanceTimeBy(20_000)
+        composeRule.onNodeWithText("Undo").assertIsDisplayed().performClick()
 
         composeRule.waitUntil(5_000) {
             gateway.rows.value.singleOrNull() == original && widgetRefreshCalls.get() == 2

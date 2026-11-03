@@ -1,6 +1,11 @@
 package com.dwk.flowmoney
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -8,15 +13,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
@@ -231,7 +242,7 @@ class Phase4UiTest {
         composeRule.setContent {
             DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
-                    MaterialTheme {
+                    FlowMoneyTheme(dynamicColor = false) {
                         TransactionEditor(transaction = null, draft = draft, suggestionHistory = TransactionSuggestionHistory.Empty,
                             onDraftChange = { draft = it }, onSave = {}, onDelete = {}, onCancel = {}, persistenceBusy = false)
                     }
@@ -248,7 +259,7 @@ class Phase4UiTest {
         for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1f, 2f)) for ((example, label) in examples) {
             composeRule.runOnIdle { width = screenWidth; scale = fontScale; draft = example }
             val save = composeRule.onNodeWithTag("save_transaction_button").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            composeRule.onNodeWithTag("delete_transaction_button").assertIsDisplayed()
+            composeRule.onNodeWithTag("delete_transaction_button").assertIsDisplayed().assertContentDescriptionEquals("Delete transaction")
             val text = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
             val bounds = text.fetchSemanticsNode().boundsInRoot
             val layouts = mutableListOf<TextLayoutResult>()
@@ -258,6 +269,92 @@ class Phase4UiTest {
             assertFalse("$screenWidth/$fontScale $label overflow", layouts.single().hasVisualOverflow)
             assertTrue("$screenWidth/$fontScale $label $bounds not within $save", bounds.left >= save.left && bounds.right <= save.right && bounds.top >= save.top && bounds.bottom <= save.bottom)
         }
+    }
+
+    @Test
+    fun editorDeleteBusyUsesDisabledTintAndIgnoresTouchesInBothThemes() {
+        var busy by mutableStateOf(false)
+        var dark by mutableStateOf(false)
+        var deletes = 0
+        composeRule.setContent {
+            FlowMoneyTheme(darkTheme = dark, dynamicColor = false) {
+                val expenseColor = LocalFinanceColors.current.expense
+                val disabledColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                Surface {
+                    Box {
+                        TransactionEditor(transaction = null, draft = newEditorDraft().copy(amount = "12.50"), suggestionHistory = TransactionSuggestionHistory.Empty,
+                            onDraftChange = {}, onSave = {}, onDelete = { deletes++ }, onCancel = {}, persistenceBusy = busy)
+                        Box(Modifier.size(12.dp).background(expenseColor).testTag("expense_reference"))
+                        Box(Modifier.offset(x = 16.dp).size(12.dp).background(MaterialTheme.colorScheme.surface).background(disabledColor).testTag("disabled_reference"))
+                    }
+                }
+            }
+        }
+        fun checkTint(referenceTag: String): Color {
+            val pixels = composeRule.onNodeWithTag("delete_transaction_button").captureToImage().toPixelMap()
+            val background = pixels[0, 0]
+            val reference = composeRule.onNodeWithTag(referenceTag).captureToImage().toPixelMap()
+            val target = reference[reference.width / 2, reference.height / 2]
+            var matches = 0
+            val colors = mutableMapOf<Color, Int>()
+            for (y in 0 until pixels.height) for (x in 0 until pixels.width) {
+                val pixel = pixels[x, y]
+                colors[pixel] = (colors[pixel] ?: 0) + 1
+                if (kotlin.math.abs(pixel.red - target.red) < 0.04f && kotlin.math.abs(pixel.green - target.green) < 0.04f && kotlin.math.abs(pixel.blue - target.blue) < 0.04f) matches++
+            }
+            assertTrue("expected tint $target on $background; $matches matching pixels; colors ${colors.entries.sortedByDescending { it.value }.take(12)}", matches >= 5)
+            return target
+        }
+        for (isDark in listOf(false, true)) {
+            composeRule.runOnIdle { dark = isDark; busy = false }
+            composeRule.mainClock.advanceTimeBy(1_000)
+            composeRule.onNodeWithTag("delete_transaction_button").assertIsEnabled()
+            val enabledTint = checkTint("expense_reference")
+            composeRule.runOnIdle { busy = true }
+            composeRule.mainClock.advanceTimeBy(1_000)
+            composeRule.onNodeWithTag("delete_transaction_button").assertIsNotEnabled().performTouchInput { click() }
+            val disabledTint = checkTint("disabled_reference")
+            assertTrue("enabled and disabled colors must differ", kotlin.math.abs(enabledTint.red - disabledTint.red) + kotlin.math.abs(enabledTint.green - disabledTint.green) + kotlin.math.abs(enabledTint.blue - disabledTint.blue) > 0.12f)
+            composeRule.runOnIdle { assertEquals(0, deletes) }
+        }
+        composeRule.runOnIdle { busy = false }
+        composeRule.onNodeWithTag("delete_transaction_button").assertIsEnabled().performTouchInput { click() }
+        composeRule.runOnIdle { assertEquals(1, deletes) }
+    }
+
+    @Test
+    fun selectedActionChipUsesPrimaryColorsAndMoreLessKeepsItsShape() {
+        var selected by mutableStateOf(false)
+        var expanded by mutableStateOf(false)
+        var primary = Color.Unspecified
+        var secondary = Color.Unspecified
+        composeRule.setContent {
+            FlowMoneyTheme(darkTheme = false, dynamicColor = false) {
+                val primaryColor = MaterialTheme.colorScheme.primary
+                val secondaryColor = MaterialTheme.colorScheme.secondaryContainer
+                SideEffect { primary = primaryColor; secondary = secondaryColor }
+                androidx.compose.foundation.layout.Column {
+                    SuggestionChip("Near me", selected = selected, isSelection = false, testTag = "near_me_fixture", onClick = { selected = !selected })
+                    SuggestionChip(if (expanded) "Less" else "More", isSelection = false, testTag = "more_less_fixture", onClick = { expanded = !expanded })
+                }
+            }
+        }
+        fun centerTop(tag: String): Color {
+            val node = composeRule.onNodeWithTag(tag).fetchSemanticsNode()
+            val pixels = composeRule.onNodeWithTag(tag).captureToImage().toPixelMap()
+            return pixels[pixels.width / 2, (4 * node.layoutInfo.density.density).toInt()]
+        }
+        fun assertColor(expected: Color, actual: Color) {
+            assertTrue("expected $expected, got $actual", kotlin.math.abs(expected.red - actual.red) < .03f && kotlin.math.abs(expected.green - actual.green) < .03f && kotlin.math.abs(expected.blue - actual.blue) < .03f)
+        }
+        assertColor(secondary, centerTop("near_me_fixture"))
+        composeRule.onNodeWithTag("near_me_fixture").performClick()
+        composeRule.mainClock.advanceTimeBy(1_000)
+        assertColor(primary, centerTop("near_me_fixture"))
+        assertColor(secondary, centerTop("more_less_fixture"))
+        composeRule.runOnIdle { expanded = true }
+        composeRule.onNodeWithText("Less").assertIsDisplayed()
+        assertColor(secondary, centerTop("more_less_fixture"))
     }
 
     @Test
@@ -393,7 +490,7 @@ class Phase4UiTest {
         composeRule.onNodeWithText("Transactions").performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
         assertEquals(1, layouts.single().lineCount)
         assertTrue(!layouts.single().isLineEllipsized(0))
-        composeRule.onNodeWithText("Spent \$0.00 · 0 total").assertIsDisplayed()
+        composeRule.onNodeWithText("Spent \$0.00 · 0 transactions").assertIsDisplayed()
     }
 
     @Test
@@ -461,6 +558,8 @@ class Phase4UiTest {
             val received = composeRule.onNodeWithTag("transaction_day_received_$date")
             if (offset == 0L || offset == 3L) spent.assertExists() else spent.assertDoesNotExist()
             if (offset == 1L || offset == 3L) received.assertExists() else received.assertDoesNotExist()
+            if (offset == 2L) composeRule.onNodeWithTag("transaction_day_totals_$date").assertDoesNotExist()
+            else composeRule.onNodeWithTag("transaction_day_totals_$date").assertExists()
         }
     }
 

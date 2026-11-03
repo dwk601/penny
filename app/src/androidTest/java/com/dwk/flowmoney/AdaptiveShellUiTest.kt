@@ -6,12 +6,21 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.test.performSemanticsAction
+import org.junit.Assert.assertFalse
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
@@ -19,6 +28,9 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -148,6 +160,67 @@ class AdaptiveShellUiTest {
         composeRule.onNodeWithTag("tab_overview").assertIsNotSelected()
         composeRule.onNodeWithTag("tab_transactions").assertIsNotSelected()
         composeRule.onNodeWithTag("destination_content").assertIsDisplayed()
+    }
+
+    @Test fun bottomNavigationLabelsFitAtTwoX() {
+        var width by mutableStateOf(360)
+        var scale by mutableStateOf(1f)
+        var selected by mutableStateOf(DashboardTab.Overview)
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                    FlowMoneyTheme(dynamicColor = false) { TestShell(selected, { selected = it }) }
+                }
+            }
+        }
+        for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1f, 1.5f, 2f)) {
+            composeRule.runOnIdle { width = screenWidth; scale = fontScale }
+            for (tab in primaryTabs) {
+                primaryTabs.forEach { destination ->
+                    val node = composeRule.onNodeWithTag("tab_${destination.name.lowercase()}")
+                        .assert(hasContentDescription(destination.label) or hasText(destination.label))
+                        .assertIsDisplayed().fetchSemanticsNode()
+                    val density = node.layoutInfo.density.density
+                    val descriptions = node.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty().count { it == destination.label }
+                    val texts = node.config.getOrNull(SemanticsProperties.Text).orEmpty().count { it.text == destination.label }
+                    assertTrue("duplicate or missing name for ${destination.label}: ${node.config}", descriptions + texts == 1)
+                    if (screenWidth == 300 && fontScale == 2f && destination != selected) {
+                        assertTrue("hidden label must expose an icon name to Android accessibility", descriptions == 1)
+                    }
+                    assertTrue("$screenWidth/$fontScale ${destination.label}: ${node.boundsInRoot}", node.boundsInRoot.width / density >= 47.5f && node.boundsInRoot.height / density >= 47.5f)
+                }
+                val item = composeRule.onNodeWithTag("tab_${tab.name.lowercase()}").performClick().assertIsSelected().fetchSemanticsNode().boundsInRoot
+                val text = composeRule.onNodeWithText(tab.label, useUnmergedTree = true).assertIsDisplayed()
+                val textBounds = text.fetchSemanticsNode().boundsInRoot
+                val results = mutableListOf<TextLayoutResult>()
+                text.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(results) }
+                val layout = results.single()
+                assertTrue("$screenWidth/$fontScale ${tab.label} must be one line", layout.lineCount == 1)
+                assertFalse("$screenWidth/$fontScale ${tab.label} overflows: $layout", layout.hasVisualOverflow)
+                assertFalse(layout.isLineEllipsized(0))
+                assertTrue("font ${layout.layoutInput.style.fontSize}", layout.layoutInput.style.fontSize.value >= 10f)
+                assertTrue("$textBounds outside $item", textBounds.left >= item.left - 1 && textBounds.right <= item.right + 1 && textBounds.top >= item.top - 1 && textBounds.bottom <= item.bottom + 1)
+                if (screenWidth == 360 && fontScale == 1f) assertTrue("roomy label shrank", layout.layoutInput.style.fontSize.value >= 12f)
+            }
+        }
+    }
+
+    @Test fun snackbarDoesNotCoverScrollableContentEnd() {
+        var show: () -> Unit = {}
+        composeRule.setContent {
+            val host = remember { SnackbarHostState() }
+            val scope = rememberCoroutineScope()
+            show = { scope.launch { host.showSnackbar("Deleted transaction", actionLabel = "Undo", duration = SnackbarDuration.Indefinite) } }
+            FlowMoneyTheme(dynamicColor = false) {
+                AdaptiveFlowMoneyShell(selectedTab = DashboardTab.Insights, snackbarHostState = host, onTabSelected = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize()) { padding ->
+                    Box(Modifier.padding(padding).fillMaxSize().testTag("snackbar_safe_content"))
+                }
+            }
+        }
+        composeRule.runOnIdle { show() }
+        val content = bounds("snackbar_safe_content")
+        val snackbar = bounds("app_snackbar_host")
+        assertTrue("content=$content snackbar=$snackbar", content.bottom <= snackbar.top + 1f)
     }
 
     @Test

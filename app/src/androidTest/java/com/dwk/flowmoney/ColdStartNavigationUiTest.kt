@@ -2,6 +2,13 @@ package com.dwk.flowmoney
 
 import android.content.Context
 import android.view.KeyEvent
+import android.view.View
+import android.view.inputmethod.InputMethodManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.SoftwareKeyboardController
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsDisplayed
@@ -126,8 +133,10 @@ class ColdStartNavigationUiTest {
         composeRule.onNodeWithTag("overview_review_action").performClick()
         composeRule.onNodeWithTag("tab_overview").assertIsSelected()
         composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_pending-after-restore"))
         composeRule.onNodeWithTag("review_row_pending-after-restore").performClick()
         composeRule.onNodeWithTag("review_selected_count").assertExists()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
         composeRule.onNodeWithTag("review_accept_other_action").performClick()
         composeRule.onNodeWithText("Accept as Other?").assertIsDisplayed()
         pressBack()
@@ -195,13 +204,19 @@ class ColdStartNavigationUiTest {
     }
 
     @Test fun modalLayersTakeBackBeforeReviewNavigation() {
+        var keyboard: SoftwareKeyboardController? = null
+        lateinit var host: View
         val gateway = StartupSyncGateway()
         val pending = pendingTransaction()
         gateway.rows.value = listOf(pending)
         gateway.pending.value = listOf(pending)
         val viewModel = MainViewModel(gateway, SimpleFinSyncRepository(context), MutableStateFlow(emptyList()))
         viewModel.reportInitializationComplete()
-        composeRule.setContent { FlowMoneyTheme(dynamicColor = false) { FlowMoneyApp(viewModel, coldStartSimpleFinSync = { null }, transactionWidgetRefresh = {}) } }
+        composeRule.setContent {
+            keyboard = LocalSoftwareKeyboardController.current
+            host = LocalView.current
+            FlowMoneyTheme(dynamicColor = false) { FlowMoneyApp(viewModel, coldStartSimpleFinSync = { null }, transactionWidgetRefresh = {}) }
+        }
         composeRule.waitUntil(5_000) { runCatching { composeRule.onNodeWithTag("overview_review_action").assertExists() }.isSuccess }
         composeRule.onNodeWithTag("overview_review_action").performClick()
         composeRule.onNodeWithTag("top_bar_data").performClick()
@@ -219,12 +234,15 @@ class ColdStartNavigationUiTest {
         composeRule.onNodeWithTag("editor_sheet").assertExists()
         composeRule.onNodeWithTag("transaction_editor_form").performScrollToNode(hasTestTag("merchant_field"))
         composeRule.onNodeWithTag("merchant_field").performTextInput("Dirty")
-        pressBack()
-        if (runCatching { composeRule.onNodeWithText("Discard changes?").assertIsDisplayed() }.isFailure) {
-            // The IME may consume the first Back before the dirty editor sees it.
-            composeRule.onNodeWithTag("editor_sheet").assertExists()
-            pressBack()
+        val editorRoot = composeRule.onNodeWithTag("merchant_field").fetchSemanticsNode().root as View
+        composeRule.waitUntil(5_000) { ViewCompat.getRootWindowInsets(editorRoot)?.isVisible(WindowInsetsCompat.Type.ime()) == true }
+        composeRule.runOnUiThread {
+            checkNotNull(keyboard).hide()
+            (host.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(editorRoot.windowToken, 0)
         }
+        composeRule.waitUntil(5_000) { ViewCompat.getRootWindowInsets(editorRoot)?.isVisible(WindowInsetsCompat.Type.ime()) == false }
+        composeRule.onNodeWithTag("editor_sheet").assertExists()
+        pressBack()
         composeRule.waitUntil(5_000) { runCatching { composeRule.onNodeWithText("Discard changes?").assertIsDisplayed() }.isSuccess }
         composeRule.onNodeWithText("Discard changes?").assertIsDisplayed()
         pressBack()

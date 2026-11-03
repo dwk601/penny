@@ -1,6 +1,11 @@
 package com.dwk.flowmoney
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.DeviceConfigurationOverride
@@ -117,11 +122,89 @@ class TransactionRowUiTest {
         composeRule.onNodeWithText("9:45 AM", useUnmergedTree = true).assertIsDisplayed()
     }
 
+    @Test fun overviewRowsUsePostedDateAndAnnounceBothDatesWhenDifferent() {
+        val zone = ZoneId.systemDefault()
+        val posted = LocalDateTime.of(2026, 7, 10, 12, 0).atZone(zone).toInstant().toEpochMilli()
+        val purchase = LocalDateTime.of(2026, 7, 8, 8, 0).atZone(zone).toInstant().toEpochMilli()
+        val rows = listOf(
+            transaction("different", -100).copy(merchant = "Different", source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchase, recurringInterval = RecurrenceInterval.Monthly),
+            transaction("same", -200).copy(merchant = "Same", source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = posted - 60_000),
+            transaction("missing", -300).copy(merchant = "Missing", source = "simplefin", occurredAtEpochMillis = posted),
+            transaction("local", -400).copy(merchant = "Local", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchase),
+        )
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = rows, latestSpendingTransactions = rows), selectedTab = DashboardTab.Overview,
+                    onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+            }
+        }
+        rows.forEach { row ->
+            composeRule.onNodeWithTag("overview_list").performScrollToNode(hasTestTag("transaction_content_${row.id}"))
+            val date = if (row.id == "different") "Jul 8 · posted Jul 10" else "Jul 10"
+            val node = composeRule.onNode(hasText(date) and hasAnyAncestor(hasTestTag("transaction_content_${row.id}")), useUnmergedTree = true).assertIsDisplayed()
+            val layouts = mutableListOf<TextLayoutResult>()
+            node.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertFalse(layouts.single().hasVisualOverflow)
+            repeat(layouts.single().lineCount) { assertFalse(layouts.single().isLineEllipsized(it)) }
+        }
+        composeRule.onNodeWithTag("transaction_content_different").assertContentDescriptionEquals("Different, -\$1.00, Other, Purchase Jul 8, 2026, 8:00 AM, Posted Jul 10, 2026, Recurring Monthly")
+        composeRule.onNodeWithTag("transaction_content_local").assertContentDescriptionEquals("Local, -\$4.00, Other, Purchase Jul 8, 2026, 8:00 AM, Posted Jul 10, 2026")
+        composeRule.onNodeWithTag("transaction_repeat_different", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_repeat_same", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test fun recurringMetadataKeepsCompleteDatesAtCompactTwoX() {
+        val zone = ZoneId.systemDefault()
+        val posted = LocalDateTime.of(2026, 7, 10, 12, 0).atZone(zone).toInstant().toEpochMilli()
+        val purchase = LocalDateTime.of(2026, 7, 8, 8, 0).atZone(zone).toInstant().toEpochMilli()
+        val row = transaction("repeat-compact", -1200).copy(source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchase, recurringInterval = RecurrenceInterval.Monthly)
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        TransactionRow(transaction = row, amountWidth = rememberTransactionAmountWidth(listOf(row)), onClick = {}, showDate = true)
+                    }
+                }
+            }
+        }
+        composeRule.onNodeWithTag("transaction_repeat_repeat-compact", useUnmergedTree = true).assertExists()
+        val temporal = composeRule.onNodeWithText("Jul 8 · posted Jul 10", useUnmergedTree = true).assertIsDisplayed()
+        val layouts = mutableListOf<TextLayoutResult>()
+        temporal.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertFalse(layouts.single().hasVisualOverflow)
+        repeat(layouts.single().lineCount) { assertFalse(layouts.single().isLineEllipsized(it)) }
+        val description = composeRule.onNodeWithTag("transaction_content_repeat-compact").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.ContentDescription].single()
+        assertEquals(1, Regex("Recurring Monthly").findAll(description).count())
+    }
+
+    @Test fun transactionsHeaderCountsEffectiveNonTransfersIncludingOverrides() {
+        val rows = listOf(
+            transaction("expense", -100), transaction("income", 200),
+            transaction("zero-transfer", 0).copy(flowKind = FlowKind.TRANSFER),
+            transaction("override-normal", -300).copy(flowKind = FlowKind.TRANSFER, flowKindOverride = FlowKind.NORMAL),
+            transaction("override-transfer", -400).copy(flowKindOverride = FlowKind.TRANSFER),
+        )
+        var current by mutableStateOf(rows)
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = current), selectedTab = DashboardTab.Transactions,
+                    onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+            }
+        }
+        composeRule.onNodeWithText("Spent \$4.00 · 3 transactions · Transfers excluded").assertExists()
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_zero-transfer"))
+        composeRule.onNodeWithTag("transaction_content_zero-transfer").assertExists()
+        composeRule.runOnIdle { current = listOf(rows.first()) }
+        composeRule.onNodeWithText("Spent \$1.00 · 1 transaction").assertExists()
+        composeRule.runOnIdle { current = listOf(rows[2]) }
+        composeRule.onNodeWithText("Spent \$0.00 · 0 transactions · Transfers excluded").assertExists()
+    }
+
     @Test fun rowAbove280DpDoesNotStack() = assertAmountPlacement(screenWidth = 324, stacked = false)
 
     @Test fun longMerchantYieldsToAmount() = assertAmountPlacement(screenWidth = 300, stacked = false, merchantName = "A very long merchant name")
 
-    @Test fun largeFontStacksEvenWhenContentFits() = assertAmountPlacement(screenWidth = 360, fontScale = 1.3f, stacked = true)
+    @Test fun largeFontRemainsInlineWhenReservationFits() = assertAmountPlacement(screenWidth = 360, fontScale = 1.5f, stacked = false)
 
     @Test fun amountCandidatesAreBoundedForBothSigns() {
         val transactions = (1..10000).map { transaction("$it", if (it % 2 == 0) it else -it) } + transaction("min", Int.MIN_VALUE)
@@ -153,7 +236,12 @@ class TransactionRowUiTest {
 
     @Test fun wideAmountStacksAllRowsAcrossDaysAtOneX() {
         val rows = listOf(transaction("wide", Int.MIN_VALUE).copy(merchant = "Wide", occurredAtEpochMillis = 172_800_000L), transaction("short", -100).copy(merchant = "Short", occurredAtEpochMillis = 86_400_000L))
-        setTransactionScreen(rows, width = 300)
+        var reservedPx = 0
+        var density = 0f
+        setTransactionScreen(rows, width = 300, onReservation = { width, scale -> reservedPx = width; density = scale })
+        scrollToTransaction("wide")
+        val rowWidth = composeRule.onNodeWithTag("transaction_content_wide").fetchSemanticsNode().boundsInRoot.width - 28f * density
+        assertTrue("fixture must exceed inline capacity: $reservedPx + 104dp > $rowWidth", reservedPx + 104f * density > rowWidth)
         rows.forEach { row ->
             scrollToTransaction(row.id)
             val merchant = composeRule.onNodeWithText(row.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
@@ -162,15 +250,71 @@ class TransactionRowUiTest {
         }
     }
 
+    @Test fun mixedListAtOnePointFiveXStaysInlineWhenWidestAmountFits() {
+        val rows = listOf(transaction("mixed-wide", -1200).copy(merchant = "Longer merchant name"), transaction("mixed-short", -100).copy(merchant = "Short"))
+        setTransactionScreen(rows, width = 360, fontScale = 1.5f)
+        rows.forEach { row ->
+            scrollToTransaction(row.id)
+            val merchant = composeRule.onNodeWithText(row.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val amount = composeRule.onNodeWithText(MoneyFormatter.formatUsd(row.cents), useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            assertTrue("${row.id} should be inline", amount.top < merchant.bottom)
+        }
+    }
+
+    @Test fun scaledMerchantReservationStacksAllRowsTogetherAtTwoX() {
+        val rows = listOf(transaction("scaled-wide", -123_456).copy(merchant = "Wide merchant"), transaction("scaled-small", -100).copy(merchant = "Small merchant"))
+        var reservedPx = 0
+        var density = 0f
+        setTransactionScreen(rows, width = 300, fontScale = 2f, onReservation = { width, scale -> reservedPx = width; density = scale })
+        scrollToTransaction("scaled-wide")
+        val available = composeRule.onNodeWithTag("transaction_content_scaled-wide").fetchSemanticsNode().boundsInRoot.width - 28 * density
+        assertTrue("scaled reservation must exceed available width", reservedPx + 200 * density > available)
+        rows.forEach { row ->
+            scrollToTransaction(row.id)
+            val merchant = composeRule.onNodeWithText(row.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val amountNode = composeRule.onNodeWithText(MoneyFormatter.formatUsd(row.cents), useUnmergedTree = true)
+            val amount = amountNode.fetchSemanticsNode().boundsInRoot
+            val layouts = mutableListOf<TextLayoutResult>()
+            amountNode.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertTrue(amount.top >= merchant.bottom)
+            assertFalse(layouts.single().hasVisualOverflow)
+        }
+    }
+
+    @Test fun shortAmountsGiveMerchantMoreRoomWithinSameList() {
+        val rows = listOf(transaction("long-amount", -12_345_678).copy(merchant = "First"), transaction("short-amount", -100).copy(merchant = "Second"))
+        setTransactionScreen(rows)
+        scrollToTransaction("short-amount")
+        val first = composeRule.onNodeWithText("First", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val second = composeRule.onNodeWithText("Second", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertTrue("short amount should leave more merchant width", second.width > first.width)
+    }
+
+    @Test fun metadataDropsPlaceInsteadOfLeavingSeparatorAndEllipsis() {
+        val occurred = LocalDateTime.of(2026, 7, 10, 9, 45).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val row = transaction("no-dangling", -100).copy(category = "Subscriptions", accountName = "Checking", occurredAtEpochMillis = occurred)
+        setTransactionScreen(row, width = 300, fontScale = 2f)
+        scrollToTransaction(row.id)
+        composeRule.onNodeWithText("Subscriptions", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("Subscriptions · Checking", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithText("9:45 AM", useUnmergedTree = true).assertExists()
+    }
+
     @Test fun metadataKeepsTimeCompleteAndEllipsizesPlaceAtOneX() = assertMetadata(1f)
     @Test fun metadataKeepsTimeCompleteAndEllipsizesPlaceAtTwoX() = assertMetadata(2f)
+    @Test fun recurringMetadataKeepsTimeCompleteAndFlexibleWidthAtOneX() = assertMetadata(1f, recurring = true)
+    @Test fun recurringMetadataKeepsTimeCompleteAndFlexibleWidthAtTwoX() = assertMetadata(2f, recurring = true)
 
-    private fun assertMetadata(fontScale: Float) {
+    private fun assertMetadata(fontScale: Float, recurring: Boolean = false) {
         val posted = LocalDateTime.of(2026, 7, 11, 2, 30).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val purchased = LocalDateTime.of(2026, 7, 10, 14, 15).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        val row = transaction("metadata", -100).copy(source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchased, locationCity = "An exceptionally long municipality name that must yield", locationState = "NY")
+        val row = transaction("metadata", -100).copy(source = "simplefin", occurredAtEpochMillis = posted, transactedAtEpochMillis = purchased, locationCity = "An exceptionally long municipality name that must yield", locationState = "NY", recurringInterval = if (recurring) RecurrenceInterval.Monthly else null)
         setTransactionScreen(row, width = 300, fontScale = fontScale)
         scrollToTransaction(row.id)
+        if (recurring) {
+            val icon = composeRule.onNodeWithTag("transaction_repeat_metadata", useUnmergedTree = true).fetchSemanticsNode()
+            assertEquals(14f * fontScale, icon.boundsInRoot.width / icon.layoutInfo.density.density, 1f)
+        }
         val flexible = composeRule.onNodeWithText("Other · An exceptionally long municipality name that must yield, NY", useUnmergedTree = true)
         val temporal = composeRule.onNodeWithText("Jul 10, 2:15 PM", useUnmergedTree = true)
         val flexLayout = mutableListOf<TextLayoutResult>()
@@ -240,6 +384,7 @@ class TransactionRowUiTest {
         transactions: List<Transaction>,
         width: Int = 360,
         fontScale: Float = 1f,
+        onReservation: (Int, Float) -> Unit = { _, _ -> },
     ) {
         composeRule.setContent {
             DeviceConfigurationOverride(
@@ -247,6 +392,9 @@ class TransactionRowUiTest {
             ) {
                 DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(fontScale)) {
                     FlowMoneyTheme(dynamicColor = false) {
+                        val reservation = rememberTransactionAmountWidth(transactions)
+                        val density = LocalDensity.current.density
+                        SideEffect { onReservation(reservation, density) }
                         FlowMoneyScreen(
                             uiState = MainUiState(isLoading = false, sortedTransactions = transactions),
                             selectedTab = DashboardTab.Transactions,

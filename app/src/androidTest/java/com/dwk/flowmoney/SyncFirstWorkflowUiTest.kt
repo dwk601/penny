@@ -1,6 +1,16 @@
 package com.dwk.flowmoney
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,8 +29,10 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyDescendant
@@ -35,6 +47,10 @@ import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -45,6 +61,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import java.time.Instant
+import java.time.Clock
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -132,14 +149,151 @@ class SyncFirstWorkflowUiTest {
             val merchant = composeRule.onNodeWithText(transaction.merchant, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
             val amount = composeRule.onNodeWithText("-\$5.00", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
             val metadata = composeRule.onNodeWithText("Other · Checking", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
-            return listOf(merchant.left - row.left, merchant.top - row.top, amount.left - row.left, amount.top - row.top, metadata.left - row.left, metadata.width)
+            return listOf(merchant.left - row.left, merchant.top - row.top, merchant.bottom - row.top, amount.left - row.left, amount.top - row.top, metadata.left - row.left, metadata.width)
         }
         val before = geometry()
         composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_select_action"))
         composeRule.onNodeWithTag("review_select_action").performClick()
-        assertEquals(before, geometry())
+        val after = geometry()
+        val density = composeRule.onNodeWithTag("review_row_stable").fetchSemanticsNode().layoutInfo.density.density
+        assertTrue("normal mode must not have checkbox gutter", kotlin.math.abs(after[0] - before[0] - 56f * density) < 2f)
+        assertEquals("metadata gutter", 56f * density, after[5] - before[5], 2f)
+        assertEquals("merchant top", before[1], after[1], 1f)
+        assertEquals("amount top", before[4], after[4], 1f)
+        assertEquals(before[4] >= before[2], after[4] >= after[2])
+        assertEquals(before[3], after[3], 1f)
+        assertTrue(after[6] < before[6])
         composeRule.onNodeWithTag("review_row_stable").performClick().assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
         assertEquals(0, edits)
+    }
+
+    @Test fun reviewBulkControlsRemainStickyAndDisabledUntilSelected() {
+        val rows = (0..12).map { syncedTransaction("sticky-$it", LocalDate.of(2026, 7, 10).minusDays(it.toLong()), "Merchant $it") }
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                ReviewPage(rows, onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false, modifier = Modifier.fillMaxSize())
+            }
+        }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_select_action").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_done_selecting").assertContentDescriptionEquals("Done selecting")
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_accept_other_action").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_sticky-12"))
+        composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed()
+        composeRule.onNodeWithTag("review_row_sticky-12").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsDisplayed().assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("review_bulk_category_food").assertIsDisplayed().assertIsEnabled()
+    }
+
+    @Test fun stickyBulkControlsLeaveReviewRowsSelectableAt300DpTwoX() {
+        val rows = (0..5).map { syncedTransaction("compact-$it", LocalDate.of(2026, 7, 10).minusDays(it.toLong()), "Merchant $it") }
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(300.dp, 533.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        AdaptiveFlowMoneyShell(selectedTab = DashboardTab.Review, snackbarHostState = remember { SnackbarHostState() }, onTabSelected = {}, onAddTransaction = {}, onData = {}, modifier = Modifier.fillMaxSize()) { padding ->
+                            ReviewPage(rows, onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = false, modifier = Modifier.fillMaxSize().padding(padding))
+                        }
+                    }
+                }
+            }
+        }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        val layouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithTag("review_selected_count", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertFalse(layouts.single().hasVisualOverflow)
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_compact-5"))
+        val bar = composeRule.onNodeWithTag("review_bulk_controls").assertIsDisplayed().fetchSemanticsNode()
+        val density = bar.layoutInfo.density.density
+        assertTrue("bar height ${bar.boundsInRoot.height / density}", bar.boundsInRoot.height / density in 55.5f..64f)
+        val card = composeRule.onNodeWithTag("review_row_compact-5").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val list = composeRule.onNodeWithTag("review_list").fetchSemanticsNode().boundsInRoot
+        assertTrue("card=$card bar=${bar.boundsInRoot} list=$list", card.top >= bar.boundsInRoot.bottom - 1 && card.bottom <= list.bottom + 1)
+        listOf("review_done_selecting", "review_bulk_actions").forEach { tag ->
+            val bounds = composeRule.onNodeWithTag(tag).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            assertTrue("$tag $bounds", bounds.width / density >= 47.5f && bounds.height / density >= 47.5f)
+        }
+        composeRule.onNodeWithTag("review_quick_category_choices").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_row_compact-5").performClick()
+        composeRule.onNodeWithTag("review_selected_count").assertTextEquals("1 selected")
+        for (tag in listOf("food", "groceries", "restaurants", "coffee", "more")) {
+            composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_quick_category_$tag"))
+            val target = composeRule.onNodeWithTag("review_quick_category_$tag").fetchSemanticsNode().boundsInRoot
+            assertTrue("quick target $tag $target", target.width / density >= 47.5f && target.height / density >= 47.5f)
+        }
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_row_compact-5"))
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
+        composeRule.onNodeWithTag("review_accept_other_action").assertIsDisplayed()
+        composeRule.onNodeWithTag("review_bulk_category_food").assertIsDisplayed()
+    }
+
+    @Test fun reviewQuickActionsAndCloseClearSelectionAndDismissUnavailableMenu() {
+        val row = syncedTransaction("quick", LocalDate.of(2026, 7, 10))
+        var busy by mutableStateOf(false)
+        var result: Pair<List<String>, String>? = null
+        composeRule.setContent {
+            FlowMoneyTheme(dynamicColor = false) {
+                ReviewPage(listOf(row), onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { ids, category -> result = ids to category }, onBulkAcceptOther = {}, operationBusy = busy)
+            }
+        }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_row_quick").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
+        composeRule.onNodeWithTag("review_accept_other_action").assertIsDisplayed()
+        composeRule.runOnIdle { busy = true }
+        composeRule.onNodeWithTag("review_accept_other_action").assertDoesNotExist()
+        composeRule.onNodeWithTag("review_bulk_actions").assertIsNotEnabled()
+        composeRule.onNodeWithTag("review_done_selecting").assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("review_bulk_controls").assertDoesNotExist()
+        composeRule.runOnIdle { busy = false }
+        composeRule.onNodeWithTag("review_select_action").performClick()
+        composeRule.onNodeWithTag("review_selected_count").assertTextEquals("0 selected")
+        composeRule.onNodeWithTag("review_row_quick").performClick()
+        composeRule.onNodeWithTag("review_list").performScrollToNode(hasTestTag("review_quick_category_food"))
+        composeRule.onNodeWithTag("review_quick_category_food").assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertEquals(listOf("quick") to "Food", result) }
+    }
+
+    @Test fun reviewActionChipsKeepShapeAndDisabledColorsInBothThemes() {
+        val row = syncedTransaction("chip", LocalDate.of(2026, 7, 10))
+        var dark by mutableStateOf(false)
+        var busy by mutableStateOf(false)
+        var onSurface = Color.Unspecified
+        composeRule.setContent {
+            FlowMoneyTheme(darkTheme = dark, dynamicColor = false) {
+                val current = MaterialTheme.colorScheme.onSurface
+                SideEffect { onSurface = current }
+                Surface { ReviewPage(listOf(row), onEdit = {}, onCategorize = { _, _, _ -> }, onBulkCategorize = { _, _ -> }, onBulkAcceptOther = {}, operationBusy = busy) }
+            }
+        }
+        fun pixels(tag: String): Pair<Color, Color> {
+            val node = composeRule.onNodeWithTag(tag).fetchSemanticsNode()
+            val image = composeRule.onNodeWithTag(tag).captureToImage().toPixelMap()
+            val inset = (4 * node.layoutInfo.density.density).toInt().coerceAtMost(image.height - 1)
+            return image[0, 0] to image[image.width / 2, inset]
+        }
+        fun check(tag: String) {
+            val enabled = pixels(tag)
+            assertTrue("$tag enabled must contrast with background", enabled.first != enabled.second)
+            composeRule.runOnIdle { busy = true }
+            val disabled = pixels(tag)
+            val expected = onSurface.copy(alpha = 0.12f).compositeOver(disabled.first)
+            val actual = disabled.second
+            assertTrue("$tag disabled $actual expected $expected", kotlin.math.abs(actual.red - expected.red) < .05f && kotlin.math.abs(actual.green - expected.green) < .05f && kotlin.math.abs(actual.blue - expected.blue) < .05f)
+            assertTrue("$tag enabled and disabled differ", enabled.second != disabled.second)
+            assertEquals("$tag corner shape", enabled.first, disabled.first)
+            composeRule.runOnIdle { busy = false }
+        }
+        for (isDark in listOf(false, true)) {
+            composeRule.runOnIdle { dark = isDark }
+            check("review_category_chip_food")
+            composeRule.onNodeWithTag("review_select_action").performClick()
+            composeRule.onNodeWithTag("review_row_chip").performClick()
+            check("review_quick_category_food")
+            composeRule.onNodeWithTag("review_done_selecting").performClick()
+        }
     }
 
     @Test
@@ -197,6 +351,7 @@ class SyncFirstWorkflowUiTest {
         assertEquals(0, edits)
 
         composeRule.onNodeWithTag("review_row_second").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
         composeRule.onNodeWithTag("review_bulk_category_food").performClick()
         composeRule.runOnIdle {
             assertEquals(listOf("first", "second").toSet(), bulk?.first?.toSet())
@@ -225,9 +380,13 @@ class SyncFirstWorkflowUiTest {
 
         composeRule.onNodeWithTag("review_select_action").performClick()
         composeRule.onNodeWithTag("review_row_accept").performClick()
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
         composeRule.onNodeWithTag("review_accept_other_action").performClick()
         composeRule.onNodeWithText("Accept as Other?").assertIsDisplayed()
+        composeRule.onNodeWithText("Cancel").performClick()
         composeRule.runOnIdle { assertEquals(null, acceptedIds) }
+        composeRule.onNodeWithTag("review_bulk_actions").performClick()
+        composeRule.onNodeWithTag("review_accept_other_action").performClick()
         composeRule.onNodeWithTag("review_confirm_accept_other").performClick()
         composeRule.runOnIdle { assertEquals(listOf("accept"), acceptedIds) }
     }
@@ -338,6 +497,13 @@ class SyncFirstWorkflowUiTest {
         composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Brooklyn")
         val expected = "Last 7 days · Other · Synced · Checking (Bank A) · Needs review · Brooklyn · US · “Brooklyn”"
         scroll("transaction_filter_toggle")
+        val searchBounds = composeRule.onNodeWithTag("transaction_where_filter").fetchSemanticsNode().boundsInRoot
+        val toggleBounds = composeRule.onNodeWithTag("transaction_filter_toggle").fetchSemanticsNode().boundsInRoot
+        val viewBounds = composeRule.onNodeWithTag("transaction_view_mode_group").fetchSemanticsNode().boundsInRoot
+        assertTrue(searchBounds.bottom <= toggleBounds.top && viewBounds.top == toggleBounds.top)
+        composeRule.onNodeWithText("Filters · 6", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals("Filters, 6 active")
+        composeRule.onAllNodesWithTag("transaction_filter_clear_compact").assertCountEquals(1)
         val summary = composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected)
         val layouts = mutableListOf<TextLayoutResult>()
         summary.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
@@ -347,12 +513,131 @@ class SyncFirstWorkflowUiTest {
         scroll("transaction_search_clear")
         composeRule.onNodeWithTag("transaction_search_clear").assertContentDescriptionEquals("Clear search").performClick()
         scroll("transaction_filter_toggle")
+        composeRule.onNodeWithText("Filters · 6", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals(expected.substringBeforeLast(" · “Brooklyn”"))
+        scroll("transaction_where_filter")
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Brooklyn")
         scroll("transaction_filter_clear_compact")
+        val summaryRow = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
+        val clearBounds = composeRule.onNodeWithTag("transaction_filter_clear_compact").fetchSemanticsNode().boundsInRoot
+        val clearText = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("Clear all", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(clearText) }
+        assertEquals(1, clearText.single().lineCount)
+        assertFalse("width=${clearText.single().didOverflowWidth} height=${clearText.single().didOverflowHeight} exceeded=${clearText.single().multiParagraph.didExceedMaxLines} end=${clearText.single().getLineEnd(0)} bounds=$clearBounds row=$summaryRow", clearText.single().hasVisualOverflow)
+        assertTrue("clear=$clearBounds summary row=$summaryRow", kotlin.math.abs(clearBounds.right - summaryRow.right) <= 2f)
         composeRule.onNodeWithTag("transaction_filter_clear_compact").assertContentDescriptionEquals("Clear all filters").performClick()
         scroll("transaction_filter_toggle")
-        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertTextEquals("All time")
+        composeRule.onNodeWithTag("transaction_filter_summary", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
+        assertEquals("", composeRule.onNodeWithTag("transaction_where_filter").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals("Filters").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
+        composeRule.onNodeWithText("Filters", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag("transaction_time_filter_group").assertDoesNotExist()
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_content_brooklyn"))
+        composeRule.onNodeWithTag("transaction_content_brooklyn").assertIsDisplayed()
+    }
+
+    @Test fun filterControlsFitAtBothWidthsAndEveryFontScale() {
+        var width by mutableStateOf(300)
+        var scale by mutableStateOf(1f)
+        val row = syncedTransaction("filter-size", LocalDate.of(2026, 7, 10))
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(width.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(scale)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(row)), selectedTab = DashboardTab.Transactions,
+                            onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                    }
+                }
+            }
+        }
+        fun verify(label: String, description: String) {
+            for (screenWidth in listOf(300, 360)) for (fontScale in listOf(1f, 1.5f, 2f)) {
+                composeRule.runOnIdle { width = screenWidth; scale = fontScale }
+                composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_filter_controls"))
+                val toggle = composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals(description).fetchSemanticsNode()
+                val bounds = toggle.boundsInRoot
+                val density = toggle.layoutInfo.density.density
+                listOf("transaction_view_list", "transaction_view_map", "transaction_filter_toggle").forEach { tag ->
+                    val target = composeRule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+                    assertTrue("$screenWidth/$fontScale $tag $target", target.width / density >= 47.5f && target.height / density >= 47.5f)
+                }
+                val sizes = listOf("List", "Map").map { mode ->
+                    val result = mutableListOf<TextLayoutResult>()
+                    composeRule.onNodeWithText(mode, useUnmergedTree = true).assertIsDisplayed().performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(result) }
+                    assertFalse("$screenWidth/$fontScale $mode overflow", result.single().hasVisualOverflow)
+                    result.single().layoutInput.style.fontSize
+                }
+                assertEquals("List and Map share a text size", sizes[0], sizes[1])
+                val labelNode = composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
+                val labelBounds = labelNode.fetchSemanticsNode().boundsInRoot
+                val layouts = mutableListOf<TextLayoutResult>()
+                labelNode.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+                assertFalse("$screenWidth/$fontScale $label", layouts.single().hasVisualOverflow)
+                assertFalse(layouts.single().isLineEllipsized(0))
+                assertTrue(layouts.single().layoutInput.style.fontSize.value >= 10f)
+                val caret = composeRule.onNodeWithTag("transaction_filter_caret", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+                assertTrue("toggle=$bounds text=$labelBounds caret=$caret", labelBounds.left >= bounds.left - 1 && labelBounds.right <= caret.left + 1 && caret.right <= bounds.right + 1 && caret.top >= bounds.top && caret.bottom <= bounds.bottom)
+            }
+        }
+        verify("Filters", "Filters")
+        composeRule.onNodeWithTag("transaction_filter_toggle").performClick()
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_category_filter_other"))
+        composeRule.onNodeWithTag("transaction_category_filter_other").performClick()
+        verify("Filters · 1", "Filters, 1 active")
+    }
+
+    @Test fun acceptedOtherMessageUsesSingularAndPlural() {
+        assertEquals("Accepted 1 transaction as Other", reviewAcceptedMessage(1))
+        assertEquals("Accepted 2 transactions as Other", reviewAcceptedMessage(2))
+    }
+
+    @Test fun clearAllMovesIntactToNextLineAtLargeFont() {
+        val row = syncedTransaction("amazon-wrap", LocalDate.of(2026, 7, 10), "Amazon")
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(360.dp, 800.dp))) {
+                DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.FontScale(2f)) {
+                    FlowMoneyTheme(dynamicColor = false) {
+                        FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(row)), selectedTab = DashboardTab.Transactions,
+                            onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                    }
+                }
+            }
+        }
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("Amazon")
+        composeRule.onNodeWithTag("transactions_list").performScrollToNode(hasTestTag("transaction_filter_clear_compact"))
+        val summary = composeRule.onNodeWithTag("transaction_filter_summary").fetchSemanticsNode().boundsInRoot
+        val clear = composeRule.onNodeWithTag("transaction_filter_clear_compact").fetchSemanticsNode().boundsInRoot
+        val rowBounds = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
+        val text = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithText("Clear all", useUnmergedTree = true).performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(text) }
+        assertEquals(1, text.single().lineCount)
+        assertFalse("width=${text.single().didOverflowWidth} paragraph=${text.single().multiParagraph.width} layout=${text.single().size} right=${text.single().getLineRight(0)} height=${text.single().didOverflowHeight} exceeded=${text.single().multiParagraph.didExceedMaxLines} end=${text.single().getLineEnd(0)} bounds=$clear summary=$summary row=$rowBounds", text.single().hasVisualOverflow)
+        assertTrue("summary=$summary clear=$clear", clear.top >= summary.bottom - 1)
+        assertTrue(kotlin.math.abs(clear.right - rowBounds.right) <= 2f)
+    }
+
+    @Test fun searchOnlySummarySharesLineAndClearAlignsAtEnd() {
+        val row = syncedTransaction("summary-alignment", LocalDate.of(2026, 7, 10), "A")
+        composeRule.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Companion.ForcedSize(DpSize(360.dp, 800.dp))) {
+                FlowMoneyTheme(dynamicColor = false) {
+                    FlowMoneyScreen(uiState = MainUiState(isLoading = false, sortedTransactions = listOf(row)), selectedTab = DashboardTab.Transactions,
+                        onChartRangeModeSelected = {}, onSelectedMonthChange = {}, onEdit = {}, onViewAllTransactions = {}, onDelete = {}, onAddTransaction = {}, onData = {})
+                }
+            }
+        }
+        composeRule.onNodeWithTag("transaction_where_filter").performTextInput("A")
+        composeRule.onNodeWithTag("transaction_filter_toggle").assertContentDescriptionEquals("Filters")
+        composeRule.onNodeWithTag("transaction_filter_summary").assertTextEquals("All time · “A”")
+        val summary = composeRule.onNodeWithTag("transaction_filter_summary").fetchSemanticsNode().boundsInRoot
+        val rowBounds = composeRule.onNodeWithTag("transaction_filter_summary_row").fetchSemanticsNode().boundsInRoot
+        val clear = composeRule.onNodeWithTag("transaction_filter_clear_compact").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        assertTrue("summary=$summary clear=$clear", kotlin.math.abs(summary.center.y - clear.center.y) <= 2f)
+        assertTrue("row=$rowBounds clear=$clear", kotlin.math.abs(rowBounds.right - clear.right) <= 2f)
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").performClick()
+        composeRule.onNodeWithTag("transaction_filter_clear_compact").assertDoesNotExist()
+        assertEquals("", composeRule.onNodeWithTag("transaction_where_filter").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
     }
 
     @Test fun disconnectedAndPendingLabelsAndRoutesRemainDistinctAtAllScales() {
@@ -428,7 +713,101 @@ class SyncFirstWorkflowUiTest {
         composeRule.runOnIdle {
             assertEquals(2, dataClicks)
             assertEquals(1, syncClicks)
+            simpleFin = SimpleFinUiState(profile = SimpleFinProfileEntity(automaticSyncsPerDay = 4, lastSyncAttemptAtEpochMillis = now))
         }
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag("sync_health_action").performClick()
+        composeRule.runOnIdle { assertEquals(3, dataClicks); assertEquals(1, syncClicks) }
+    }
+
+    @Test
+    fun syncHealthReportsCompletionInterruptionAndFailuresTruthfully() {
+        val now = 1_800_000_000_000L
+        val base = SimpleFinProfileEntity(automaticSyncsPerDay = 4)
+        fun state(profile: SimpleFinProfileEntity) = syncHealthUiState(SimpleFinUiState(profile = profile), null, now)
+        val never = state(base)
+        assertEquals("Sync now", never.label)
+        assertEquals("Not synced yet; sync now", never.stateDescription)
+        assertTrue(never.manualSync)
+        val completed = base.copy(lastSyncAttemptAtEpochMillis = now - 1_000, lastSuccessfulSyncAtEpochMillis = now - 1_000)
+        assertEquals("Synced", state(completed).label)
+        assertTrue(state(completed).stateDescription.startsWith("Sync completed; cooling down"))
+        assertEquals("Synced", state(completed.copy(lastSuccessfulSyncAtEpochMillis = now)).label)
+        assertEquals("Synced", state(completed.copy(lastSyncAttemptAtEpochMillis = null)).label)
+        val due = completed.copy(lastSyncAttemptAtEpochMillis = now - automaticSyncIntervalMillis(4), lastSuccessfulSyncAtEpochMillis = now - automaticSyncIntervalMillis(4))
+        assertEquals("Sync now", state(due).label)
+        assertTrue(state(due).manualSync)
+        val interrupted = completed.copy(lastSyncAttemptAtEpochMillis = now, lastSuccessfulSyncAtEpochMillis = now - 1_000)
+        assertEquals("Sync now", state(interrupted).label)
+        assertTrue(state(interrupted).stateDescription.startsWith("Last sync didn’t finish; retry after"))
+        assertFalse(state(interrupted).manualSync)
+        val retry = interrupted.copy(lastSyncAttemptAtEpochMillis = now - SIMPLEFIN_RETRY_INTERVAL_MILLIS, lastSuccessfulSyncAtEpochMillis = now - SIMPLEFIN_RETRY_INTERVAL_MILLIS - 1)
+        assertEquals("Last sync didn’t finish; sync now", state(retry).stateDescription)
+        assertTrue(state(retry).manualSync)
+        assertEquals("Error", state(interrupted.copy(lastError = "failed")).label)
+        assertFalse(state(interrupted.copy(lastError = "failed")).manualSync)
+        assertTrue(state(retry.copy(lastError = "failed")).manualSync)
+        assertEquals("Synced", state(completed.copy(lastError = "stale")).label)
+        assertEquals("Reconnect", state(base.copy(isPaused = true)).label)
+        assertEquals("Pending", syncHealthUiState(SimpleFinUiState(isConnectionPending = true), null, now).label)
+        assertEquals("Disconnected", syncHealthUiState(SimpleFinUiState(), null, now).label)
+        assertEquals("Syncing", syncHealthUiState(SimpleFinUiState(), DataOperation.Sync, now).label)
+    }
+
+    @Test
+    fun syncHealthRefreshesAtBoundaryAndOnResumeWithoutPolling() {
+        class MutableClock(var time: Long) : Clock() {
+            var reads = 0
+            override fun getZone(): ZoneId = ZoneId.of("UTC")
+            override fun withZone(zone: ZoneId): Clock = this
+            override fun instant(): Instant = Instant.ofEpochMilli(millis())
+            override fun millis(): Long { reads++; return time }
+        }
+        val clock = MutableClock(1_800_000_000_000L)
+        val interval = automaticSyncIntervalMillis(4)
+        var profile by mutableStateOf(SimpleFinProfileEntity(automaticSyncsPerDay = 4, lastSuccessfulSyncAtEpochMillis = clock.time - interval + 10_000))
+        val owner = object : LifecycleOwner { override val lifecycle = LifecycleRegistry(this) }
+        composeRule.runOnUiThread { owner.lifecycle.currentState = Lifecycle.State.RESUMED }
+        composeRule.mainClock.autoAdvance = false
+        composeRule.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                val now = rememberSyncHealthNow(clock, profile)
+                FlowMoneyTopAppBar(onData = {}, onAddTransaction = {}, simpleFin = SimpleFinUiState(profile = profile), syncHealthNowEpochMillis = now)
+            }
+        }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { clock.time += 5_000 }
+        composeRule.mainClock.advanceTimeBy(10_000)
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { clock.time += 5_000 }
+        composeRule.mainClock.advanceTimeBy(5_000)
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { profile = profile.copy(lastSuccessfulSyncAtEpochMillis = clock.time - interval + 20_000) }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { clock.time += 20_000 }
+        composeRule.mainClock.advanceTimeBy(20_000)
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertExists()
+        composeRule.runOnIdle { profile = profile.copy(lastSuccessfulSyncAtEpochMillis = clock.time - interval + 20_000) }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Synced", useUnmergedTree = true).assertExists()
+        composeRule.runOnUiThread { owner.lifecycle.currentState = Lifecycle.State.STARTED; clock.time += 20_000; owner.lifecycle.currentState = Lifecycle.State.RESUMED }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.onNodeWithText("Sync now", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Sync due; sync now"))
+        for (p in listOf(profile.copy(lastSuccessfulSyncAtEpochMillis = Long.MAX_VALUE - 1), profile.copy(lastSuccessfulSyncAtEpochMillis = clock.time - interval), profile.copy(lastSuccessfulSyncAtEpochMillis = null))) {
+            composeRule.runOnIdle { profile = p }
+            composeRule.mainClock.advanceTimeByFrame()
+            val reads = clock.reads
+            composeRule.mainClock.advanceTimeBy(30_000)
+            composeRule.mainClock.advanceTimeByFrame()
+            assertEquals(reads, clock.reads)
+        }
+        composeRule.mainClock.autoAdvance = true
     }
 
     @Test
@@ -723,7 +1102,7 @@ class SyncFirstWorkflowUiTest {
         composeRule.waitUntil(5_000) {
             runCatching { composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2") }.isSuccess
         }
-        composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed()
+        composeRule.onNodeWithTag("overview_review_action").assertIsDisplayed().assertContentDescriptionEquals("Review 2 synced transactions")
         composeRule.onNodeWithTag("sync_health_action").assertIsDisplayed()
         composeRule.onNodeWithText("Last successful sync", substring = true).assertDoesNotExist()
 
@@ -745,10 +1124,14 @@ class SyncFirstWorkflowUiTest {
         assertNoOverviewSyncActions()
         runBlocking { dao.upsertProfile(healthy.copy(automaticSyncsPerDay = 1, lastSuccessfulSyncAtEpochMillis = 1, lastSyncAttemptAtEpochMillis = 1)) }
         composeRule.waitUntil(5_000) {
-            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Connected and idle; automatic sync is once daily; open Data to change cadence")) }.isSuccess
+            runCatching { composeRule.onNodeWithTag("sync_health_action").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Sync due; automatic sync is once daily; open Data to change cadence")) }.isSuccess
         }
         assertNoOverviewSyncActions()
         composeRule.onNodeWithTag("overview_pending_review_count", useUnmergedTree = true).assertTextEquals("Review 2")
+        composeRule.runOnIdle { gateway.rows.value = listOf(pending.first()); gateway.pending.value = listOf(pending.first()) }
+        composeRule.waitUntil(5_000) {
+            runCatching { composeRule.onNodeWithTag("overview_review_action").assertContentDescriptionEquals("Review 1 synced transaction") }.isSuccess
+        }
         composeRule.runOnIdle {
             gateway.rows.value = gateway.rows.value.map { it.copy(reviewedAtEpochMillis = 1L) }
             gateway.pending.value = emptyList()
